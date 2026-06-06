@@ -1,0 +1,16 @@
+# RailWatch 12306 dependencies
+
+# Desktop product UI
+PySide6>=6.6.0
+
+# Core automation
+selenium>=4.0.0
+
+# Browser profile and anti-detection support
+undetected-chromedriver>=3.5.0
+
+# Voice notification (optional, cross-platform)
+pyttsx3>=2.90
+
+# Windows voice API (optional, Windows only)
+pywin32>=300;sys_platform=='win32'

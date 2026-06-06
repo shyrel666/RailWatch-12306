@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement for RailWatch 12306.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or user need should this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the change you want.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - UI
+        - Query analysis
+        - Monitor logic
+        - Packaging
+        - Documentation
+        - Other
+    validations:
+      required: true

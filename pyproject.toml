@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "railwatch-12306"
+version = "0.1.0"
+description = "PySide6 desktop operations console for personal 12306 trip monitoring."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+  { name = "RailWatch 12306 contributors" },
+]
+keywords = ["12306", "railway", "monitor", "pyside6", "selenium"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "Environment :: Win32 (MS Windows)",
+  "Environment :: X11 Applications :: Qt",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Desktop Environment",
+]
+dependencies = [
+  "PySide6>=6.6.0",
+  "selenium>=4.0.0",
+  "undetected-chromedriver>=3.5.0",
+  "pyttsx3>=2.90",
+  "pywin32>=300; sys_platform == 'win32'",
+]
+
+[project.urls]
+Homepage = "https://github.com/railwatch/railwatch-12306"
+Issues = "https://github.com/railwatch/railwatch-12306/issues"
+
+[project.scripts]
+railwatch-12306 = "railwatch_ui:main"
+
+[tool.setuptools]
+py-modules = [
+  "anti_detect",
+  "gui_12306_0",
+  "railwatch_state",
+  "railwatch_ui",
+  "t12306_gui_0",
+]
