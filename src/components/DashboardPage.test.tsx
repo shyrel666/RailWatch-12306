@@ -91,4 +91,32 @@ describe("DashboardPage", () => {
     expect(hitStep?.textContent).toContain("完成");
     expect(hitStep?.getAttribute("aria-current")).toBeNull();
   });
+
+  test("keeps manual confirmation as the only current step when a hit arrives before readiness flags", () => {
+    railwatchStore.setState({
+      hits: [
+        {
+          train_code: "G102",
+          seat_type: "一等座",
+          status: "有票",
+          source: "query",
+          detail: "G102 一等座有票",
+          label: "G102 一等座有票",
+        },
+      ],
+    });
+
+    render(<DashboardPage />);
+
+    const workflow = screen.getByRole("list", { name: "监控流程" });
+    const currentSteps = workflow.querySelectorAll('[aria-current="step"]');
+    const environmentStep = within(workflow)
+      .getAllByRole("listitem")
+      .find((step) => step.textContent?.includes("环境检查"));
+
+    expect(currentSteps).toHaveLength(1);
+    expect(currentSteps[0].textContent).toContain("人工确认");
+    expect(environmentStep).toBeTruthy();
+    expect(environmentStep?.getAttribute("aria-current")).toBeNull();
+  });
 });

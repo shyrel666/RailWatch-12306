@@ -17,7 +17,7 @@ const riskLabel: Record<string, string> = {
 
 function getWorkflowSteps(status: RailWatchStatus, hasHits: boolean): WorkflowStep[] {
   const hitDone = hasHits;
-  return [
+  const steps: WorkflowStep[] = [
     { label: "环境检查", description: status.environment_ready ? "ChromeDriver 可用" : "先确认本机依赖", icon: Database, state: status.environment_ready ? "done" : "current" },
     { label: "人工登录", description: status.login_ready ? "登录页已打开" : "打开 12306 登录页", icon: LogIn, state: !status.environment_ready ? "pending" : status.login_ready ? "done" : "current" },
     { label: "查询分析", description: status.query_ready ? "页面结果已解析" : "保存行程后分析", icon: Search, state: !status.login_ready ? "pending" : status.query_ready ? "done" : "current" },
@@ -25,6 +25,21 @@ function getWorkflowSteps(status: RailWatchStatus, hasHits: boolean): WorkflowSt
     { label: "命中提醒", description: hitDone ? "已有目标票命中" : "等待目标席别", icon: Bell, state: hitDone ? "done" : "pending" },
     { label: "人工确认", description: "订单确认和支付仍人工完成", icon: ShieldAlert, state: hitDone ? "current" : "pending" },
   ];
+  let currentIndex = -1;
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    if (steps[index].state === "current") {
+      currentIndex = index;
+      break;
+    }
+  }
+
+  return steps.map((step, index) => {
+    if (step.state !== "current" || index === currentIndex) {
+      return step;
+    }
+
+    return { ...step, state: "done" };
+  });
 }
 
 function getNextAction(status: RailWatchStatus): { description: string; label: string; page: RailWatchPage } {
