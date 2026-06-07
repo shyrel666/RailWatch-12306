@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { CircleDot, Gauge } from "lucide-react";
-import { describe, expect, test } from "vitest";
-import { EmptyState, MetricCard, StatusBadge, WorkflowStepper } from "./DisplayPrimitives";
+import { describe, expect, test, vi } from "vitest";
+import { EmptyState, MetricCard, RiskToggle, StatusBadge, WorkflowStepper } from "./DisplayPrimitives";
 
 describe("DisplayPrimitives", () => {
   test("renders badges, metric cards, empty states, and workflow steps", () => {
@@ -20,5 +20,16 @@ describe("DisplayPrimitives", () => {
     const workflow = screen.getByRole("list", { name: "监控流程" });
     expect(within(workflow).getByText("环境检查")).toBeTruthy();
     expect(screen.getByText("暂无命中")).toBeTruthy();
+  });
+
+  test("renders risk toggles with switch interaction", () => {
+    const onChange = vi.fn();
+
+    render(<RiskToggle checked={false} title="自动提交关闭" description="发现车票后仍需确认" onChange={onChange} />);
+
+    expect(screen.getByText("自动提交关闭")).toBeTruthy();
+    const safetySwitch = screen.getByRole("switch", { name: /自动提交关闭.*发现车票后仍需确认/ });
+    fireEvent.click(safetySwitch);
+    expect(onChange).toHaveBeenCalled();
   });
 });
