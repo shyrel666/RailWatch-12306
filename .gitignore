@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+node_modules/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -8,8 +9,11 @@ __pycache__/
 htmlcov/
 *.egg-info/
 
-build/
-dist/
+/build/
+/dist/
+/dist-electron/
+/dist-runtime/
+/release/
 *.zip
 *.7z
 
@@ -24,5 +28,8 @@ station_codes_cache.json
 chrome_profile_12306/
 railwatch-12306/
 chromedriver.exe
+assets/fonts/
+assets/images/icon-imagegen.*
 
 .vscode/
+.windsurf/

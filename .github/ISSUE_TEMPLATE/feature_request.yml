@@ -22,7 +22,9 @@ body:
     attributes:
       label: Area
       options:
-        - UI
+        - Electron shell
+        - React renderer
+        - Python sidecar
         - Query analysis
         - Monitor logic
         - Packaging
@@ -30,3 +32,10 @@ body:
         - Other
     validations:
       required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety boundary
+      options:
+        - label: This request does not ask RailWatch to bypass login, captcha, order confirmation, payment, website rules or service rate limits.
+          required: true

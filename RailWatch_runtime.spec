@@ -12,9 +12,13 @@ for optional_file in (
     if os.path.exists(optional_file):
         datas.append((optional_file, "."))
 
+assets_dir = "assets"
+if os.path.isdir(assets_dir):
+    datas.append((assets_dir, assets_dir))
+
 
 a = Analysis(
-    ["t12306_gui_0.py"],
+    ["railwatch_runtime.py"],
     pathex=[],
     binaries=[],
     datas=datas,
@@ -31,26 +35,18 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
-    name="RailWatch 12306",
+    name="railwatch_runtime",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="RailWatch 12306",
 )

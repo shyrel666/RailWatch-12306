@@ -1,10 +1,10 @@
 # RailWatch 12306 dependencies
 
-# Desktop product UI
-PySide6>=6.6.0
-
 # Core automation
 selenium>=4.0.0
+
+# ChromeDriver auto-download
+requests>=2.28.0
 
 # Browser profile and anti-detection support
 undetected-chromedriver>=3.5.0

@@ -1,0 +1,24 @@
+appId: org.railwatch.railwatch12306
+productName: RailWatch 12306
+directories:
+  output: release
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - assets/images/icon.ico
+  - assets/images/icon.png
+  - package.json
+extraResources:
+  - from: dist-runtime
+    to: railwatch-runtime
+    filter:
+      - "**/*"
+win:
+  icon: assets/images/icon.ico
+  target:
+    - nsis
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

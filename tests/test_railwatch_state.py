@@ -14,7 +14,7 @@ class RailWatchStateTests(unittest.TestCase):
     def test_brand_and_information_architecture_are_productized(self):
         self.assertEqual(APP_DISPLAY_NAME, "RailWatch 12306")
         self.assertEqual(APP_SLUG, "railwatch-12306")
-        self.assertEqual(APP_PAGES, ("Dashboard", "Trip Setup", "Monitor", "Settings"))
+        self.assertEqual(APP_PAGES, ("仪表盘", "行程设置", "监控", "设置"))
 
     def test_default_state_is_safe_and_idle(self):
         state = RailWatchState.initial()

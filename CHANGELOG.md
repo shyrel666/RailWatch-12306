@@ -4,19 +4,15 @@
 
 ### Added
 
-- Introduced the RailWatch 12306 product name and open-source project framing.
-- Added a PySide6 desktop operations console with Dashboard, Trip Setup, Monitor and Settings pages.
-- Added `RailWatchState` as the UI-facing state model for environment, login, query, monitor, hit, alternate and error states.
-- Added event log filtering and export controls.
-- Added safety confirmations for auto submit, auto alternate, browser close and local data clearing.
-- Added open-source docs for contributing, security, privacy and release readiness.
+- Added the Electron + React/Vite desktop shell.
+- Added the JSON Lines Python runtime used by Electron.
+- Added `RailWatchBridge` as the frontend-neutral command facade for runtime info, config, environment checks, login, query analysis, monitoring, logging and preferences.
+- Added renderer state management and component tests for navigation, trip setup and monitor controls.
+- Added Windows Electron packaging with `electron-builder` and PyInstaller runtime bundling.
+- Added open-source GitHub docs, issue templates, PR template, CI workflow and release QA checklist.
 
 ### Changed
 
-- Updated the default local data directory to `railwatch-12306`.
-- Updated build output naming to `RailWatch 12306`.
-- Kept the legacy Tkinter UI as a fallback behind the PySide6 entry point.
-
-### Removed
-
-- Removed local runtime data, generated build output and downloaded ChromeDriver binary from the working tree.
+- Repositioned Python code as runtime/core support for the Electron app.
+- Updated source hygiene rules to keep runtime data, logs, Chrome profiles, downloaded drivers and build output out of Git.
+- Updated Vite build splitting for stable React, icon and vendor chunks.

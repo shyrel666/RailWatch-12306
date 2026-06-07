@@ -1,0 +1,57 @@
+{
+  "name": "railwatch-12306-electron",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "author": "RailWatch 12306 contributors",
+  "description": "Electron + React shell for RailWatch 12306.",
+  "homepage": "https://github.com/railwatch/railwatch-12306#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/railwatch/railwatch-12306.git"
+  },
+  "bugs": {
+    "url": "https://github.com/railwatch/railwatch-12306/issues"
+  },
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','dist-electron']) fs.rmSync(p,{recursive:true,force:true});\"",
+    "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/main.js\"",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:renderer": "vite build",
+    "build:runtime": "pyinstaller RailWatch_runtime.spec --distpath dist-runtime --workpath build/runtime -y",
+    "build": "npm run clean && npm run typecheck && npm run build:electron && npm run build:renderer",
+    "package": "npm run build && npm run build:runtime && electron-builder",
+    "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
+    "test": "npm run test:electron && npm run test:renderer",
+    "test:electron": "vitest run --config electron/vitest.config.ts",
+    "test:renderer": "vitest run --config vitest.config.ts",
+    "electron": "npm run build:electron && electron dist-electron/main.js"
+  },
+  "dependencies": {
+    "antd": "^6.0.0",
+    "lucide-react": "^0.561.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "zod": "^4.2.0",
+    "zustand": "^5.0.9"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.15.0",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6",
+    "vitest": "^4.0.15",
+    "wait-on": "^9.0.3"
+  }
+}

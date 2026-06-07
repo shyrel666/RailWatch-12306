@@ -5,7 +5,7 @@ on:
 
 jobs:
   package:
-    name: Build Windows desktop package
+    name: Build Windows Electron package
     runs-on: windows-latest
 
     steps:
@@ -18,16 +18,33 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      - name: Install dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: Build with PyInstaller
-        run: pyinstaller --noconfirm --clean RailWatch_12306.spec
+      - name: Install Node dependencies
+        run: npm ci
 
-      - name: Upload artifact
+      - name: Build Electron installer
+        run: npm run package
+
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: RailWatch-12306-Windows
-          path: dist/RailWatch 12306
+          name: RailWatch-12306-Windows-Installer
+          path: |
+            release/*.exe
+            release/*.blockmap
+
+      - name: Upload unpacked app
+        uses: actions/upload-artifact@v4
+        with:
+          name: RailWatch-12306-Windows-Unpacked
+          path: release/win-unpacked

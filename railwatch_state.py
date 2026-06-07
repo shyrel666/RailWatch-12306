@@ -9,7 +9,7 @@ from typing import Mapping, Optional, Tuple
 
 APP_DISPLAY_NAME = "RailWatch 12306"
 APP_SLUG = "railwatch-12306"
-APP_PAGES = ("Dashboard", "Trip Setup", "Monitor", "Settings")
+APP_PAGES = ("仪表盘", "行程设置", "监控", "设置")
 
 
 class AppPhase(str, Enum):
@@ -32,7 +32,7 @@ class TicketHit:
     detail: str = ""
 
     def label(self) -> str:
-        source_label = "alternate" if self.source == "alternate" else "ticket"
+        source_label = "候补" if self.source == "alternate" else "有票"
         return f"{self.train_code} {self.seat_type} {source_label}: {self.status}"
 
 
@@ -49,7 +49,7 @@ class RailWatchState:
     auto_submit_enabled: bool = False
     auto_alternate_enabled: bool = False
     risk_level: str = "notice"
-    status_message: str = "Ready"
+    status_message: str = "就绪"
     error_message: str = ""
     current_config: Mapping[str, object] = field(default_factory=dict)
     hits: Tuple[TicketHit, ...] = field(default_factory=tuple)
@@ -64,8 +64,8 @@ class RailWatchState:
             phase=AppPhase.ENVIRONMENT if ready else AppPhase.ERROR,
             environment_ready=ready,
             risk_level="notice" if ready else "critical",
-            status_message=message or ("Environment ready" if ready else "Environment check failed"),
-            error_message="" if ready else (message or "Environment check failed"),
+            status_message=message or ("环境就绪" if ready else "环境检查失败"),
+            error_message="" if ready else (message or "环境检查失败"),
         )
 
     def with_login(self, ready: bool, message: str = "") -> "RailWatchState":
@@ -74,8 +74,8 @@ class RailWatchState:
             phase=AppPhase.LOGIN if ready else AppPhase.ERROR,
             login_ready=ready,
             risk_level="notice" if ready else "warning",
-            status_message=message or ("Login ready" if ready else "Login required"),
-            error_message="" if ready else (message or "Login required"),
+            status_message=message or ("登录就绪" if ready else "需要登录"),
+            error_message="" if ready else (message or "需要登录"),
         )
 
     def with_query_ready(
@@ -87,8 +87,8 @@ class RailWatchState:
             query_ready=ready,
             current_config=dict(config or self.current_config),
             risk_level="notice" if ready else "warning",
-            status_message=message or ("Query ready" if ready else "Query setup incomplete"),
-            error_message="" if ready else (message or "Query setup incomplete"),
+            status_message=message or ("查询就绪" if ready else "查询设置未完成"),
+            error_message="" if ready else (message or "查询设置未完成"),
         )
 
     def with_monitoring(self, active: bool, message: str = "") -> "RailWatchState":
@@ -100,7 +100,7 @@ class RailWatchState:
             phase=next_phase,
             monitoring=active,
             risk_level="active" if active else "notice",
-            status_message=message or ("Monitoring active" if active else "Monitoring stopped"),
+            status_message=message or ("监控中" if active else "监控已停止"),
             error_message="",
         )
 

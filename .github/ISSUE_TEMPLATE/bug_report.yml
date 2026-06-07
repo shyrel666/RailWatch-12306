@@ -3,6 +3,10 @@ description: Report a reproducible problem in RailWatch 12306.
 title: "[Bug]: "
 labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not attach cookies, Chrome profiles, order screenshots, identity data or exported logs containing personal information.
   - type: textarea
     id: summary
     attributes:
@@ -16,9 +20,10 @@ body:
       label: Steps to reproduce
       description: List the smallest set of steps that reproduces the issue.
       placeholder: |
-        1. Open RailWatch
-        2. Click ...
-        3. See ...
+        1. Start the Electron app
+        2. Open Settings
+        3. Click ...
+        4. See ...
     validations:
       required: true
   - type: textarea
@@ -31,7 +36,22 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Include OS, Python version, Chrome version, ChromeDriver version and RailWatch commit or release.
+      description: Include OS, app version or commit, Node/npm versions if running from source, Python version, Chrome version and ChromeDriver version.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Electron shell
+        - React renderer
+        - Python sidecar
+        - 12306 query analysis
+        - Monitor logic
+        - Packaging
+        - Documentation
+        - Other
     validations:
       required: true
   - type: checkboxes
