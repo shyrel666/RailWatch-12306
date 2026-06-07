@@ -56,4 +56,39 @@ describe("DashboardPage", () => {
     expect(screen.getByRole("heading", { name: "风险控制" })).toBeTruthy();
     expect(screen.queryByLabelText("乘客")).toBeNull();
   });
+
+  test("moves the workflow current step to manual confirmation after a ticket hit", () => {
+    railwatchStore.setState({
+      status: {
+        ...defaultStatus,
+        environment_ready: true,
+        login_ready: true,
+        query_ready: true,
+        summary: "已命中目标车票",
+      },
+      hits: [
+        {
+          train_code: "G101",
+          seat_type: "二等座",
+          status: "有票",
+          source: "query",
+          detail: "G101 二等座有票",
+          label: "G101 二等座有票",
+        },
+      ],
+    });
+
+    render(<DashboardPage />);
+
+    const workflow = screen.getByRole("list", { name: "监控流程" });
+    const currentSteps = workflow.querySelectorAll('[aria-current="step"]');
+    const steps = within(workflow).getAllByRole("listitem");
+    const hitStep = steps.find((step) => step.textContent?.includes("命中提醒"));
+
+    expect(currentSteps).toHaveLength(1);
+    expect(currentSteps[0].textContent).toContain("人工确认");
+    expect(hitStep).toBeTruthy();
+    expect(hitStep?.textContent).toContain("完成");
+    expect(hitStep?.getAttribute("aria-current")).toBeNull();
+  });
 });

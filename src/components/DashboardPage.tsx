@@ -22,18 +22,17 @@ function getWorkflowSteps(status: RailWatchStatus, hasHits: boolean): WorkflowSt
     { label: "人工登录", description: status.login_ready ? "登录页已打开" : "打开 12306 登录页", icon: LogIn, state: !status.environment_ready ? "pending" : status.login_ready ? "done" : "current" },
     { label: "查询分析", description: status.query_ready ? "页面结果已解析" : "保存行程后分析", icon: Search, state: !status.login_ready ? "pending" : status.query_ready ? "done" : "current" },
     { label: "启动监控", description: status.monitoring ? "受控刷新中" : "等待启动", icon: Radar, state: !status.query_ready ? "pending" : status.monitoring || hitDone ? "done" : "current" },
-    { label: "命中提醒", description: hitDone ? "已有目标票命中" : "等待目标席别", icon: Bell, state: hitDone ? "current" : "pending" },
+    { label: "命中提醒", description: hitDone ? "已有目标票命中" : "等待目标席别", icon: Bell, state: hitDone ? "done" : "pending" },
     { label: "人工确认", description: "订单确认和支付仍人工完成", icon: ShieldAlert, state: hitDone ? "current" : "pending" },
   ];
 }
 
-function getNextAction(status: RailWatchStatus): { description: string; label: string; page: RailWatchPage; tone: Tone } {
+function getNextAction(status: RailWatchStatus): { description: string; label: string; page: RailWatchPage } {
   if (!status.environment_ready) {
     return {
       description: "先确认 ChromeDriver、浏览器和本机依赖，再进入登录与查询流程。",
       label: "检查环境",
       page: "设置",
-      tone: "blue",
     };
   }
 
@@ -42,7 +41,6 @@ function getNextAction(status: RailWatchStatus): { description: string; label: s
       description: "环境已经可用，下一步打开登录页并完成人工登录。",
       label: "去行程设置",
       page: "行程设置",
-      tone: "green",
     };
   }
 
@@ -51,7 +49,6 @@ function getNextAction(status: RailWatchStatus): { description: string; label: s
       description: "登录状态已准备好，补齐行程后进行查询分析。",
       label: "完善行程",
       page: "行程设置",
-      tone: "indigo",
     };
   }
 
@@ -59,7 +56,6 @@ function getNextAction(status: RailWatchStatus): { description: string; label: s
     description: status.monitoring ? "监控正在运行，可到监控页查看刷新与查询结果。" : "查询分析完成，可以进入监控页启动受控刷新。",
     label: status.monitoring ? "查看监控" : "去监控",
     page: "监控",
-    tone: status.monitoring ? "teal" : "blue",
   };
 }
 
