@@ -57,7 +57,7 @@ export function SectionTitle({ action, eyebrow, title }: { action?: ReactNode; e
   return (
     <div className="section-title">
       <div>
-        {eyebrow ? <span>{eyebrow}</span> : null}
+        {eyebrow ? <span className="section-eyebrow">{eyebrow}</span> : null}
         <h2>{title}</h2>
       </div>
       {action}

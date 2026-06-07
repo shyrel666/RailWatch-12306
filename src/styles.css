@@ -365,7 +365,7 @@ select {
   margin-bottom: 14px;
 }
 
-.section-title span {
+.section-eyebrow {
   display: block;
   margin-bottom: 3px;
   color: var(--muted);
@@ -481,6 +481,23 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.maintenance-actions {
+  display: grid;
+  gap: 14px;
+}
+
+.destructive-actions {
+  border-top: 1px solid color-mix(in srgb, var(--red) 24%, var(--border));
+  padding-top: 12px;
+}
+
+.control-group-label {
+  flex-basis: 100%;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .settings-workspace {

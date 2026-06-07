@@ -20,8 +20,8 @@ export function SettingsPage({
     setDarkMode(checked);
     await runCommand("savePreferences", { theme: checked ? "dark" : "light" });
   };
-  const settingsButtons = (
-    <>
+  const routineButtons = (
+    <div aria-label="常规操作" className="control-grid routine-actions" role="group">
       <Button icon={<Activity size={16} />} loading={busy === "checkEnvironment"} onClick={() => void runCommand("checkEnvironment")}>
         检查环境
       </Button>
@@ -36,13 +36,20 @@ export function SettingsPage({
       <Button icon={<LogIn size={16} />} loading={busy === "openLogin"} onClick={() => void runCommand("openLogin")}>
         打开登录
       </Button>
+    </div>
+  );
+  const destructiveButtons = (
+    <div aria-labelledby="destructive-actions-title" className="control-grid destructive-actions" role="group">
+      <span className="control-group-label" id="destructive-actions-title">
+        高风险操作
+      </span>
       <Button danger icon={<XCircle size={16} />} loading={busy === "closeBrowser"} onClick={() => void runCommand("closeBrowser")}>
         关闭浏览器
       </Button>
       <Button danger icon={<Trash2 size={16} />} loading={busy === "clearLocalData"} onClick={() => void runCommand("clearLocalData")}>
         清除数据
       </Button>
-    </>
+    </div>
   );
   return (
     <div className="settings-grid settings-workspace">
@@ -50,7 +57,7 @@ export function SettingsPage({
         <SectionTitle title="外观" />
         <div className="settings-row">
           <span>暗色模式</span>
-          <Switch checked={darkMode} onChange={(checked) => void saveTheme(checked)} />
+          <Switch aria-label="暗色模式" checked={darkMode} onChange={(checked) => void saveTheme(checked)} />
         </div>
       </section>
       <section className="content-band span-two">
@@ -66,7 +73,10 @@ export function SettingsPage({
       </section>
       <section className="content-band span-two danger-zone">
         <SectionTitle title="维护操作" />
-        <div className="control-grid">{settingsButtons}</div>
+        <div className="maintenance-actions">
+          {routineButtons}
+          {destructiveButtons}
+        </div>
       </section>
     </div>
   );
