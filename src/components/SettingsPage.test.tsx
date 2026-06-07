@@ -37,13 +37,17 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("button", { name: /清除数据/ })).toBeTruthy();
 
     const routineActions = screen.getByRole("group", { name: "常规操作" });
-    expect(within(routineActions).getByRole("button", { name: /检查环境/ })).toBeTruthy();
+    const checkEnvironment = within(routineActions).getByRole("button", { name: /检查环境/ });
+    expect(checkEnvironment).toBeTruthy();
     expect(within(routineActions).getByRole("button", { name: /下载 ChromeDriver/ })).toBeTruthy();
     expect(within(routineActions).getByRole("button", { name: /打开登录/ })).toBeTruthy();
+    expect(checkEnvironment.closest(".danger-zone")).toBeNull();
 
     const destructiveActions = screen.getByRole("group", { name: "高风险操作" });
     expect(within(destructiveActions).getByRole("button", { name: /关闭浏览器/ })).toBeTruthy();
-    expect(within(destructiveActions).getByRole("button", { name: /清除数据/ })).toBeTruthy();
+    const clearLocalData = within(destructiveActions).getByRole("button", { name: /清除数据/ });
+    expect(clearLocalData).toBeTruthy();
+    expect(clearLocalData.closest(".danger-zone")).toBeTruthy();
     expect(within(destructiveActions).queryByRole("button", { name: /检查环境/ })).toBeNull();
 
     await user.click(screen.getByRole("switch", { name: "暗色模式" }));

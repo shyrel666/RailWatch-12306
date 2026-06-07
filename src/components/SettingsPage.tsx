@@ -39,7 +39,7 @@ export function SettingsPage({
     </div>
   );
   const destructiveButtons = (
-    <div aria-labelledby="destructive-actions-title" className="control-grid destructive-actions" role="group">
+    <div aria-labelledby="destructive-actions-title" className="control-grid destructive-actions danger-zone" role="group">
       <span className="control-group-label" id="destructive-actions-title">
         高风险操作
       </span>
@@ -71,7 +71,7 @@ export function SettingsPage({
           <dd>{runtime.chrome_version}</dd>
         </dl>
       </section>
-      <section className="content-band span-two danger-zone">
+      <section className="content-band span-two">
         <SectionTitle title="维护操作" />
         <div className="maintenance-actions">
           {routineButtons}
