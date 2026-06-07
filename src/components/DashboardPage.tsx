@@ -1,114 +1,172 @@
-import { Table, Tag } from "antd";
+import { Button, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Activity, Bell, Database, LogIn, Radar, Search, ShieldAlert } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
-import type { TicketHit } from "../types";
+import type { RailWatchPage, RailWatchStatus, TicketHit } from "../types";
+import { MetricCard, StatusBadge, WorkflowStepper } from "./DisplayPrimitives";
+import type { Tone, WorkflowStep } from "./DisplayPrimitives";
 import { SectionTitle } from "./FormPrimitives";
+
+const riskLabel: Record<string, string> = {
+  notice: "低风险",
+  success: "低风险",
+  active: "监控中",
+  warning: "需注意",
+  critical: "高风险",
+};
+
+function getWorkflowSteps(status: RailWatchStatus, hasHits: boolean): WorkflowStep[] {
+  const hitDone = hasHits;
+  return [
+    { label: "环境检查", description: status.environment_ready ? "ChromeDriver 可用" : "先确认本机依赖", icon: Database, state: status.environment_ready ? "done" : "current" },
+    { label: "人工登录", description: status.login_ready ? "登录页已打开" : "打开 12306 登录页", icon: LogIn, state: !status.environment_ready ? "pending" : status.login_ready ? "done" : "current" },
+    { label: "查询分析", description: status.query_ready ? "页面结果已解析" : "保存行程后分析", icon: Search, state: !status.login_ready ? "pending" : status.query_ready ? "done" : "current" },
+    { label: "启动监控", description: status.monitoring ? "受控刷新中" : "等待启动", icon: Radar, state: !status.query_ready ? "pending" : status.monitoring || hitDone ? "done" : "current" },
+    { label: "命中提醒", description: hitDone ? "已有目标票命中" : "等待目标席别", icon: Bell, state: hitDone ? "current" : "pending" },
+    { label: "人工确认", description: "订单确认和支付仍人工完成", icon: ShieldAlert, state: hitDone ? "current" : "pending" },
+  ];
+}
+
+function getNextAction(status: RailWatchStatus): { description: string; label: string; page: RailWatchPage; tone: Tone } {
+  if (!status.environment_ready) {
+    return {
+      description: "先确认 ChromeDriver、浏览器和本机依赖，再进入登录与查询流程。",
+      label: "检查环境",
+      page: "设置",
+      tone: "blue",
+    };
+  }
+
+  if (!status.login_ready) {
+    return {
+      description: "环境已经可用，下一步打开登录页并完成人工登录。",
+      label: "去行程设置",
+      page: "行程设置",
+      tone: "green",
+    };
+  }
+
+  if (!status.query_ready) {
+    return {
+      description: "登录状态已准备好，补齐行程后进行查询分析。",
+      label: "完善行程",
+      page: "行程设置",
+      tone: "indigo",
+    };
+  }
+
+  return {
+    description: status.monitoring ? "监控正在运行，可到监控页查看刷新与查询结果。" : "查询分析完成，可以进入监控页启动受控刷新。",
+    label: status.monitoring ? "查看监控" : "去监控",
+    page: "监控",
+    tone: status.monitoring ? "teal" : "blue",
+  };
+}
 
 export function DashboardPage() {
   const status = useRailWatchStore((state) => state.status);
+  const config = useRailWatchStore((state) => state.config);
   const hits = useRailWatchStore((state) => state.hits);
+  const setActivePage = useRailWatchStore((state) => state.setActivePage);
+  const hasHits = hits.length > 0;
+  const workflowSteps = getWorkflowSteps(status, hasHits);
+  const nextAction = getNextAction(status);
+  const riskTone: Tone =
+    status.risk_level === "critical" ? "red" : status.risk_level === "warning" ? "amber" : status.risk_level === "active" ? "teal" : "green";
+  const monitorTone: Tone = status.monitoring ? "teal" : status.query_ready ? "blue" : "slate";
+  const monitorLabel = status.monitoring ? "监控中" : status.query_ready ? "可启动" : "待准备";
+  const currentRoute = `${config.from_station_cn || "未设置"} → ${config.to_station_cn || "未设置"}`;
   const cards = [
     {
       title: "环境",
       body: status.environment_ready ? "ChromeDriver 已通过" : "等待环境检查",
       meta: status.environment_ready ? "可用" : "待检查",
-      tone: "blue",
+      tone: status.environment_ready ? "green" : "blue",
       icon: Database,
     },
     {
-      title: "登录",
-      body: status.login_ready ? "登录页已打开" : "尚未打开登录页",
-      meta: status.login_ready ? "就绪" : "人工",
-      tone: "green",
-      icon: LogIn,
-    },
-    {
       title: "查询",
-      body: status.query_ready ? "查询分析完成" : "待配置站点与日期",
+      body: status.query_ready ? "页面结果已解析" : "等待登录和行程分析",
       meta: status.query_ready ? "已解析" : "未就绪",
-      tone: "indigo",
+      tone: status.query_ready ? "green" : "indigo",
       icon: Search,
     },
     {
-      title: "监控",
-      body: status.monitoring ? "监控中" : "未运行",
-      meta: status.monitoring ? "运行中" : "受控刷新",
-      tone: "teal",
-      icon: Radar,
-    },
-    {
       title: "命中",
-      body: hits.length ? hits[hits.length - 1].label : "尚未命中目标车票",
-      meta: `${hits.length} 条记录`,
-      tone: "green",
+      body: hasHits ? hits[hits.length - 1].label : "尚未命中目标车票",
+      meta: `${hits.length} 条`,
+      tone: hasHits ? "green" : "slate",
       icon: Bell,
     },
-    {
-      title: "风险",
-      body: status.auto_submit_enabled || status.auto_alternate_enabled ? "已启用危险自动化" : "未启用危险自动化",
-      meta: status.risk_level,
-      tone: status.auto_submit_enabled || status.auto_alternate_enabled ? "amber" : "slate",
-      icon: ShieldAlert,
-    },
-  ];
+  ] satisfies Array<{ body: string; icon: typeof Database; meta: string; title: string; tone: Tone }>;
   const columns: ColumnsType<TicketHit & { key: string }> = [
     { title: "车次", dataIndex: "train_code" },
     { title: "席别", dataIndex: "seat_type" },
     {
       title: "来源",
       dataIndex: "source",
-      render: (source: string) => <Tag color={source === "alternate" ? "gold" : "green"}>{source}</Tag>,
+      render: (source: string) => <Tag color={source === "alternate" ? "gold" : "green"}>{source === "alternate" ? "候补" : "查询"}</Tag>,
     },
     { title: "状态", dataIndex: "status" },
   ];
+  const hitRows = hits.map((hit, index) => ({ ...hit, key: `${hit.train_code}-${hit.seat_type}-${index}` }));
+
   return (
-    <div className="dashboard-grid">
-      <div className="status-grid">
-        {cards.map((card) => (
-          <StatusCard key={card.title} {...card} />
-        ))}
-      </div>
+    <div className="dashboard-grid dispatch-dashboard">
+      <section className="content-band dispatch-hero" aria-label="当前路线">
+        <div>
+          <SectionTitle
+            eyebrow="Current Route"
+            title={currentRoute}
+            action={<StatusBadge tone={monitorTone}>{monitorLabel}</StatusBadge>}
+          />
+          <dl className="data-list">
+            <dt>日期</dt>
+            <dd>{config.date || "待设置"}</dd>
+            <dt>车次</dt>
+            <dd>{config.train_code || "全部车次"}</dd>
+            <dt>席别</dt>
+            <dd>{config.seat_keyword || config.seat_prefer || "无偏好"}</dd>
+            <dt>刷新</dt>
+            <dd>{config.interval} 秒</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section className="content-band dispatch-flow">
+        <SectionTitle eyebrow="Rail Dispatch" title="监控流程" />
+        <WorkflowStepper steps={workflowSteps} />
+      </section>
+
+      <section className="content-band next-action">
+        <SectionTitle title="下一步" />
+        <p>{nextAction.description}</p>
+        <Button type="primary" icon={<Activity size={16} />} onClick={() => setActivePage(nextAction.page)}>
+          {nextAction.label}
+        </Button>
+      </section>
+
       <section className="content-band">
-        <SectionTitle title="最近命中" />
-        <Table
-          columns={columns}
-          dataSource={hits.map((hit, index) => ({ ...hit, key: `${hit.train_code}-${index}` }))}
-          locale={{ emptyText: "尚未命中目标车票" }}
-          pagination={false}
-          size="middle"
-        />
+        <SectionTitle title="就绪状态" />
+        <div className="metric-grid">
+          {cards.map((card) => (
+            <MetricCard key={card.title} {...card} />
+          ))}
+        </div>
+      </section>
+
+      <section className="content-band">
+        <SectionTitle title="监控结果" />
+        <Table columns={columns} dataSource={hitRows} locale={{ emptyText: "尚未命中目标车票" }} pagination={false} size="middle" />
+      </section>
+
+      <section className="content-band risk-panel">
+        <SectionTitle title="风险控制" action={<StatusBadge tone={riskTone}>{riskLabel[status.risk_level] ?? "未知风险"}</StatusBadge>} />
+        <p>
+          当前仅提供提醒与人工确认辅助；订单提交、候补改签和支付仍需人工完成。
+          {status.auto_submit_enabled || status.auto_alternate_enabled ? " 请回到设置页关闭危险自动化。" : " 自动提交和自动候补保持关闭。"}
+        </p>
       </section>
     </div>
-  );
-}
-
-function StatusCard({
-  title,
-  body,
-  meta,
-  tone,
-  icon: Icon,
-}: {
-  title: string;
-  body: string;
-  meta: string;
-  tone: string;
-  icon: LucideIcon;
-}) {
-  return (
-    <article className={`status-card ${tone}`}>
-      <div className="status-icon">
-        <Icon size={22} />
-      </div>
-      <div>
-        <div className="status-card-head">
-          <strong>{title}</strong>
-          <span>{meta}</span>
-        </div>
-        <p>{body}</p>
-      </div>
-    </article>
   );
 }

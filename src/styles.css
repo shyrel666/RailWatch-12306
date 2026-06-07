@@ -234,6 +234,26 @@ select {
   gap: 16px;
 }
 
+.dispatch-dashboard {
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, .55fr);
+}
+
+.dispatch-hero,
+.dispatch-flow {
+  grid-column: 1 / -1;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.next-action,
+.risk-panel {
+  align-content: start;
+}
+
 .form-grid,
 .settings-grid {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
