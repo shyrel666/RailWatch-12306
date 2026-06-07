@@ -20,8 +20,32 @@ export function SettingsPage({
     setDarkMode(checked);
     await runCommand("savePreferences", { theme: checked ? "dark" : "light" });
   };
+  const settingsButtons = (
+    <>
+      <Button icon={<Activity size={16} />} loading={busy === "checkEnvironment"} onClick={() => void runCommand("checkEnvironment")}>
+        检查环境
+      </Button>
+      <Button
+        icon={<Download size={16} />}
+        loading={busy === "downloadChromeDriver"}
+        onClick={() => void runCommand("downloadChromeDriver")}
+        type="primary"
+      >
+        下载 ChromeDriver
+      </Button>
+      <Button icon={<LogIn size={16} />} loading={busy === "openLogin"} onClick={() => void runCommand("openLogin")}>
+        打开登录
+      </Button>
+      <Button danger icon={<XCircle size={16} />} loading={busy === "closeBrowser"} onClick={() => void runCommand("closeBrowser")}>
+        关闭浏览器
+      </Button>
+      <Button danger icon={<Trash2 size={16} />} loading={busy === "clearLocalData"} onClick={() => void runCommand("clearLocalData")}>
+        清除数据
+      </Button>
+    </>
+  );
   return (
-    <div className="settings-grid">
+    <div className="settings-grid settings-workspace">
       <section className="content-band">
         <SectionTitle title="外观" />
         <div className="settings-row">
@@ -30,7 +54,7 @@ export function SettingsPage({
         </div>
       </section>
       <section className="content-band span-two">
-        <SectionTitle title="数据" />
+        <SectionTitle title="本地运行" />
         <dl className="data-list">
           <dt>数据目录</dt>
           <dd>{runtime.data_dir}</dd>
@@ -40,30 +64,9 @@ export function SettingsPage({
           <dd>{runtime.chrome_version}</dd>
         </dl>
       </section>
-      <section className="content-band span-two">
-        <SectionTitle title="控制" />
-        <div className="control-grid">
-          <Button icon={<Activity size={16} />} loading={busy === "checkEnvironment"} onClick={() => void runCommand("checkEnvironment")}>
-            检查环境
-          </Button>
-          <Button
-            icon={<Download size={16} />}
-            loading={busy === "downloadChromeDriver"}
-            onClick={() => void runCommand("downloadChromeDriver")}
-            type="primary"
-          >
-            下载 ChromeDriver
-          </Button>
-          <Button icon={<LogIn size={16} />} loading={busy === "openLogin"} onClick={() => void runCommand("openLogin")}>
-            打开登录
-          </Button>
-          <Button danger icon={<XCircle size={16} />} loading={busy === "closeBrowser"} onClick={() => void runCommand("closeBrowser")}>
-            关闭浏览器
-          </Button>
-          <Button danger icon={<Trash2 size={16} />} loading={busy === "clearLocalData"} onClick={() => void runCommand("clearLocalData")}>
-            清除数据
-          </Button>
-        </div>
+      <section className="content-band span-two danger-zone">
+        <SectionTitle title="维护操作" />
+        <div className="control-grid">{settingsButtons}</div>
       </section>
     </div>
   );

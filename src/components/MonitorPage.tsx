@@ -16,10 +16,10 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
     { title: "结果", dataIndex: "raw" },
   ];
   return (
-    <div className="monitor-stack">
-      <section className="content-band">
+    <div className="monitor-stack monitor-workspace">
+      <section className="content-band monitor-control-band">
         <div className="monitor-header">
-          <SectionTitle title="监控控制" />
+          <SectionTitle eyebrow="Live Monitor" title="购票监控" />
           <div className="button-row">
             <Button
               disabled={!status.query_ready || status.monitoring}

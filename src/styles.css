@@ -365,6 +365,15 @@ select {
   margin-bottom: 14px;
 }
 
+.section-title span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .section-title h2,
 .event-head h2 {
   font-size: 16px;
@@ -428,6 +437,15 @@ select {
   justify-content: flex-end;
 }
 
+.monitor-workspace {
+  align-content: start;
+}
+
+.monitor-control-band {
+  display: grid;
+  gap: 12px;
+}
+
 .monitor-header {
   display: flex;
   align-items: center;
@@ -465,6 +483,18 @@ select {
   gap: 10px;
 }
 
+.settings-workspace {
+  align-items: start;
+}
+
+.settings-workspace .content-band:first-child {
+  min-height: 100%;
+}
+
+.danger-zone {
+  border-color: color-mix(in srgb, var(--red) 24%, var(--border));
+  background: color-mix(in srgb, var(--red) 4%, var(--surface));
+}
 .event-panel {
   display: flex;
   flex-direction: column;

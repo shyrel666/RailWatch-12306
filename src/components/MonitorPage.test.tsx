@@ -15,7 +15,7 @@ function resetStore() {
     results: [],
     hits: [],
     notifications: [],
-    activePage: "仪表盘",
+    activePage: "监控",
     logPaused: false,
     eventPanelVisible: true,
   });
