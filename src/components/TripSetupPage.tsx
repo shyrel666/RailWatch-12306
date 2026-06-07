@@ -52,18 +52,18 @@ export function TripSetupPage({
       <Field label="目标时间">
         <input className="native-input" type="time" step="1" value={config.target_time} onChange={(event) => update({ target_time: event.target.value })} />
       </Field>
-      <div className="switch-row">
-        <Switch checked={config.timer_enabled} onChange={(checked) => update({ timer_enabled: checked })} />
+      <label className="switch-row">
+        <Switch aria-label="定时启动" checked={config.timer_enabled} onChange={(checked) => update({ timer_enabled: checked })} />
         <span>定时启动</span>
-      </div>
-      <div className="switch-row">
-        <Switch checked={config.keep_alive} onChange={(checked) => update({ keep_alive: checked })} />
+      </label>
+      <label className="switch-row">
+        <Switch aria-label="保持会话" checked={config.keep_alive} onChange={(checked) => update({ keep_alive: checked })} />
         <span>保持会话</span>
-      </div>
-      <div className="switch-row">
-        <Switch checked={config.smart_rate} onChange={(checked) => update({ smart_rate: checked })} />
+      </label>
+      <label className="switch-row">
+        <Switch aria-label="智能轮询" checked={config.smart_rate} onChange={(checked) => update({ smart_rate: checked })} />
         <span>智能轮询</span>
-      </div>
+      </label>
     </>
   );
 
@@ -98,13 +98,13 @@ export function TripSetupPage({
         <RiskToggle
           checked={config.auto_submit}
           title={config.auto_submit ? "自动提交已启用" : "自动提交关闭"}
-          description="发现车票后进入订单流程前必须确认"
+          description="开启时需要确认；开启后命中车票可能自动进入订单流程。"
           onChange={(checked) => void guardedAutomation("auto_submit", checked)}
         />
         <RiskToggle
           checked={config.auto_alternate}
           title={config.auto_alternate ? "候补排队已启用" : "候补排队关闭"}
-          description="仅候补时排队前必须确认"
+          description="开启时需要确认；开启后无票时可能自动提交候补。"
           onChange={(checked) => void guardedAutomation("auto_alternate", checked)}
         />
         <Field label="候补截止">
