@@ -29,6 +29,42 @@ function isStatusPayload(value: unknown): value is RailWatchStatus {
 }
 
 export function RailWatchApp() {
+  const [darkMode, setDarkMode] = useState(false);
+  const runtimeTheme = useMemo(
+    () => ({
+      algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
+      token: {
+        colorPrimary: darkMode ? "#59d6b0" : "#0f8f62",
+        colorBgBase: darkMode ? "#0d1117" : "#eef2f0",
+        colorTextBase: darkMode ? "#eef4f1" : "#17201c",
+        borderRadius: 8,
+        fontFamily: '"Microsoft YaHei UI", "Noto Sans SC", "Segoe UI", sans-serif',
+      },
+      components: {
+        Button: { controlHeight: 34, borderRadius: 8 },
+        Input: { controlHeight: 34, borderRadius: 8 },
+        Select: { controlHeight: 34, borderRadius: 8 },
+        Table: { borderColor: darkMode ? "#25313d" : "#dce3df" },
+      },
+    }),
+    [darkMode],
+  );
+
+  return (
+    <ConfigProvider theme={runtimeTheme}>
+      <AntApp>
+        <RailWatchAppContent darkMode={darkMode} setDarkMode={setDarkMode} />
+      </AntApp>
+    </ConfigProvider>
+  );
+}
+
+type RailWatchAppContentProps = {
+  darkMode: boolean;
+  setDarkMode: (darkMode: boolean) => void;
+};
+
+function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps) {
   const runtime = useRailWatchStore((state) => state.runtime);
   const status = useRailWatchStore((state) => state.status);
   const activePage = useRailWatchStore((state) => state.activePage);
@@ -37,7 +73,6 @@ export function RailWatchApp() {
   const setEventPanelVisible = useRailWatchStore((state) => state.setEventPanelVisible);
   const { modal, message, notification } = AntApp.useApp();
   const [busy, setBusy] = useState<string | null>(null);
-  const [darkMode, setDarkMode] = useState(false);
 
   const applyEvent = useCallback(
     (event: BridgeEvent) => {
@@ -153,38 +188,19 @@ export function RailWatchApp() {
   }, [activePage, busy, confirm, darkMode, runCommand]);
 
   return (
-    <ConfigProvider
-      theme={{
-        algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
-        token: {
-          colorPrimary: darkMode ? "#59d6b0" : "#0f8f62",
-          colorBgBase: darkMode ? "#0d1117" : "#eef2f0",
-          colorTextBase: darkMode ? "#eef4f1" : "#17201c",
-          borderRadius: 8,
-          fontFamily: '"Microsoft YaHei UI", "Noto Sans SC", "Segoe UI", sans-serif',
-        },
-        components: {
-          Button: { controlHeight: 34, borderRadius: 8 },
-          Input: { controlHeight: 34, borderRadius: 8 },
-          Select: { controlHeight: 34, borderRadius: 8 },
-          Table: { borderColor: darkMode ? "#25313d" : "#dce3df" },
-        },
-      }}
+    <ShellLayout
+      activePage={activePage}
+      darkMode={darkMode}
+      eventPanel={
+        eventPanelVisible ? <EventPanel runCommand={runCommand} onClose={() => setEventPanelVisible(false)} /> : null
+      }
+      eventPanelVisible={eventPanelVisible}
+      runtime={runtime}
+      status={status}
+      onPageChange={setActivePage}
+      onToggleEventPanel={() => setEventPanelVisible(!eventPanelVisible)}
     >
-      <ShellLayout
-        activePage={activePage}
-        darkMode={darkMode}
-        eventPanel={
-          eventPanelVisible ? <EventPanel runCommand={runCommand} onClose={() => setEventPanelVisible(false)} /> : null
-        }
-        eventPanelVisible={eventPanelVisible}
-        runtime={runtime}
-        status={status}
-        onPageChange={setActivePage}
-        onToggleEventPanel={() => setEventPanelVisible(!eventPanelVisible)}
-      >
-        {content}
-      </ShellLayout>
-    </ConfigProvider>
+      {content}
+    </ShellLayout>
   );
 }
