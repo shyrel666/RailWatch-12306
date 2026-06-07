@@ -39,12 +39,17 @@ select {
 .app-shell {
   display: grid;
   grid-template-columns: 224px minmax(0, 1fr) 360px;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   background:
     linear-gradient(90deg, rgba(15, 143, 98, 0.08) 0 1px, transparent 1px 100%),
     var(--bg);
   background-size: 48px 48px;
   color: var(--text);
+}
+
+.app-shell.without-event-panel {
+  grid-template-columns: 224px minmax(0, 1fr) 0;
 }
 
 .app-shell.dark {
@@ -156,7 +161,10 @@ select {
 }
 
 .workspace {
+  height: 100vh;
+  min-height: 0;
   min-width: 0;
+  overflow-y: auto;
   padding: 22px 24px;
 }
 
@@ -393,6 +401,10 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.field-grid.compact .switch-row {
+  grid-column: 1 / -1;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -430,6 +442,10 @@ select {
   align-items: center;
   gap: 10px;
   min-height: 32px;
+}
+
+.switch-row span {
+  white-space: nowrap;
 }
 
 .automation-stack {
@@ -519,7 +535,10 @@ select {
 .event-panel {
   display: flex;
   flex-direction: column;
+  height: 100vh;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
   border-top: 0;
   border-right: 0;
   border-bottom: 0;
@@ -561,6 +580,7 @@ select {
 .event-list {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: 8px;
   min-height: 0;
   overflow: auto;
@@ -641,6 +661,39 @@ select {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+}
+
+.risk-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 68px;
+  padding: 12px;
+  cursor: pointer;
+}
+
+.risk-toggle > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.risk-toggle strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.risk-toggle small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.risk-toggle.active {
+  border-color: color-mix(in srgb, var(--amber) 58%, var(--border));
+  background: color-mix(in srgb, var(--amber) 12%, var(--surface));
 }
 
 .workflow-stepper {

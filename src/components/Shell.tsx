@@ -78,8 +78,16 @@ export function ShellLayout({
   onPageChange: (page: RailWatchPage) => void;
   onToggleEventPanel: () => void;
 }) {
+  const shellClassName = [
+    "app-shell",
+    darkMode ? "dark" : "",
+    eventPanelVisible ? "" : "without-event-panel",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className={darkMode ? "app-shell dark" : "app-shell"}>
+    <div className={shellClassName}>
       <SidebarNav
         activePage={activePage}
         appName={runtime.app_display_name}
