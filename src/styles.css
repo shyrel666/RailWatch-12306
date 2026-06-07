@@ -259,6 +259,24 @@ select {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
 }
 
+.trip-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  gap: 16px;
+}
+
+.trip-form-panel,
+.trip-monitor-panel,
+.trip-setup-grid .form-actions {
+  grid-column: 1;
+}
+
+.safety-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
 .span-two {
   grid-column: 1 / -1;
 }
