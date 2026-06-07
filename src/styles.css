@@ -1,14 +1,16 @@
 :root {
-  --bg: #eef2f0;
+  --bg: #edf1f3;
+  --bg-rail: #f7f9fa;
   --surface: #ffffff;
-  --surface-muted: #f7f8f6;
+  --surface-muted: #f3f6f7;
+  --surface-elevated: #ffffff;
   --text: #17201c;
-  --muted: #66706b;
-  --border: #dce3df;
+  --muted: #65727a;
+  --border: #d8e0e4;
   --green: #0f8f62;
-  --blue: #2176c7;
-  --indigo: #4d61a8;
-  --teal: #168a8a;
+  --blue: #2478c8;
+  --indigo: #5567b1;
+  --teal: #168f8a;
   --amber: #b66b00;
   --red: #c93636;
   --slate: #59656d;
@@ -46,19 +48,21 @@ select {
 }
 
 .app-shell.dark {
-  --bg: #111716;
-  --surface: #18211f;
-  --surface-muted: #202b28;
-  --text: #e7ece9;
-  --muted: #97a39d;
-  --border: #2d3a36;
-  --green: #4cc38d;
-  --blue: #6aa8e8;
-  --indigo: #9aa7ee;
-  --teal: #5fc8c4;
-  --amber: #dca451;
-  --red: #eb7070;
-  --slate: #a7b0b5;
+  --bg: #0d1117;
+  --bg-rail: #111821;
+  --surface: #151c25;
+  --surface-muted: #1b2530;
+  --surface-elevated: #202b36;
+  --text: #eef4f1;
+  --muted: #9aa8b3;
+  --border: #263441;
+  --green: #59d68f;
+  --blue: #73b7ff;
+  --indigo: #a7b4ff;
+  --teal: #66d7cc;
+  --amber: #e2aa55;
+  --red: #ff7b7b;
+  --slate: #a8b2ba;
 }
 
 .sidebar {

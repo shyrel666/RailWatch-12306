@@ -157,9 +157,17 @@ export function RailWatchApp() {
       theme={{
         algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
         token: {
-          colorPrimary: "#0f8f62",
-          borderRadius: 6,
+          colorPrimary: darkMode ? "#59d6b0" : "#0f8f62",
+          colorBgBase: darkMode ? "#0d1117" : "#eef2f0",
+          colorTextBase: darkMode ? "#eef4f1" : "#17201c",
+          borderRadius: 8,
           fontFamily: '"Microsoft YaHei UI", "Noto Sans SC", "Segoe UI", sans-serif',
+        },
+        components: {
+          Button: { controlHeight: 34, borderRadius: 8 },
+          Input: { controlHeight: 34, borderRadius: 8 },
+          Select: { controlHeight: 34, borderRadius: 8 },
+          Table: { borderColor: darkMode ? "#25313d" : "#dce3df" },
         },
       }}
     >
