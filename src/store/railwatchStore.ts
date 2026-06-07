@@ -4,6 +4,7 @@ import type {
   NotifyPayload,
   QueryResultRow,
   RailWatchConfig,
+  RailWatchPage,
   RailWatchStatus,
   ResultsPayload,
   RuntimeInfo,
@@ -68,7 +69,7 @@ export type RailWatchStore = {
   results: QueryResultRow[];
   hits: TicketHit[];
   notifications: NotifyPayload[];
-  activePage: string;
+  activePage: RailWatchPage;
   logPaused: boolean;
   eventPanelVisible: boolean;
   applyRuntimeInfo: (runtime: RuntimeInfo) => void;
@@ -77,7 +78,7 @@ export type RailWatchStore = {
   applyResults: (payload: ResultsPayload) => void;
   applyNotify: (payload: NotifyPayload) => void;
   setConfig: (patch: Partial<RailWatchConfig>) => void;
-  setActivePage: (page: string) => void;
+  setActivePage: (page: RailWatchPage) => void;
   setLogPaused: (paused: boolean) => void;
   setEventPanelVisible: (visible: boolean) => void;
   clearLogs: () => void;
