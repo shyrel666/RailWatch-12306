@@ -166,7 +166,9 @@ export function RailWatchApp() {
       <ShellLayout
         activePage={activePage}
         darkMode={darkMode}
-        eventPanel={eventPanelVisible ? <EventPanel runCommand={runCommand} /> : null}
+        eventPanel={
+          eventPanelVisible ? <EventPanel runCommand={runCommand} onClose={() => setEventPanelVisible(false)} /> : null
+        }
         eventPanelVisible={eventPanelVisible}
         runtime={runtime}
         status={status}
