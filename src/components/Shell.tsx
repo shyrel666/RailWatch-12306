@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 import { Button } from "antd";
 import { Activity, CheckCircle2, Eye, EyeOff, Gauge, MonitorPlay, TrainFront, Settings, XCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { RailWatchStatus, RuntimeInfo } from "../types";
+import type { RailWatchPage, RailWatchStatus, RuntimeInfo } from "../types";
 
-export const RAILWATCH_PAGES: { name: string; icon: LucideIcon }[] = [
+export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
   { name: "仪表盘", icon: Gauge },
   { name: "行程设置", icon: TrainFront },
   { name: "监控", icon: MonitorPlay },
@@ -18,11 +18,11 @@ export function SidebarNav({
   phase,
   onPageChange,
 }: {
-  activePage: string;
+  activePage: RailWatchPage;
   appName: string;
   dataDir: string;
   phase: string;
-  onPageChange: (page: string) => void;
+  onPageChange: (page: RailWatchPage) => void;
 }) {
   return (
     <aside className="sidebar">
@@ -68,14 +68,14 @@ export function ShellLayout({
   onPageChange,
   onToggleEventPanel,
 }: {
-  activePage: string;
+  activePage: RailWatchPage;
   children: ReactNode;
   darkMode: boolean;
   eventPanel: ReactNode;
   eventPanelVisible: boolean;
   runtime: RuntimeInfo;
   status: RailWatchStatus;
-  onPageChange: (page: string) => void;
+  onPageChange: (page: RailWatchPage) => void;
   onToggleEventPanel: () => void;
 }) {
   return (
