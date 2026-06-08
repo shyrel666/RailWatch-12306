@@ -78,6 +78,26 @@ class RailWatchState:
             error_message="" if ready else (message or "需要登录"),
         )
 
+    def with_login_opened(self, message: str = "") -> "RailWatchState":
+        return replace(
+            self,
+            phase=AppPhase.LOGIN,
+            login_ready=False,
+            risk_level="notice",
+            status_message=message or "登录页面已打开，请完成登录",
+            error_message="",
+        )
+
+    def with_login_verified(self, ready: bool, message: str = "") -> "RailWatchState":
+        return replace(
+            self,
+            phase=AppPhase.LOGIN if ready else AppPhase.ERROR,
+            login_ready=ready,
+            risk_level="notice" if ready else "warning",
+            status_message=message or ("登录已验证" if ready else "登录未完成"),
+            error_message="" if ready else (message or "登录未完成"),
+        )
+
     def with_query_ready(
         self, ready: bool, config: Optional[Mapping[str, object]] = None, message: str = ""
     ) -> "RailWatchState":

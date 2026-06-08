@@ -39,6 +39,10 @@ describe("EventPanel", () => {
     const feed = screen.getByRole("feed", { name: "事件流" });
     const entries = within(feed).getAllByRole("article");
 
+    expect(feed.className).toContain("has-events");
+    expect(entries[0].querySelector(".event-dot.warn")).toBeTruthy();
+    expect(entries[0].querySelector(".event-row time")?.textContent).toBe("09:00:03");
+    expect(entries[0].querySelector(".event-level.warn")?.textContent).toBe("警告");
     expect(entries[0].textContent).toContain("刷新间隔偏低");
     expect(entries[2].textContent).toContain("环境检查");
 
@@ -62,6 +66,7 @@ describe("EventPanel", () => {
 
     render(<EventPanel runCommand={runCommand} onClose={vi.fn()} />);
 
+    expect(screen.getByRole("feed", { name: "事件流" }).className).not.toContain("has-events");
     expect(screen.getByText("暂无事件")).toBeTruthy();
     expect(screen.getByText("运行日志会在这里按时间倒序显示。")).toBeTruthy();
   });

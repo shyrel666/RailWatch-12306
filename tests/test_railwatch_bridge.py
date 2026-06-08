@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 class RailWatchBridgeContractTests(unittest.TestCase):
@@ -66,6 +66,45 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "出行日期为必填项"):
             validate_config({"from_station_cn": "北京", "to_station_cn": "上海", "date": ""})
 
+    def test_save_config_persists_renderer_strategy_fields(self):
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+
+            saved = bridge.save_config(
+                {
+                    "from_station_cn": "北京",
+                    "to_station_cn": "上海",
+                    "date": "2026-06-10",
+                    "date_range": "±2天",
+                    "interval": 1.5,
+                    "query_timeout": 25,
+                    "smart_rate": False,
+                    "timer_enabled": True,
+                    "target_time": "08:30:00",
+                    "keep_alive": False,
+                }
+            )
+
+            self.assertEqual(saved["date_range"], "±2天")
+            self.assertEqual(saved["interval"], 1.5)
+            self.assertEqual(saved["query_timeout"], 25)
+            self.assertFalse(saved["smart_rate"])
+            self.assertTrue(saved["timer_enabled"])
+            self.assertEqual(saved["target_time"], "08:30:00")
+
+            with open(os.path.join(temp_dir, "user_config.json"), "r", encoding="utf-8") as handle:
+                persisted = json.load(handle)
+
+            self.assertEqual(persisted["date_range"], "±2天")
+            self.assertEqual(persisted["interval"], 1.5)
+            self.assertEqual(persisted["query_timeout"], 25)
+            self.assertFalse(persisted["smart_rate"])
+            self.assertTrue(persisted["timer_enabled"])
+            self.assertEqual(persisted["target_time"], "08:30:00")
+            self.assertFalse(persisted["keep_alive"])
+
     def test_start_monitor_requires_confirmation_when_dangerous_automation_enabled(self):
         from railwatch_bridge import RailWatchBridge
 
@@ -87,6 +126,84 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertIn("自动提交", result["message"])
         self.assertIn("自动候补", result["message"])
         self.assertFalse(bridge.is_monitoring)
+
+    def test_open_login_opens_page_without_marking_login_ready(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def __init__(self):
+                self.opened_url = ""
+
+            def get(self, url):
+                self.opened_url = url
+
+        driver = FakeDriver()
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge._ensure_driver = lambda: driver
+
+        state = bridge.open_login()
+
+        self.assertIn("login.html", driver.opened_url)
+        self.assertFalse(state["login_ready"])
+        self.assertIn("登录页面已打开", state["status_message"])
+
+    def test_check_login_marks_ready_when_12306_session_is_valid(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def execute_script(self, script):
+                return {"data": {"flag": True}}
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.driver = FakeDriver()
+
+        state = bridge.check_login()
+
+        self.assertTrue(state["login_ready"])
+        self.assertEqual(state["status_message"], "登录已验证")
+
+    def test_check_login_rejects_missing_browser_session(self):
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+
+        state = bridge.check_login()
+
+        self.assertFalse(state["login_ready"])
+        self.assertIn("请先打开登录页", state["error_message"])
+
+    def test_analyze_query_expands_date_range_and_tags_rows(self):
+        from railwatch_bridge import RailWatchBridge
+
+        analyzed_dates = []
+        emitted_events = []
+
+        class FakeAnalyzer:
+            def __init__(self, driver, log_callback=None, base_dir=None):
+                self.driver = driver
+
+            def open_fill_query_and_analyze(self, config):
+                analyzed_dates.append(config["date"])
+                return [{"train": "G101", "raw": f"G101 {config['date']} 二等座 有"}]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=emitted_events.append)
+            bridge._ensure_driver = lambda: object()
+
+            with patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer), patch("railwatch_bridge.CORE_AVAILABLE", True):
+                result = bridge.analyze_query(
+                    {
+                        "from_station_cn": "北京",
+                        "to_station_cn": "上海",
+                        "date": "2026-06-10",
+                        "date_range": "±1天",
+                    }
+                )
+
+        self.assertEqual(analyzed_dates, ["2026-06-09", "2026-06-10", "2026-06-11"])
+        self.assertTrue(result["query_ready"])
+        self.assertEqual(bridge.query_results[0]["date"], "2026-06-09")
+        self.assertEqual(bridge.query_results[2]["date"], "2026-06-11")
 
     def test_log_export_writes_existing_event_format(self):
         from railwatch_bridge import RailWatchBridge
@@ -137,6 +254,46 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "监控运行中"):
             bridge.close_browser(confirmed=True)
 
+    def test_wait_for_target_time_sends_keep_alive_when_enabled(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def __init__(self):
+                self.keep_alive_calls = 0
+
+            def execute_script(self, script):
+                if "checkUser" in script:
+                    self.keep_alive_calls += 1
+                return None
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.driver = FakeDriver()
+        bridge.is_monitoring = True
+
+        with patch("railwatch_bridge.time.time", side_effect=[0, 61, 62]), patch("railwatch_bridge.time.sleep", lambda seconds: None):
+            bridge._wait_for_target_timestamp(62, {"keep_alive": True})
+
+        self.assertEqual(bridge.driver.keep_alive_calls, 1)
+
+    def test_wait_for_target_time_skips_keep_alive_when_disabled(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def __init__(self):
+                self.keep_alive_calls = 0
+
+            def execute_script(self, script):
+                self.keep_alive_calls += 1
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.driver = FakeDriver()
+        bridge.is_monitoring = True
+
+        with patch("railwatch_bridge.time.time", side_effect=[0, 61, 62]), patch("railwatch_bridge.time.sleep", lambda seconds: None):
+            bridge._wait_for_target_timestamp(62, {"keep_alive": False})
+
+        self.assertEqual(bridge.driver.keep_alive_calls, 0)
+
     def test_get_runtime_info_includes_live_system_facts(self):
         from railwatch_bridge import RailWatchBridge
 
@@ -173,6 +330,19 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_json_runtime_dispatches_check_login(self):
+        from railwatch_runtime import RailWatchRuntime
+
+        bridge = Mock()
+        bridge.check_login.return_value = {"login_ready": True}
+        emitted = []
+        runtime = RailWatchRuntime(bridge=bridge, writer=lambda payload: emitted.append(payload))
+
+        runtime.handle_line('{"id":"1","command":"checkLogin","payload":{}}')
+
+        self.assertEqual(emitted[0]["result"], {"login_ready": True})
+        bridge.check_login.assert_called_once_with()
 
     def test_runtime_process_outputs_utf8_json(self):
         completed = subprocess.run(

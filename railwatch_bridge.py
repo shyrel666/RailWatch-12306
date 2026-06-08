@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Callable, Dict, List, Optional
 
 from railwatch_preferences import load_theme_preference, save_theme_preference
+from railwatch_dates import expand_travel_dates
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, RailWatchState, TicketHit
 from railwatch_system import get_app_version, inspect_data_dir, probe_connectivity
 
@@ -101,6 +102,7 @@ def default_config(today: Optional[date] = None, now: Optional[datetime] = None)
         "train_code": "",
         "seat_keyword": "",
         "interval": 5,
+        "query_timeout": 40,
         "auto_submit": False,
         "seat_prefer": "无偏好",
         "passenger_count": 1,
@@ -136,6 +138,18 @@ def _to_int(value: object, fallback: int, minimum: Optional[int] = None, maximum
     return parsed
 
 
+def _to_float(value: object, fallback: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = fallback
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
 def validate_config(raw_config: dict) -> dict:
     config = default_config()
     config.update(raw_config or {})
@@ -148,7 +162,8 @@ def validate_config(raw_config: dict) -> dict:
     config["passengers"] = str(config.get("passengers", "")).strip()
     config["alternate_deadline"] = str(config.get("alternate_deadline", "18:00")).strip() or "18:00"
     config["target_time"] = str(config.get("target_time", "00:00:00")).strip() or "00:00:00"
-    config["interval"] = _to_int(config.get("interval"), 5, minimum=1, maximum=60)
+    config["interval"] = _to_float(config.get("interval"), 5.0, minimum=1.0, maximum=60.0)
+    config["query_timeout"] = _to_int(config.get("query_timeout"), 40, minimum=5, maximum=120)
     config["passenger_count"] = _to_int(config.get("passenger_count"), 1, minimum=1, maximum=20)
     config["prepare_time"] = _to_int(config.get("prepare_time"), 2, minimum=0, maximum=30)
     config["auto_submit"] = _to_bool(config.get("auto_submit"))
@@ -351,9 +366,28 @@ class RailWatchBridge:
             driver = self._ensure_driver()
             driver.get(LOGIN_URL)
             self.log("登录页面已打开，请在浏览器中完成 12306 登录。")
-            return self.emit_state(self.state.with_login(True, "登录页面已打开"))
+            return self.emit_state(self.state.with_login_opened("登录页面已打开，请在浏览器中完成 12306 登录。"))
         except Exception as exc:
             return self.emit_state(self.state.with_error(f"打开登录页失败: {exc}"))
+
+    def check_login(self) -> dict:
+        if not self.driver:
+            return self.emit_state(self.state.with_login_verified(False, "请先打开登录页。"))
+        try:
+            result = self.driver.execute_script(
+                """
+                return fetch('/otn/login/checkUser', {credentials: 'include'})
+                  .then(response => response.json())
+                  .catch(() => ({data: {flag: false}}));
+                """
+            )
+            ready = bool(((result or {}).get("data") or {}).get("flag"))
+            if ready:
+                self.log("12306 登录状态已验证。", "SUCCESS")
+                return self.emit_state(self.state.with_login_verified(True, "登录已验证"))
+            return self.emit_state(self.state.with_login_verified(False, "12306 登录未完成。"))
+        except Exception as exc:
+            return self.emit_state(self.state.with_login_verified(False, f"登录状态检查失败: {exc}"))
 
     def analyze_query(self, raw_config: dict) -> dict:
         config = validate_config(raw_config)
@@ -365,7 +399,12 @@ class RailWatchBridge:
                 raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
             driver = self._ensure_driver()
             analyzer = PageAnalyzer(driver, log_callback=self.log, base_dir=self.data_dir)
-            rows = analyzer.open_fill_query_and_analyze(config)
+            rows = []
+            for travel_date in expand_travel_dates(config["date"], config["date_range"]):
+                date_config = {**config, "date": travel_date}
+                date_rows = analyzer.open_fill_query_and_analyze(date_config)
+                if date_rows:
+                    rows.extend([{**row, "date": travel_date} for row in date_rows])
             if not rows:
                 raise RuntimeError("未解析到查询结果行。")
             self.query_results = rows
@@ -493,11 +532,34 @@ class RailWatchBridge:
             target = target + timedelta(days=1)
         wait_until = target.timestamp() - int(config.get("prepare_time", 0))
         self.log(f"定时启动已设定于 {target.strftime('%H:%M:%S')}。")
+        if not self._wait_for_target_timestamp(wait_until, config):
+            return False
+        self.log("预备窗口已到达，启动监控。", "SUCCESS")
+        return True
+
+    def _send_keep_alive(self) -> None:
+        if not self.driver:
+            return
+        try:
+            self.driver.execute_script(
+                """
+                fetch('/otn/login/checkUser', {credentials: 'include'}).catch(() => null);
+                """
+            )
+            self.log("会话保活已发送。")
+        except Exception as exc:
+            self.log(f"会话保活失败: {exc}", "WARN")
+
+    def _wait_for_target_timestamp(self, wait_until: float, config: dict) -> bool:
+        last_keep_alive = 0.0
         while time.time() < wait_until:
             if not self.is_monitoring:
                 return False
+            now = time.time()
+            if config.get("keep_alive") and now - last_keep_alive >= 60:
+                self._send_keep_alive()
+                last_keep_alive = now
             time.sleep(1)
-        self.log("预备窗口已到达，启动监控。", "SUCCESS")
         return True
 
     def _ensure_driver(self, test_only: bool = False):
@@ -594,6 +656,7 @@ class RailWatchBridge:
             train_code=config["train_code"],
             seat_keyword=config["seat_keyword"],
             interval=config["interval"],
+            query_timeout=config["query_timeout"],
             auto_submit=config["auto_submit"],
             seat_prefer=config["seat_prefer"],
             passenger_count=config["passenger_count"],
@@ -602,6 +665,10 @@ class RailWatchBridge:
             passengers=config["passengers"],
             auto_alternate=config["auto_alternate"],
             alternate_deadline=config["alternate_deadline"],
+            date_range=config["date_range"],
+            smart_rate=config["smart_rate"],
+            timer_enabled=config["timer_enabled"],
+            target_time=config["target_time"],
         )
 
 

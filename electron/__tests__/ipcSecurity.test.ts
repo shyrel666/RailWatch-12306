@@ -12,6 +12,7 @@ import {
 describe("ipcSecurity", () => {
   test("accepts only known RailWatch runtime commands", () => {
     expect(isRailWatchCommand("getRuntimeInfo")).toBe(true);
+    expect(isRailWatchCommand("checkLogin")).toBe(true);
     expect(isRailWatchCommand("clearLocalData")).toBe(true);
     expect(isRailWatchCommand("shell")).toBe(false);
   });

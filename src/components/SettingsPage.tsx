@@ -161,6 +161,16 @@ export function SettingsPage({
             <span className="sw-action-label">打开登录</span>
             <span className="sw-action-desc">启动浏览器并导航至 12306</span>
           </button>
+          <button
+            className="sw-action-card"
+            disabled={busy === "checkLogin"}
+            onClick={() => void runCommand("checkLogin")}
+            type="button"
+          >
+            <LogIn size={18} />
+            <span className="sw-action-label">检查登录</span>
+            <span className="sw-action-desc">验证当前 12306 会话状态</span>
+          </button>
         </div>
       </section>
 

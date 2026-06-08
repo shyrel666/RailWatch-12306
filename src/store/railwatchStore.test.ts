@@ -90,4 +90,65 @@ describe("railwatchStore", () => {
     expect(state.hits[0].train_code).toBe("G101");
     expect(state.notifications[0].title).toBe("发现目标车票");
   });
+
+  test("applies runtime label patches from backend events", () => {
+    const store = createRailWatchStore();
+
+    store.getState().applyRuntimeLabels({
+      chromedriver_path: "D:/RailWatch/chromedriver.exe",
+      chrome_version: "Chrome 148",
+    });
+
+    expect(store.getState().runtime.chromedriver_path).toBe("D:/RailWatch/chromedriver.exe");
+    expect(store.getState().runtime.chrome_version).toBe("Chrome 148");
+  });
+
+  test("clears stale hits when backend state reports no hits", () => {
+    const store = createRailWatchStore();
+
+    store.getState().applyNotify({
+      title: "发现目标车票",
+      message: "命中：G101",
+      hit: {
+        train_code: "G101",
+        seat_type: "二等座",
+        status: "available",
+        source: "regular",
+        detail: "命中：G101",
+        label: "G101 二等座 有票: available",
+      },
+    });
+
+    expect(store.getState().hits).toHaveLength(1);
+
+    store.getState().applyState({
+      ...store.getState().status,
+      hits: [],
+    });
+
+    expect(store.getState().hits).toEqual([]);
+  });
+
+  test("syncs ticket hits from runtime info state", () => {
+    const store = createRailWatchStore();
+    const backendHit = {
+      train_code: "G201",
+      seat_type: "一等座",
+      status: "available",
+      source: "regular" as const,
+      detail: "命中：G201",
+      label: "G201 一等座 有票: available",
+    };
+
+    store.getState().applyRuntimeInfo({
+      ...store.getState().runtime,
+      state: {
+        ...store.getState().status,
+        hits: [backendHit],
+      },
+    });
+
+    expect(store.getState().status.hits).toEqual([backendHit]);
+    expect(store.getState().hits).toEqual([backendHit]);
+  });
 });

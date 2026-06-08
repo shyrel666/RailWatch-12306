@@ -84,4 +84,19 @@ describe("TripSetupPage", () => {
     expect(railwatchStore.getState().config.from_station_cn).toBe("上海");
     expect(railwatchStore.getState().config.to_station_cn).toBe("北京");
   });
+
+  test("writes query timeout and supported date range into backend config shape", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.fn(async () => false) as ConfirmDialog;
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+
+    render(<TripSetupPage busy={null} confirm={confirm} runCommand={runCommand} />);
+
+    await user.click(screen.getByRole("button", { name: "±2天" }));
+    await user.click(screen.getByLabelText("增加超时时间"));
+
+    expect(railwatchStore.getState().config.date_range).toBe("±2天");
+    expect(railwatchStore.getState().config.query_timeout).toBe(41);
+    expect(screen.queryByRole("button", { name: "自定义" })).toBeNull();
+  });
 });

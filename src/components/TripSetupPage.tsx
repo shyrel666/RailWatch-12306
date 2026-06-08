@@ -17,7 +17,7 @@ import type { RailWatchConfig } from "../types";
 import type { CommandRunner, ConfirmDialog } from "./componentTypes";
 import { RiskToggle } from "./DisplayPrimitives";
 
-type DateRangePreset = "单日" | "±1天" | "±2天" | "自定义";
+type DateRangePreset = "单日" | "±1天" | "±2天";
 type PriorityMode = "速度优先" | "成功率优先";
 type RequestMode = "均衡模式" | "保守模式" | "快速模式";
 
@@ -135,7 +135,6 @@ export function TripSetupPage({
   const setConfig = useRailWatchStore((state) => state.setConfig);
   const [dateRange, setDateRange] = useState<DateRangePreset>(() => (config.date_range as DateRangePreset) || "±1天");
   const [priority, setPriority] = useState<PriorityMode>("速度优先");
-  const [queryTimeout, setQueryTimeout] = useState(10);
   const [requestMode, setRequestMode] = useState<RequestMode>(() => smartRateToRequestMode(config.smart_rate, config.interval));
   const [passengerDraft, setPassengerDraft] = useState("");
 
@@ -325,7 +324,7 @@ export function TripSetupPage({
               <span>日期范围</span>
               <SegmentedControl
                 ariaLabel="日期范围"
-                options={["单日", "±1天", "±2天", "自定义"] as const}
+                options={["单日", "±1天", "±2天"] as const}
                 value={dateRange}
                 onChange={(next) => { setDateRange(next); update({ date_range: next }); }}
               />
@@ -437,8 +436,8 @@ export function TripSetupPage({
                 min={5}
                 step={1}
                 suffix="秒"
-                value={queryTimeout}
-                onChange={setQueryTimeout}
+                value={config.query_timeout}
+                onChange={(value) => update({ query_timeout: value })}
               />
             </div>
             <div className="trip-field">

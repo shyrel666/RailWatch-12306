@@ -58,6 +58,7 @@ export const defaultConfig: RailWatchConfig = {
   train_code: "",
   seat_keyword: "",
   interval: 5,
+  query_timeout: 40,
   auto_submit: false,
   seat_prefer: "无偏好",
   passenger_count: 1,
@@ -84,6 +85,7 @@ export type RailWatchStore = {
   logPaused: boolean;
   eventPanelVisible: boolean;
   applyRuntimeInfo: (runtime: RuntimeInfo) => void;
+  applyRuntimeLabels: (patch: Partial<Pick<RuntimeInfo, "chromedriver_path" | "chrome_version">>) => void;
   applyState: (status: RailWatchStatus) => void;
   applyLog: (entry: LogEntry) => void;
   applyResults: (payload: ResultsPayload) => void;
@@ -120,12 +122,16 @@ export function createRailWatchStore() {
       set({
         runtime,
         status: runtime.state,
+        hits: runtime.state.hits,
       });
+    },
+    applyRuntimeLabels: (patch) => {
+      set({ runtime: { ...get().runtime, ...patch } });
     },
     applyState: (status) => {
       set({
         status,
-        hits: status.hits.length ? status.hits : get().hits,
+        hits: status.hits,
       });
     },
     applyLog: (entry) => {

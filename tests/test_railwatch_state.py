@@ -47,6 +47,22 @@ class RailWatchStateTests(unittest.TestCase):
         self.assertEqual(state.hits, (hit,))
         self.assertIn("G101", state.summary())
 
+    def test_login_opened_is_not_login_ready(self):
+        state = RailWatchState.initial().with_login_opened("登录页面已打开")
+
+        self.assertEqual(state.phase, AppPhase.LOGIN)
+        self.assertFalse(state.login_ready)
+        self.assertEqual(state.status_message, "登录页面已打开")
+        self.assertEqual(state.error_message, "")
+
+    def test_login_verified_marks_login_ready(self):
+        state = RailWatchState.initial().with_login_verified(True, "登录已验证")
+
+        self.assertEqual(state.phase, AppPhase.LOGIN)
+        self.assertTrue(state.login_ready)
+        self.assertEqual(state.status_message, "登录已验证")
+        self.assertEqual(state.error_message, "")
+
     def test_errors_stop_monitoring_and_surface_risk(self):
         state = RailWatchState.initial().with_monitoring(True).with_error("Driver lost")
 

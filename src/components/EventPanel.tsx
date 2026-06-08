@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Tooltip } from "antd";
+import { Tooltip } from "antd";
 import { Eraser } from "lucide-react";
 import { countEventsByFilter, presentEventLogs } from "../lib/formatEventLog";
 import { useRailWatchStore } from "../store/useRailWatchStore";
@@ -17,6 +17,9 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
     await runCommand("clearLog");
   };
   const visibleLogs = presentEventLogs(logs, filter);
+  const listClassName = ["event-list", logPaused ? "paused" : "", visibleLogs.length > 0 ? "has-events" : ""]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <aside className="event-panel" aria-label="事件面板">
@@ -24,9 +27,10 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
         <h2>事件日志</h2>
         <div className="event-head-actions">
           <Tooltip title="清空事件">
-            <Button aria-label="清空事件" icon={<Eraser size={15} />} onClick={() => void clearBothLogs()} size="small">
-              清空
-            </Button>
+            <button aria-label="清空事件" className="event-clear-btn" onClick={() => void clearBothLogs()} type="button">
+              <Eraser size={14} />
+              <span>清空</span>
+            </button>
           </Tooltip>
         </div>
       </div>
@@ -45,7 +49,7 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
           </button>
         ))}
       </div>
-      <div className={logPaused ? "event-list paused" : "event-list"} role="feed" aria-label="事件流">
+      <div className={listClassName} role="feed" aria-label="事件流">
         {visibleLogs.length === 0 ? (
           <div className="event-empty">
             <strong>暂无事件</strong>
@@ -54,12 +58,10 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
         ) : (
           visibleLogs.map((entry, index) => (
             <article className={`event-entry ${entry.tone}`} key={`${entry.time}-${entry.title}-${index}`}>
+              <span aria-hidden="true" className={`event-dot ${entry.tone}`} />
               <div className="event-body">
                 <div className="event-row">
-                  <div className="event-meta">
-                    <time dateTime={entry.time}>{entry.time}</time>
-                    <span aria-hidden="true" className={`event-dot ${entry.tone}`} />
-                  </div>
+                  <time dateTime={entry.time}>{entry.time}</time>
                   <span className={`event-level ${entry.tone}`}>{entry.label}</span>
                 </div>
                 <strong>{entry.title}</strong>

@@ -9,6 +9,7 @@ export type RailWatchConfig = {
   train_code: string;
   seat_keyword: string;
   interval: number;
+  query_timeout: number;
   auto_submit: boolean;
   seat_prefer: string;
   passenger_count: number;

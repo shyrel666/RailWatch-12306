@@ -7,6 +7,7 @@ export const RAILWATCH_COMMANDS = [
   "checkEnvironment",
   "downloadChromeDriver",
   "openLogin",
+  "checkLogin",
   "analyzeQuery",
   "startMonitor",
   "stopMonitor",

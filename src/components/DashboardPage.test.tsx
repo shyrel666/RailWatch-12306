@@ -55,7 +55,9 @@ describe("DashboardPage", () => {
     expect(steps[4].textContent).toContain("命中");
     expect(screen.getByText("站点范围")).toBeTruthy();
     expect(screen.getByText("请求模式")).toBeTruthy();
-    expect(screen.getByText("并发请求")).toBeTruthy();
+    expect(screen.queryByText("并发请求")).toBeNull();
+    expect(screen.queryByText("自动跳转支付")).toBeNull();
+    expect(screen.queryByRole("button", { name: "了解更多风险说明" })).toBeNull();
     expect(screen.getByLabelText("自动化状态")).toBeTruthy();
     expect(screen.queryByLabelText("乘客")).toBeNull();
   });
@@ -70,6 +72,17 @@ describe("DashboardPage", () => {
 
     await user.click(screen.getByRole("button", { name: /进入购票监控/ }));
     expect(railwatchStore.getState().activePage).toBe("购票监控");
+  });
+
+  test("shows the configured date range instead of a hardcoded range", () => {
+    railwatchStore.setState({
+      config: { ...defaultConfig, date: "2026-06-10", date_range: "±2天" },
+    });
+
+    render(<DashboardPage />);
+
+    expect(screen.getByText("6月10日（±2天）")).toBeTruthy();
+    expect(screen.queryByText("6月10日（±3天）")).toBeNull();
   });
 
   test("moves the workflow current step to hit after a ticket hit", () => {

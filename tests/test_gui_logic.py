@@ -81,7 +81,7 @@ sys.modules.setdefault("selenium.webdriver.common.action_chains", actions_module
 sys.modules.setdefault("selenium.common", selenium_common)
 sys.modules.setdefault("selenium.common.exceptions", exceptions_module)
 
-from gui_12306_0 import BaseHandler, QueryConfig, TicketMonitor
+from gui_12306_0 import BaseHandler, PageAnalyzer, QueryConfig, TicketMonitor
 
 
 class FakeButton:
@@ -164,6 +164,47 @@ class FakeAlternateDriver:
         return object()
 
 
+class FakePageDriver:
+    def __init__(self):
+        self.opened_url = ""
+
+    def get(self, url):
+        self.opened_url = url
+
+    def execute_script(self, script, *args):
+        return None
+
+
+class FakeDateCyclingDriver:
+    def __init__(self):
+        self.scripts = []
+
+    def execute_script(self, script, *args):
+        self.scripts.append((script, args))
+        return None
+
+
+class FakeRefreshDateDriver:
+    def __init__(self):
+        self.events = []
+
+    def refresh(self):
+        self.events.append("refresh")
+
+    def execute_script(self, script, *args):
+        if "train_date" in script:
+            self.events.append(f"date:{args[0]}")
+        return None
+
+
+class SuccessfulWait:
+    def __init__(self, driver, timeout):
+        self.driver = driver
+
+    def until(self, condition):
+        return object()
+
+
 class FakeWait:
     def __init__(self, driver, timeout):
         self.driver = driver
@@ -190,6 +231,123 @@ class TicketMonitorLogicTests(unittest.TestCase):
         self.assertEqual(data.get("passenger_count"), 2)
         self.assertTrue(data["auto_alternate"])
         self.assertEqual(data["alternate_deadline"], "18:00")
+
+    def test_query_config_persists_renderer_strategy_fields(self):
+        cfg = QueryConfig(
+            interval=1.5,
+            query_timeout=25,
+            date_range="±2天",
+            smart_rate=False,
+            timer_enabled=True,
+            target_time="08:30:00",
+        )
+
+        data = cfg.to_dict()
+
+        self.assertEqual(data["interval"], 1.5)
+        self.assertEqual(data["query_timeout"], 25)
+        self.assertEqual(data["date_range"], "±2天")
+        self.assertFalse(data["smart_rate"])
+        self.assertTrue(data["timer_enabled"])
+        self.assertEqual(data["target_time"], "08:30:00")
+
+    def test_page_analyzer_uses_configured_query_timeout(self):
+        analyzer = PageAnalyzer(FakePageDriver(), log_callback=lambda msg: None, base_dir=".")
+        analyzer.resolver = type("Resolver", (), {"get_code": lambda self, name: f"{name}站码"})()
+        analyzer.click_query_button = lambda: True
+        analyzer._parse_rows = lambda: [{"train": "G101", "raw": "G101 二等座 有"}]
+        observed_timeout = []
+
+        def wait_for_rows(timeout=40, stop_check=None):
+            observed_timeout.append(timeout)
+            return True
+
+        analyzer.wait_for_rows = wait_for_rows
+
+        with patch("gui_12306_0.WebDriverWait", SuccessfulWait):
+            rows = analyzer.open_fill_query_and_analyze(
+                {
+                    "from_station_cn": "北京",
+                    "to_station_cn": "上海",
+                    "date": "2026-06-10",
+                    "query_timeout": 25,
+                }
+            )
+
+        self.assertEqual(rows, [{"train": "G101", "raw": "G101 二等座 有"}])
+        self.assertEqual(observed_timeout, [25])
+
+    def test_ticket_monitor_uses_configured_query_timeout(self):
+        class Driver:
+            def refresh(self):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"query_timeout": 23},
+            log_callback=lambda msg: None,
+        )
+        monitor.click_query_button = lambda: True
+        observed_timeout = []
+
+        def wait_for_rows(timeout=40, stop_check=None):
+            observed_timeout.append(timeout)
+            return False
+
+        monitor.wait_for_rows = wait_for_rows
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: None):
+            monitor._run_single_loop(1, 1)
+
+        self.assertEqual(observed_timeout, [23])
+
+    def test_monitor_run_preserves_decimal_interval_for_randomized_delay(self):
+        class Driver:
+            pass
+
+        observed_intervals = []
+        stop_calls = 0
+
+        def should_stop():
+            nonlocal stop_calls
+            stop_calls += 1
+            return stop_calls > 1
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 1.5, "smart_rate": False},
+            log_callback=lambda msg: None,
+            stop_check=should_stop,
+        )
+        monitor._run_single_loop = lambda loop_count, interval: False
+
+        def fake_random_interval(base_interval):
+            observed_intervals.append(base_interval)
+            return 0
+
+        with patch("gui_12306_0.WebDriverWait", SuccessfulWait), patch(
+            "gui_12306_0.get_random_interval",
+            fake_random_interval,
+        ):
+            monitor.run()
+
+        self.assertEqual(observed_intervals, [1.5])
+
+    def test_smart_rate_limiter_preserves_decimal_base_interval(self):
+        observed_intervals = []
+
+        class FakeRateLimiter:
+            def __init__(self, base_interval, min_interval, max_interval, log_callback):
+                observed_intervals.append(base_interval)
+
+        with patch("gui_12306_0.AdaptiveRateLimiter", FakeRateLimiter):
+            TicketMonitor(
+                object(),
+                {"interval": 3.5, "smart_rate": True},
+                log_callback=lambda msg: None,
+            )
+
+        self.assertEqual(observed_intervals, [3.5])
 
     def test_auto_submit_aborts_when_no_passenger_selected(self):
         driver = FakeDriver()
@@ -218,6 +376,40 @@ class TicketMonitorLogicTests(unittest.TestCase):
 
         self.assertTrue(driver.selection_attempted)
         self.assertFalse(driver.submit_button.clicked)
+
+
+class TicketMonitorDateRangeTests(unittest.TestCase):
+    def test_monitor_applies_date_range_dates_by_loop(self):
+        driver = FakeDateCyclingDriver()
+        monitor = TicketMonitor(
+            driver,
+            {"date": "2026-06-10", "date_range": "±1天"},
+            log_callback=lambda msg: None,
+        )
+
+        monitor._apply_loop_date(1)
+        monitor._apply_loop_date(2)
+        monitor._apply_loop_date(3)
+        monitor._apply_loop_date(4)
+
+        applied_dates = [args[0] for script, args in driver.scripts if "train_date" in script]
+        self.assertEqual(applied_dates, ["2026-06-09", "2026-06-10", "2026-06-11", "2026-06-09"])
+
+    def test_refresh_round_reapplies_travel_date_after_refresh(self):
+        driver = FakeRefreshDateDriver()
+        monitor = TicketMonitor(
+            driver,
+            {"date": "2026-06-10", "date_range": "单日", "query_timeout": 1},
+            log_callback=lambda msg: None,
+        )
+        monitor.current_loop_date = "2026-06-10"
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: False
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: None):
+            monitor._run_single_loop(5, 1)
+
+        self.assertEqual(driver.events, ["refresh", "date:2026-06-10"])
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ describe("SettingsPage", () => {
     expect(checkEnvironment).toBeTruthy();
     expect(screen.getByRole("button", { name: /下载 ChromeDriver/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /打开登录/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /检查登录/ })).toBeTruthy();
     expect(checkEnvironment.closest(".sw-danger-section")).toBeNull();
 
     expect(screen.getByRole("button", { name: /关闭浏览器/ })).toBeTruthy();

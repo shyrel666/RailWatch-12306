@@ -23,6 +23,8 @@ from typing import Optional, List, Dict, Callable, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 
+from railwatch_dates import expand_travel_dates
+
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -58,6 +60,13 @@ USER_CONFIG_FILE = "user_config.json"
 
 # 车次正则模式（统一定义，避免重复）
 TRAIN_CODE_PATTERN = re.compile(r"\b([GDKTZCS]\d{1,4})\b")
+
+
+def _read_float(value: object, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 # ==================== 席别映射 ====================
@@ -112,7 +121,8 @@ class QueryConfig:
     date: str = ""
     train_code: str = ""      # 兼容旧版单车次
     seat_keyword: str = ""    # 兼容旧版单席别
-    interval: int = 3
+    interval: float = 3.0
+    query_timeout: int = 40
     auto_submit: bool = False  # 是否自动提交订单
     seat_prefer: str = "无偏好"  # 座位偏好：无偏好/靠窗优先/靠过道优先
     passenger_count: int = 1    # 未指定姓名时默认勾选的乘车人数
@@ -125,6 +135,10 @@ class QueryConfig:
     # 候补订单功能
     auto_alternate: bool = False  # 是否启用无票时自动候补
     alternate_deadline: str = ""  # 候补截止时间，如 "18:00"
+    date_range: str = "单日"
+    smart_rate: bool = True
+    timer_enabled: bool = False
+    target_time: str = "00:00:00"
     
     # 新增：多目标支持
     targets: List[MonitorTarget] = field(default_factory=list)
@@ -138,6 +152,7 @@ class QueryConfig:
             "train_code": self.train_code,
             "seat_keyword": self.seat_keyword,
             "interval": self.interval,
+            "query_timeout": self.query_timeout,
             "auto_submit": self.auto_submit,
             "seat_prefer": self.seat_prefer,
             "passenger_count": self.passenger_count,
@@ -146,6 +161,10 @@ class QueryConfig:
             "passengers": self.passengers,
             "auto_alternate": self.auto_alternate,
             "alternate_deadline": self.alternate_deadline,
+            "date_range": self.date_range,
+            "smart_rate": self.smart_rate,
+            "timer_enabled": self.timer_enabled,
+            "target_time": self.target_time,
         }
     
     @classmethod
@@ -157,7 +176,8 @@ class QueryConfig:
             date=data.get("date", ""),
             train_code=data.get("train_code", ""),
             seat_keyword=data.get("seat_keyword", ""),
-            interval=data.get("interval", 3),
+            interval=data.get("interval", 3.0),
+            query_timeout=data.get("query_timeout", 40),
             auto_submit=data.get("auto_submit", False),
             seat_prefer=data.get("seat_prefer", "无偏好"),
             passenger_count=data.get("passenger_count", 1),
@@ -166,6 +186,10 @@ class QueryConfig:
             passengers=data.get("passengers", ""),
             auto_alternate=data.get("auto_alternate", False),
             alternate_deadline=data.get("alternate_deadline", ""),
+            date_range=data.get("date_range", "单日"),
+            smart_rate=data.get("smart_rate", True),
+            timer_enabled=data.get("timer_enabled", False),
+            target_time=data.get("target_time", "00:00:00"),
         )
 
 
@@ -473,7 +497,8 @@ class PageAnalyzer(BaseHandler):
 
         # 等待结果行出现
         self.log("⏳ 等待查询结果加载...")
-        if not self.wait_for_rows(timeout=60):
+        query_timeout = int(cfg.get("query_timeout", 60))
+        if not self.wait_for_rows(timeout=query_timeout):
             self.log("❌ 超时：没有加载出任何车次行（可能无车次/日期不对/被风控/页面结构变化）")
             return None
 
@@ -547,11 +572,14 @@ class TicketMonitor(BaseHandler):
         self.rate_limiter = None
         if cfg.get("smart_rate", False) and AdaptiveRateLimiter:
             self.rate_limiter = AdaptiveRateLimiter(
-                base_interval=max(3, int(cfg.get("interval", 3))),
+                base_interval=max(3.0, _read_float(cfg.get("interval", 3), 3.0)),
                 min_interval=3.0,
                 max_interval=30.0,
                 log_callback=self.log,
             )
+        travel_date = str(cfg.get("date", "")).strip()
+        self.travel_dates = expand_travel_dates(travel_date, str(cfg.get("date_range", "单日"))) if travel_date else []
+        self.current_loop_date = ""
     
     def _parse_train_targets(self) -> List[str]:
         """解析目标车次列表"""
@@ -571,9 +599,33 @@ class TicketMonitor(BaseHandler):
         seats = re.split(r"[,，;\s]+", seat_str)
         return [s.strip() for s in seats if s.strip()]
 
+    def _apply_loop_date(self, loop_count: int, force: bool = False) -> None:
+        if not self.travel_dates:
+            return
+        travel_date = self.travel_dates[(loop_count - 1) % len(self.travel_dates)]
+        if travel_date == self.current_loop_date and not force:
+            return
+        self.driver.execute_script(
+            """
+            const date = arguments[0];
+            const input = document.querySelector('#train_date');
+            if (input) {
+                input.removeAttribute('readonly');
+                input.value = date;
+                input.dispatchEvent(new Event('input', {bubbles: true}));
+                input.dispatchEvent(new Event('change', {bubbles: true}));
+            }
+            """,
+            travel_date,
+        )
+        self.current_loop_date = travel_date
+        self.cfg["date"] = travel_date
+        if len(self.travel_dates) > 1:
+            self.log(f"📅 本轮监控日期：{travel_date}")
+
     def run(self):
         """主监控循环（风控优化增强版）"""
-        base_interval = max(1, int(self.cfg.get("interval", 3)))
+        base_interval = max(1.0, _read_float(self.cfg.get("interval", 3), 3.0))
         
         self.log(f"⏱ 基础刷新间隔：{base_interval}s（实际将随机浮动 ±30%）")
         self.log(f"🚄 目标车次：{', '.join(self.target_trains) if self.target_trains else '不限定'}")
@@ -642,6 +694,8 @@ class TicketMonitor(BaseHandler):
             if not is_burst_mode: human_delay(1.0, 2.0)
         else:
             self.log(f"🔎 第 {loop_count} 次：{'极速查询' if is_burst_mode else '快速直接查询'}... (间隔: {interval:.1f}s)")
+
+        self._apply_loop_date(loop_count, force=should_refresh)
         
         # 3) 刷新后的随机延迟
         if not is_burst_mode: human_delay(0.5, 1.2)
@@ -674,7 +728,8 @@ class TicketMonitor(BaseHandler):
             return False
 
         # 5) 等结果加载
-        if not self.wait_for_rows(timeout=40, stop_check=self.should_stop):
+        query_timeout = int(self.cfg.get("query_timeout", 40))
+        if not self.wait_for_rows(timeout=query_timeout, stop_check=self.should_stop):
             self.log("⚠️ 本轮未加载出车次结果，继续下一轮。")
             if self.rate_limiter:
                 self.rate_limiter.on_timeout()

@@ -315,7 +315,7 @@ export function DashboardPage() {
             </div>
             <div>
               <dt>日期范围</dt>
-              <dd>{compactTripDate}（±3天）</dd>
+              <dd>{compactTripDate}（{config.date_range || "单日"}）</dd>
             </div>
             <div>
               <dt>车次偏好</dt>
@@ -359,18 +359,6 @@ export function DashboardPage() {
                 setConfig(patch);
               }}
             />
-          </label>
-          <label>
-            <span>并发请求</span>
-            <span className="stepper-control">
-              <button type="button" aria-label="减少并发">
-                -
-              </button>
-              <strong>3</strong>
-              <button type="button" aria-label="增加并发">
-                +
-              </button>
-            </span>
           </label>
           <Button className="monitor-page-button" icon={<MonitorPlay size={14} />} onClick={goToMonitor} type="primary">
             进入购票监控
@@ -423,12 +411,6 @@ export function DashboardPage() {
               </span>
             </label>
             <label className="automation-toggle">
-              <Switch checked={false} disabled size="small" />
-              <span>
-                自动跳转支付 <strong>未启用</strong>
-              </span>
-            </label>
-            <label className="automation-toggle">
               <Switch checked={autoAlternateEnabled} disabled size="small" />
               <span>
                 自动候补下单 <strong>{autoAlternateEnabled ? "已启用" : "未启用"}</strong>
@@ -445,7 +427,6 @@ export function DashboardPage() {
         <div className="automation-warning">
           <ShieldAlert size={14} />
           <span>启用后可能导致账号受限或封禁，请充分了解风险后谨慎操作。</span>
-          <button type="button">了解更多风险说明</button>
         </div>
       </section>
     </div>

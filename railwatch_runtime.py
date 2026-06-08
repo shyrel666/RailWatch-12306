@@ -51,6 +51,7 @@ class RailWatchRuntime:
             "checkEnvironment": lambda: self.bridge.check_environment(),
             "downloadChromeDriver": lambda: self.bridge.download_chromedriver(),
             "openLogin": lambda: self.bridge.open_login(),
+            "checkLogin": lambda: self.bridge.check_login(),
             "analyzeQuery": lambda: self.bridge.analyze_query(payload.get("config") or payload),
             "startMonitor": lambda: self.bridge.start_monitor(
                 payload.get("config") or payload,

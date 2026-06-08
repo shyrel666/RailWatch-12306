@@ -98,6 +98,9 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
         case "logsCleared":
           state.clearLogs();
           break;
+        case "labels":
+          state.applyRuntimeLabels(event.payload as { chromedriver_path?: string; chrome_version?: string });
+          break;
         default:
           break;
       }
