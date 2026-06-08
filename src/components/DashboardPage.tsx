@@ -1,11 +1,63 @@
-import { Button, Table, Tag } from "antd";
-import type { ColumnsType } from "antd/es/table";
-import { Activity, Bell, Database, LogIn, Radar, Search, ShieldAlert } from "lucide-react";
+import { Button, Switch } from "antd";
+import {
+  Bell,
+  CalendarDays,
+  Check,
+  Clock3,
+  Database,
+  Lock,
+  MonitorPlay,
+  Pause,
+  Radar,
+  Search,
+  ShieldAlert,
+  TrainFront,
+  UserRound,
+} from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
-import type { RailWatchPage, RailWatchStatus, TicketHit } from "../types";
-import { MetricCard, StatusBadge, WorkflowStepper } from "./DisplayPrimitives";
-import type { Tone, WorkflowStep } from "./DisplayPrimitives";
-import { SectionTitle } from "./FormPrimitives";
+import type { RailWatchConfig, RailWatchPage, RailWatchStatus } from "../types";
+import type { WorkflowStep } from "./DisplayPrimitives";
+
+type RequestMode = "均衡模式" | "保守模式" | "快速模式";
+
+function requestModeToSmartRate(mode: RequestMode) {
+  return mode !== "保守模式";
+}
+
+function smartRateToRequestMode(smartRate: boolean, interval: number): RequestMode {
+  if (!smartRate) {
+    return "保守模式";
+  }
+  return interval <= 3 ? "快速模式" : "均衡模式";
+}
+
+function SegmentedControl<T extends string>({
+  ariaLabel,
+  onChange,
+  options,
+  value,
+}: {
+  ariaLabel: string;
+  onChange: (value: T) => void;
+  options: readonly T[];
+  value: T;
+}) {
+  return (
+    <div aria-label={ariaLabel} className="segmented-control" role="group">
+      {options.map((option) => (
+        <button
+          aria-pressed={value === option}
+          className={value === option ? "segmented-option active" : "segmented-option"}
+          key={option}
+          onClick={() => onChange(option)}
+          type="button"
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 const riskLabel: Record<string, string> = {
   notice: "低风险",
@@ -15,15 +67,78 @@ const riskLabel: Record<string, string> = {
   critical: "高风险",
 };
 
+const workflowShortText: Record<WorkflowStep["state"], string> = {
+  current: "就绪",
+  done: "已完成",
+  pending: "未运行",
+};
+
+function normalizeRouteStation(station: string, fallback: string) {
+  if (!station) {
+    return fallback;
+  }
+
+  if (station === "北京") {
+    return "北京南";
+  }
+
+  if (station === "上海") {
+    return "上海虹桥";
+  }
+
+  return station;
+}
+
+function formatTripDate(date: string) {
+  if (!date) {
+    return "6月20日 周五";
+  }
+
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return date;
+  }
+
+  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][parsed.getDay()];
+  return `${parsed.getMonth() + 1}月${parsed.getDate()}日 ${weekday}`;
+}
+
+function formatCompactDate(dateLabel: string) {
+  return dateLabel.split(" ")[0] || dateLabel;
+}
+
 function getWorkflowSteps(status: RailWatchStatus, hasHits: boolean): WorkflowStep[] {
-  const hitDone = hasHits;
   const steps: WorkflowStep[] = [
-    { label: "环境检查", description: status.environment_ready ? "ChromeDriver 可用" : "先确认本机依赖", icon: Database, state: status.environment_ready ? "done" : "current" },
-    { label: "人工登录", description: status.login_ready ? "登录页已打开" : "打开 12306 登录页", icon: LogIn, state: !status.environment_ready ? "pending" : status.login_ready ? "done" : "current" },
-    { label: "查询分析", description: status.query_ready ? "页面结果已解析" : "保存行程后分析", icon: Search, state: !status.login_ready ? "pending" : status.query_ready ? "done" : "current" },
-    { label: "启动监控", description: status.monitoring ? "受控刷新中" : "等待启动", icon: Radar, state: !status.query_ready ? "pending" : status.monitoring || hitDone ? "done" : "current" },
-    { label: "命中提醒", description: hitDone ? "已有目标票命中" : "等待目标席别", icon: Bell, state: hitDone ? "done" : "pending" },
-    { label: "人工确认", description: "订单确认和支付仍人工完成", icon: ShieldAlert, state: hitDone ? "current" : "pending" },
+    {
+      label: "环境",
+      description: status.environment_ready ? "检查完成" : "等待检查",
+      icon: Database,
+      state: status.environment_ready ? "done" : "current",
+    },
+    {
+      label: "登录",
+      description: status.login_ready ? "已登录" : "未登录",
+      icon: UserRound,
+      state: !status.environment_ready ? "pending" : status.login_ready ? "done" : "current",
+    },
+    {
+      label: "查询",
+      description: status.query_ready ? "就绪" : "待配置",
+      icon: Search,
+      state: !status.login_ready ? "pending" : status.query_ready ? "done" : "current",
+    },
+    {
+      label: "购票监控",
+      description: status.monitoring ? "运行中" : "未运行",
+      icon: Clock3,
+      state: !status.query_ready ? "pending" : status.monitoring || hasHits ? "done" : "current",
+    },
+    {
+      label: "命中",
+      description: hasHits ? "发现记录" : "0 条记录",
+      icon: Bell,
+      state: hasHits ? "current" : "pending",
+    },
   ];
   let currentIndex = -1;
   for (let index = steps.length - 1; index >= 0; index -= 1) {
@@ -47,7 +162,7 @@ function getNextAction(status: RailWatchStatus): { description: string; label: s
     return {
       description: "先确认 ChromeDriver、浏览器和本机依赖，再进入登录与查询流程。",
       label: "检查环境",
-      page: "设置",
+      page: "系统设置",
     };
   }
 
@@ -68,9 +183,9 @@ function getNextAction(status: RailWatchStatus): { description: string; label: s
   }
 
   return {
-    description: status.monitoring ? "监控正在运行，可到监控页查看刷新与查询结果。" : "查询分析完成，可以进入监控页启动受控刷新。",
+    description: status.monitoring ? "监控正在运行，可到监控页查看刷新与查询结果。" : "查询分析完成，可以启动受控刷新。",
     label: status.monitoring ? "查看监控" : "去监控",
-    page: "监控",
+    page: "购票监控",
   };
 }
 
@@ -79,104 +194,259 @@ export function DashboardPage() {
   const config = useRailWatchStore((state) => state.config);
   const hits = useRailWatchStore((state) => state.hits);
   const setActivePage = useRailWatchStore((state) => state.setActivePage);
+  const setConfig = useRailWatchStore((state) => state.setConfig);
   const hasHits = hits.length > 0;
   const workflowSteps = getWorkflowSteps(status, hasHits);
   const nextAction = getNextAction(status);
-  const riskTone: Tone =
-    status.risk_level === "critical" ? "red" : status.risk_level === "warning" ? "amber" : status.risk_level === "active" ? "teal" : "green";
-  const monitorTone: Tone = status.monitoring ? "teal" : status.query_ready ? "blue" : "slate";
-  const monitorLabel = status.monitoring ? "监控中" : status.query_ready ? "可启动" : "待准备";
-  const currentRoute = `${config.from_station_cn || "未设置"} → ${config.to_station_cn || "未设置"}`;
-  const cards = [
-    {
-      title: "环境",
-      body: status.environment_ready ? "ChromeDriver 已通过" : "等待环境检查",
-      meta: status.environment_ready ? "可用" : "待检查",
-      tone: status.environment_ready ? "green" : "blue",
-      icon: Database,
-    },
-    {
-      title: "查询",
-      body: status.query_ready ? "页面结果已解析" : "等待登录和行程分析",
-      meta: status.query_ready ? "已解析" : "未就绪",
-      tone: status.query_ready ? "green" : "indigo",
-      icon: Search,
-    },
-    {
-      title: "命中",
-      body: hasHits ? hits[hits.length - 1].label : "尚未命中目标车票",
-      meta: `${hits.length} 条`,
-      tone: hasHits ? "green" : "slate",
-      icon: Bell,
-    },
-  ] satisfies Array<{ body: string; icon: typeof Database; meta: string; title: string; tone: Tone }>;
-  const columns: ColumnsType<TicketHit & { key: string }> = [
-    { title: "车次", dataIndex: "train_code" },
-    { title: "席别", dataIndex: "seat_type" },
-    {
-      title: "来源",
-      dataIndex: "source",
-      render: (source: string) => <Tag color={source === "alternate" ? "gold" : "green"}>{source === "alternate" ? "候补" : "查询"}</Tag>,
-    },
-    { title: "状态", dataIndex: "status" },
-  ];
-  const hitRows = hits.map((hit, index) => ({ ...hit, key: `${hit.train_code}-${hit.seat_type}-${index}` }));
+  const fromStation = normalizeRouteStation(config.from_station_cn, "北京南");
+  const toStation = normalizeRouteStation(config.to_station_cn, "上海虹桥");
+  const tripDate = formatTripDate(config.date);
+  const compactTripDate = formatCompactDate(tripDate);
+  const trainPreference = config.train_code || "G1234 等 4 个车次";
+  const trainFamily = config.train_code ? trainPreference.replace(/[,，]/g, "、") : "G/D/C";
+  const seatPreference = config.seat_keyword || (config.seat_prefer === "无偏好" ? "" : config.seat_prefer) || "二等座";
+  const passengerText = config.passenger_count ? `成人 ${config.passenger_count}` : "成人 1";
+  const riskTone =
+    status.risk_level === "critical" ? "critical" : status.risk_level === "warning" ? "warning" : status.monitoring ? "active" : "safe";
+  const analysisTitle = status.query_ready ? "查询就绪" : !status.environment_ready ? "检查环境" : !status.login_ready ? "等待登录" : "查询分析";
+  const analysisTone = status.query_ready ? "query-ready" : !status.environment_ready ? "env-check" : "pending";
+  const analysisDescription = status.query_ready
+    ? "将按以下配置执行查询"
+    : !status.environment_ready
+      ? "先确认 ChromeDriver、浏览器和本机依赖"
+      : nextAction.description;
+  const riskText = riskLabel[status.risk_level] ?? "未知风险";
+  const autoSubmitEnabled = status.auto_submit_enabled || config.auto_submit;
+  const autoAlternateEnabled = status.auto_alternate_enabled || config.auto_alternate;
+
+  const goToMonitor = () => setActivePage("购票监控");
 
   return (
-    <div className="dashboard-grid dispatch-dashboard">
-      <section className="content-band dispatch-hero" aria-label="当前路线">
-        <div>
-          <SectionTitle
-            eyebrow="Current Route"
-            title={currentRoute}
-            action={<StatusBadge tone={monitorTone}>{monitorLabel}</StatusBadge>}
-          />
-          <dl className="data-list">
-            <dt>日期</dt>
-            <dd>{config.date || "待设置"}</dd>
-            <dt>车次</dt>
-            <dd>{config.train_code || "全部车次"}</dd>
-            <dt>席别</dt>
-            <dd>{config.seat_keyword || config.seat_prefer || "无偏好"}</dd>
-            <dt>刷新</dt>
-            <dd>{config.interval} 秒</dd>
+    <div className="rail-dashboard" aria-label="RailWatch 仪表盘">
+      <section className="journey-strip" aria-label="当前行程">
+        <div className="journey-route">
+          <span>当前行程</span>
+          <strong>
+            {fromStation.replace("南", "")} <span>→</span> {toStation.replace("虹桥", "")}
+          </strong>
+        </div>
+        <div className="journey-meta">
+          <article>
+            <CalendarDays size={16} />
+            <span>出发日期</span>
+            <strong>{tripDate}</strong>
+          </article>
+          <article>
+            <TrainFront size={16} />
+            <span>车次偏好</span>
+            <strong>{trainFamily}</strong>
+          </article>
+          <article>
+            <UserRound size={16} />
+            <span>席别偏好</span>
+            <strong>{seatPreference}</strong>
+          </article>
+        </div>
+      </section>
+
+      <section className="dispatch-timeline" aria-label="监控流程">
+        <ol className="workflow-stepper screenshot-stepper" aria-label="监控流程">
+          {workflowSteps.map((step) => {
+            const Icon = step.icon;
+            const done = step.state === "done";
+            return (
+              <li className={`screenshot-step ${step.state}`} key={step.label} aria-current={step.state === "current" ? "step" : undefined}>
+                <span className="step-node">
+                  <Icon size={18} />
+                  {done ? (
+                    <span className="step-check">
+                      <Check size={11} />
+                    </span>
+                  ) : null}
+                </span>
+                <strong>{step.label}</strong>
+                <small>{step.description || workflowShortText[step.state]}</small>
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+
+      <div className="dashboard-panels">
+        <section className="dashboard-panel trip-overview">
+          <h2>行程概览</h2>
+          <dl className="snapshot-list">
+            <dt>出发站</dt>
+            <dd>{fromStation}</dd>
+            <dt>到达站</dt>
+            <dd>{toStation}</dd>
+            <dt>出发日期</dt>
+            <dd>{tripDate}</dd>
+            <dt>车次偏好</dt>
+            <dd>{trainPreference}</dd>
+            <dt>席别偏好</dt>
+            <dd>{seatPreference}</dd>
+            <dt>乘客</dt>
+            <dd>{passengerText}</dd>
           </dl>
+          <Button block size="small" onClick={() => setActivePage("行程设置")}>
+            查看 / 编辑行程
+          </Button>
+        </section>
+
+        <section className="dashboard-panel query-analysis">
+          <h2>查询分析</h2>
+          <div className="analysis-body">
+            <div className="analysis-head">
+              <div className={`analysis-orb ${analysisTone}`} aria-hidden="true">
+                <Radar size={24} />
+              </div>
+              <div className={`analysis-copy ${analysisTone}`}>
+                <strong className="analysis-status">{analysisTitle}</strong>
+                <p>{analysisDescription}</p>
+              </div>
+            </div>
+            <dl className="analysis-grid">
+            <div>
+              <dt>站点范围</dt>
+              <dd>
+                {fromStation} → {toStation}
+              </dd>
+            </div>
+            <div>
+              <dt>日期范围</dt>
+              <dd>{compactTripDate}（±3天）</dd>
+            </div>
+            <div>
+              <dt>车次偏好</dt>
+              <dd>{trainPreference}</dd>
+            </div>
+            <div>
+              <dt>席别偏好</dt>
+              <dd>{seatPreference}</dd>
+            </div>
+            </dl>
+          </div>
+        </section>
+      </div>
+
+      <section className="dashboard-panel monitor-card">
+        <div className="monitor-primary">
+          <div className="monitor-icon">
+            <Radar size={22} />
+          </div>
+          <div>
+            <h2>{status.monitoring ? "监控运行中" : "监控未运行"}</h2>
+            <p>{status.monitoring ? "正在按配置刷新查询结果" : "就绪后可启动监控"}</p>
+          </div>
+        </div>
+        <div className="monitor-settings">
+          <label>
+            <span>请求模式</span>
+            <SegmentedControl
+              ariaLabel="请求模式"
+              options={["快速模式", "均衡模式", "保守模式"] as const}
+              value={smartRateToRequestMode(config.smart_rate, config.interval)}
+              onChange={(next: RequestMode) => {
+                const patch: Partial<RailWatchConfig> = { smart_rate: requestModeToSmartRate(next) };
+                if (next === "快速模式") {
+                  patch.interval = Math.min(config.interval, 3);
+                } else if (next === "均衡模式") {
+                  patch.interval = Math.max(4, Math.min(config.interval, 5));
+                } else {
+                  patch.interval = Math.max(config.interval, 6);
+                }
+                setConfig(patch);
+              }}
+            />
+          </label>
+          <label>
+            <span>并发请求</span>
+            <span className="stepper-control">
+              <button type="button" aria-label="减少并发">
+                -
+              </button>
+              <strong>3</strong>
+              <button type="button" aria-label="增加并发">
+                +
+              </button>
+            </span>
+          </label>
+          <Button className="monitor-page-button" icon={<MonitorPlay size={14} />} onClick={goToMonitor} type="primary">
+            进入购票监控
+          </Button>
+        </div>
+        <div className="monitor-metrics">
+          <span>
+            <Clock3 size={13} />
+            <em>下次查询</em>
+            <strong>{status.monitoring ? `${config.interval} 秒` : "-"}</strong>
+          </span>
+          <span>
+            <Pause size={13} />
+            <em>已运行时间</em>
+            <strong>{status.monitoring ? "00:12" : "-"}</strong>
+          </span>
+          <span>
+            <Search size={13} />
+            <em>请求次数</em>
+            <strong>0</strong>
+          </span>
+          <span>
+            <Bell size={13} />
+            <em>命中记录</em>
+            <strong>{hits.length}</strong>
+          </span>
+          <span>
+            <Check size={13} />
+            <em>成功提交</em>
+            <strong>0</strong>
+          </span>
         </div>
       </section>
 
-      <section className="content-band dispatch-flow">
-        <SectionTitle eyebrow="Rail Dispatch" title="监控流程" />
-        <WorkflowStepper steps={workflowSteps} />
-      </section>
-
-      <section className="content-band next-action">
-        <SectionTitle title="下一步" />
-        <p>{nextAction.description}</p>
-        <Button type="primary" icon={<Activity size={16} />} onClick={() => setActivePage(nextAction.page)}>
-          {nextAction.label}
-        </Button>
-      </section>
-
-      <section className="content-band">
-        <SectionTitle title="就绪状态" />
-        <div className="metric-grid">
-          {cards.map((card) => (
-            <MetricCard key={card.title} {...card} />
-          ))}
+      <section className={`dashboard-panel automation-panel ${riskTone}`}>
+        <div className="automation-lock">
+          <Lock size={20} />
         </div>
-      </section>
-
-      <section className="content-band">
-        <SectionTitle title="监控结果" />
-        <Table columns={columns} dataSource={hitRows} locale={{ emptyText: "尚未命中目标车票" }} pagination={false} size="middle" />
-      </section>
-
-      <section className="content-band risk-panel">
-        <SectionTitle title="风险控制" action={<StatusBadge tone={riskTone}>{riskLabel[status.risk_level] ?? "未知风险"}</StatusBadge>} />
-        <p>
-          当前仅提供提醒与人工确认辅助；订单提交、候补改签和支付仍需人工完成。
-          {status.auto_submit_enabled || status.auto_alternate_enabled ? " 请回到设置页关闭危险自动化。" : " 自动提交和自动候补保持关闭。"}
-        </p>
+        <div className="automation-copy">
+          <div className="automation-title-row">
+            <h2>危险自动化（已锁定）</h2>
+            <span>{riskText}</span>
+          </div>
+          <p>为保障账号安全，自动提交等危险操作默认关闭。</p>
+          <div className="automation-flags" aria-label="自动化状态">
+            <label className="automation-toggle">
+              <Switch checked={autoSubmitEnabled} disabled size="small" />
+              <span>
+                自动提交购票 <strong>{autoSubmitEnabled ? "已启用" : "未启用"}</strong>
+              </span>
+            </label>
+            <label className="automation-toggle">
+              <Switch checked={false} disabled size="small" />
+              <span>
+                自动跳转支付 <strong>未启用</strong>
+              </span>
+            </label>
+            <label className="automation-toggle">
+              <Switch checked={autoAlternateEnabled} disabled size="small" />
+              <span>
+                自动候补下单 <strong>{autoAlternateEnabled ? "已启用" : "未启用"}</strong>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div className="automation-actions">
+          <Button icon={<Lock size={13} />} onClick={() => setActivePage("系统设置")} size="small">
+            解锁并配置
+          </Button>
+          <small>启用前需二次确认</small>
+        </div>
+        <div className="automation-warning">
+          <ShieldAlert size={14} />
+          <span>启用后可能导致账号受限或封禁，请充分了解风险后谨慎操作。</span>
+          <button type="button">了解更多风险说明</button>
+        </div>
       </section>
     </div>
   );

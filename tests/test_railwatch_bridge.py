@@ -105,6 +105,53 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             self.assertIn("[INFO] 系统就绪", content)
             self.assertIn("[ERROR] 登录已过期", content)
 
+    def test_bridge_caps_in_memory_logs(self):
+        from railwatch_bridge import MAX_LOG_ENTRIES, RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+
+        for index in range(MAX_LOG_ENTRIES + 5):
+            bridge.log(f"event-{index}")
+
+        self.assertEqual(len(bridge.log_entries), MAX_LOG_ENTRIES)
+        self.assertEqual(bridge.log_entries[0]["message"], "event-5")
+
+    def test_clear_local_data_rejects_while_monitoring(self):
+        from railwatch_bridge import APP_SLUG, RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = os.path.join(temp_dir, APP_SLUG)
+            bridge = RailWatchBridge(data_dir=data_dir, event_callback=lambda event: None)
+            bridge.is_monitoring = True
+
+            with self.assertRaisesRegex(RuntimeError, "监控运行中"):
+                bridge.clear_local_data(confirmed=True)
+
+    def test_close_browser_rejects_while_monitoring(self):
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.is_monitoring = True
+        bridge.driver = object()
+
+        with self.assertRaisesRegex(RuntimeError, "监控运行中"):
+            bridge.close_browser(confirmed=True)
+
+    def test_get_runtime_info_includes_live_system_facts(self):
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            info = bridge.get_runtime_info()
+
+        self.assertEqual(info["data_dir"], temp_dir)
+        self.assertIn("app_version", info)
+        self.assertTrue(info["data_dir_writable"])
+        self.assertGreater(info["data_dir_free_bytes"], 0)
+        self.assertIn("network_label", info)
+        self.assertIn("railway_label", info)
+        self.assertIn("proxy_label", info)
+
     def test_json_runtime_dispatches_command_response_and_events(self):
         from railwatch_runtime import RailWatchRuntime
 

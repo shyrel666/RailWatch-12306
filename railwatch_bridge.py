@@ -13,6 +13,7 @@ from typing import Callable, Dict, List, Optional
 
 from railwatch_preferences import load_theme_preference, save_theme_preference
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, RailWatchState, TicketHit
+from railwatch_system import get_app_version, inspect_data_dir, probe_connectivity
 
 try:
     from chromedriver_manager import (
@@ -63,6 +64,7 @@ except ImportError as exc:
 
 
 LOGIN_URL = "https://kyfw.12306.cn/otn/resources/login.html"
+MAX_LOG_ENTRIES = 1000
 
 
 def get_resource_path(relative_path: str) -> str:
@@ -107,6 +109,7 @@ def default_config(today: Optional[date] = None, now: Optional[datetime] = None)
         "passengers": "",
         "auto_alternate": False,
         "alternate_deadline": "18:00",
+        "date_range": "±1天",
         "smart_rate": True,
         "timer_enabled": False,
         "target_time": target_time,
@@ -151,6 +154,7 @@ def validate_config(raw_config: dict) -> dict:
     config["auto_submit"] = _to_bool(config.get("auto_submit"))
     config["auto_alternate"] = _to_bool(config.get("auto_alternate"))
     config["keep_alive"] = _to_bool(config.get("keep_alive"))
+    config["date_range"] = str(config.get("date_range", "±1天")).strip() or "±1天"
     config["smart_rate"] = _to_bool(config.get("smart_rate"))
     config["timer_enabled"] = _to_bool(config.get("timer_enabled"))
 
@@ -230,22 +234,36 @@ class RailWatchBridge:
             "message": str(message),
         }
         self.log_entries.append(entry)
+        if len(self.log_entries) > MAX_LOG_ENTRIES:
+            del self.log_entries[: len(self.log_entries) - MAX_LOG_ENTRIES]
         self.emit("log", entry)
         return entry
 
     def get_runtime_info(self) -> dict:
         chrome_version = get_chrome_version_info() if CD_MANAGER_AVAILABLE and get_chrome_version_info else "未知"
+        data_dir_status = inspect_data_dir(self.data_dir)
+        connectivity = probe_connectivity()
         return {
             "app_display_name": APP_DISPLAY_NAME,
+            "app_version": get_app_version(),
             "app_slug": APP_SLUG,
             "pages": list(APP_PAGES),
             "data_dir": self.data_dir,
+            "data_dir_writable": data_dir_status["data_dir_writable"],
+            "data_dir_free_bytes": data_dir_status["data_dir_free_bytes"],
             "chromedriver_path": self.chromedriver_path,
             "chrome_version": chrome_version,
             "core_available": CORE_AVAILABLE,
             "core_import_error": str(CORE_IMPORT_ERROR) if CORE_IMPORT_ERROR else "",
             "selenium_available": SELENIUM_AVAILABLE,
             "chromedriver_manager_available": CD_MANAGER_AVAILABLE,
+            "network_ok": connectivity["network_ok"],
+            "network_label": connectivity["network_label"],
+            "railway_ok": connectivity["railway_ok"],
+            "railway_label": connectivity["railway_label"],
+            "proxy_configured": connectivity["proxy_configured"],
+            "proxy_label": connectivity["proxy_label"],
+            "proxy_value": connectivity["proxy_value"],
             "state": state_to_payload(self.state),
         }
 
@@ -377,6 +395,8 @@ class RailWatchBridge:
     def close_browser(self, confirmed: bool = False) -> dict:
         if not self.driver:
             return {"closed": False}
+        if self.is_monitoring:
+            raise RuntimeError("监控运行中，请先停止监控后再关闭浏览器。")
         if not confirmed:
             return {
                 "requires_confirmation": True,
@@ -399,6 +419,8 @@ class RailWatchBridge:
                 "title": "清除本地数据",
                 "message": "此操作将删除本地数据目录中的 RailWatch 配置、日志和 Chrome 配置。源代码目录不受影响。",
             }
+        if self.is_monitoring:
+            raise RuntimeError("监控运行中，请先停止监控后再清除本地数据。")
         target = os.path.abspath(self.data_dir)
         if os.path.basename(target) != APP_SLUG:
             self.log(f"拒绝清除意外的数据目录: {target}", "ERROR")

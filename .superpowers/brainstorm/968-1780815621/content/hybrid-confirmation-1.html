@@ -1,0 +1,120 @@
+<style>
+  .hybrid-page {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, .65fr);
+    gap: 22px;
+    align-items: start;
+  }
+
+  .preview-frame {
+    overflow: hidden;
+    border-radius: 18px;
+    border: 1px solid #d7dde8;
+    background: #0d1219;
+    box-shadow: 0 26px 70px rgba(17, 24, 39, 0.2);
+  }
+
+  .preview-frame img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .decision-panel {
+    display: grid;
+    gap: 14px;
+  }
+
+  .decision-box {
+    border: 1px solid #d7dde8;
+    border-radius: 16px;
+    padding: 16px;
+    background: #fff;
+  }
+
+  .decision-box h3 {
+    margin: 0 0 10px;
+  }
+
+  .decision-box ul {
+    margin: 0;
+    padding-left: 18px;
+    color: #4a5568;
+    line-height: 1.6;
+  }
+
+  .confirm-choice {
+    border: 1px solid #1b8a62;
+    border-radius: 16px;
+    padding: 16px;
+    background: linear-gradient(180deg, #eefbf6, #ffffff);
+    cursor: pointer;
+  }
+
+  .confirm-choice h3 {
+    margin: 0 0 8px;
+    color: #0b6b4d;
+  }
+
+  .confirm-choice p {
+    margin: 0;
+    color: #4a5568;
+  }
+
+  .tiny-note {
+    color: #718096;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  @media (max-width: 1100px) {
+    .hybrid-page {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<h2>混合方向确认稿</h2>
+<p class="subtitle">采用 2 的仪表盘调度台气质，结合 3 的行程设置与安全确认体验。</p>
+
+<div class="hybrid-page">
+  <div class="preview-frame">
+    <img src="/files/hybrid-dashboard-trip-setup.png" alt="RailWatch hybrid dashboard and trip setup direction" />
+  </div>
+
+  <div class="decision-panel">
+    <div class="decision-box">
+      <h3>视觉主线</h3>
+      <ul>
+        <li>深色 macOS 高级桌面工具，不走网页后台感。</li>
+        <li>仪表盘使用调度台式流程线、路线概览和状态灯。</li>
+        <li>行程设置使用安静、低误操作的表单工作区。</li>
+      </ul>
+    </div>
+
+    <div class="decision-box">
+      <h3>交互重点</h3>
+      <ul>
+        <li>事件栏作为可折叠抽屉，筛选、暂停、清空、导出保持可用。</li>
+        <li>危险自动化集中到安全区，启用时必须二次确认。</li>
+        <li>表单使用清晰焦点、步进器、开关和主次按钮反馈。</li>
+      </ul>
+    </div>
+
+    <div class="decision-box">
+      <h3>实现边界</h3>
+      <ul>
+        <li>保留现有 Electron + React + Ant Design 架构。</li>
+        <li>重做主题 tokens、壳层、仪表盘、行程设置、监控和设置页样式。</li>
+        <li>不改购票核心逻辑，不增加自动购票能力。</li>
+      </ul>
+    </div>
+
+    <div class="confirm-choice" data-choice="approve-hybrid-direction" onclick="toggleSelect(this)">
+      <h3>确认这个混合方向</h3>
+      <p>如果这个方向对，我会把它整理成设计规格文档，再进入实现计划。</p>
+    </div>
+
+    <p class="tiny-note">也可以不点，直接在终端告诉我哪里要调：更像 2、更像 3、颜色更亮、事件栏更弱、表单更紧凑等。</p>
+  </div>
+</div>

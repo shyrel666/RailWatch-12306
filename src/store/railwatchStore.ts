@@ -29,15 +29,25 @@ export const defaultStatus: RailWatchStatus = {
 
 export const defaultRuntimeInfo: RuntimeInfo = {
   app_display_name: "RailWatch 12306",
+  app_version: "未知",
   app_slug: "railwatch-12306",
-  pages: ["仪表盘", "行程设置", "监控", "设置"],
+  pages: ["仪表盘", "行程设置", "购票监控", "系统设置"],
   data_dir: "",
+  data_dir_writable: false,
+  data_dir_free_bytes: 0,
   chromedriver_path: "",
   chrome_version: "未知",
   core_available: false,
   core_import_error: "",
   selenium_available: false,
   chromedriver_manager_available: false,
+  network_ok: false,
+  network_label: "检测中",
+  railway_ok: false,
+  railway_label: "检测中",
+  proxy_configured: false,
+  proxy_label: "检测中",
+  proxy_value: "",
   state: defaultStatus,
 };
 
@@ -56,6 +66,7 @@ export const defaultConfig: RailWatchConfig = {
   passengers: "",
   auto_alternate: false,
   alternate_deadline: "18:00",
+  date_range: "±1天",
   smart_rate: true,
   timer_enabled: false,
   target_time: "00:00:00",
@@ -86,8 +97,8 @@ export type RailWatchStore = {
   filteredLogs: (filter: string) => LogEntry[];
 };
 
-const logLevelByFilter: Record<string, string> = {
-  信息: "INFO",
+const logLevelByFilter: Record<string, string | string[]> = {
+  信息: ["INFO", "SUCCESS"],
   警告: "WARN",
   错误: "ERROR",
   成功: "SUCCESS",
@@ -121,7 +132,7 @@ export function createRailWatchStore() {
       set({ logs: [...get().logs, entry] });
     },
     applyResults: (payload) => {
-      set({ results: payload.rows, activePage: "监控" });
+      set({ results: payload.rows, activePage: "购票监控" });
     },
     applyNotify: (payload) => {
       const nextHits = payload.hit ? [...get().hits, payload.hit] : get().hits;
@@ -149,7 +160,11 @@ export function createRailWatchStore() {
     errorCount: () => get().logs.filter((entry) => entry.level === "ERROR").length,
     filteredLogs: (filter) => {
       const level = logLevelByFilter[filter];
-      return level ? get().logs.filter((entry) => entry.level === level) : get().logs;
+      if (!level) {
+        return get().logs;
+      }
+      const levels = Array.isArray(level) ? level : [level];
+      return get().logs.filter((entry) => levels.includes(entry.level));
     },
   }));
 }

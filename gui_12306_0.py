@@ -1390,7 +1390,7 @@ class TicketMonitor(BaseHandler):
             
             # 使用统一的 JavaScript 快速检测和选择座位偏好
             # 优化：一次性完成检测和选择，避免多次 DOM 操作
-            js_select_seat = """
+            js_select_seat = r"""
             (function(preference) {
                 // 辅助函数：检查是否是国籍选择框
                 function isNationalitySelect(s) {
@@ -1587,11 +1587,21 @@ class TicketMonitor(BaseHandler):
             """
             
             passengers_selected = self.driver.execute_script(js_select_candidates, target_passengers, target_count)
+            try:
+                passengers_selected = int(passengers_selected or 0)
+            except (TypeError, ValueError):
+                passengers_selected = 0
             
             if passengers_selected > 0:
                 self.log(f"✅ 已为候补选择 {passengers_selected} 位乘车人")
             else:
                 self.log("⚠️ 未能选择候补乘车人，请手动选择")
+            if not self._passenger_selection_sufficient(passengers_selected, [], target_passengers, target_count):
+                if target_passengers:
+                    self.log("❌ 未能勾选足够的指定候补乘车人，已停止候补提交")
+                else:
+                    self.log("❌ 未能勾选足够的候补乘车人，已停止候补提交")
+                return False
             
             time.sleep(0.5)
             

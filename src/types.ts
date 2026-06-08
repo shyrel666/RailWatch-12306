@@ -1,4 +1,4 @@
-export type RailWatchPage = "仪表盘" | "行程设置" | "监控" | "设置";
+export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "系统设置";
 
 export type RiskLevel = "notice" | "warning" | "active" | "success" | "critical" | string;
 
@@ -17,6 +17,7 @@ export type RailWatchConfig = {
   passengers: string;
   auto_alternate: boolean;
   alternate_deadline: string;
+  date_range: string;
   smart_rate: boolean;
   timer_enabled: boolean;
   target_time: string;
@@ -49,15 +50,25 @@ export type RailWatchStatus = {
 
 export type RuntimeInfo = {
   app_display_name: string;
+  app_version: string;
   app_slug: string;
   pages: string[];
   data_dir: string;
+  data_dir_writable: boolean;
+  data_dir_free_bytes: number;
   chromedriver_path: string;
   chrome_version: string;
   core_available: boolean;
   core_import_error: string;
   selenium_available: boolean;
   chromedriver_manager_available: boolean;
+  network_ok: boolean;
+  network_label: string;
+  railway_ok: boolean;
+  railway_label: string;
+  proxy_configured: boolean;
+  proxy_label: string;
+  proxy_value: string;
   state: RailWatchStatus;
 };
 

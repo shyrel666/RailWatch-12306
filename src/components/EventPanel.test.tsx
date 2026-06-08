@@ -12,9 +12,9 @@ function resetStore() {
     status: { ...defaultStatus },
     config: { ...defaultConfig },
     logs: [
-      { time: "09:00:01", level: "INFO", message: "环境检查完成" },
+      { time: "09:00:01", level: "INFO", message: "环境检查：本地环境一切正常" },
       { time: "09:00:02", level: "ERROR", message: "登录状态失效" },
-      { time: "09:00:03", level: "WARN", message: "刷新间隔偏低" },
+      { time: "09:00:03", level: "WARN", message: "刷新间隔偏低：建议提高到 5 秒" },
     ],
     results: [],
     hits: [],
@@ -29,39 +29,55 @@ describe("EventPanel", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
 
-  test("surfaces live feed feedback and puts errors first", async () => {
+  test("surfaces live feed feedback with newest events first", async () => {
     const user = userEvent.setup();
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
     const onClose = vi.fn();
 
     render(<EventPanel runCommand={runCommand} onClose={onClose} />);
-
-    expect(screen.getByText("当前显示 3 条")).toBeTruthy();
 
     const feed = screen.getByRole("feed", { name: "事件流" });
     const entries = within(feed).getAllByRole("article");
 
-    expect(entries[0].textContent).toContain("ERROR");
-    expect(entries[0].textContent).toContain("登录状态失效");
+    expect(entries[0].textContent).toContain("刷新间隔偏低");
+    expect(entries[2].textContent).toContain("环境检查");
 
-    const pauseButton = screen.getByRole("button", { name: "暂停滚动" });
-    expect(pauseButton.getAttribute("aria-pressed")).toBe("false");
+    await user.click(screen.getByRole("button", { name: "清空事件" }));
 
-    await user.click(pauseButton);
-
-    expect(screen.getByText("事件流已暂停")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "恢复滚动" }).getAttribute("aria-pressed")).toBe("true");
+    expect(runCommand).toHaveBeenCalledWith("clearLog");
   });
 
-  test("offers an in-panel close action for drawer layouts", async () => {
-    const user = userEvent.setup();
+  test("keeps export out of the event panel so the feed owns the footer space", async () => {
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
-    const onClose = vi.fn();
 
-    render(<EventPanel runCommand={runCommand} onClose={onClose} />);
+    render(<EventPanel runCommand={runCommand} onClose={vi.fn()} />);
 
-    await user.click(screen.getByRole("button", { name: "隐藏事件面板" }));
+    expect(screen.queryByRole("button", { name: "导出日志" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "隐藏事件面板" })).toBeNull();
+  });
 
-    expect(onClose).toHaveBeenCalledTimes(1);
+  test("shows a clear empty state when no events are available", () => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ logs: [] });
+
+    render(<EventPanel runCommand={runCommand} onClose={vi.fn()} />);
+
+    expect(screen.getByText("暂无事件")).toBeTruthy();
+    expect(screen.getByText("运行日志会在这里按时间倒序显示。")).toBeTruthy();
+  });
+
+  test("does not duplicate plain log messages without a colon separator", () => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({
+      logs: [{ time: "19:33:44", level: "INFO", message: "正在检查 Python、Selenium 和 ChromeDriver..." }],
+    });
+
+    render(<EventPanel runCommand={runCommand} onClose={vi.fn()} />);
+
+    const feed = screen.getByRole("feed", { name: "事件流" });
+    const entry = within(feed).getByRole("article");
+
+    expect(within(entry).getByText("环境检查")).toBeTruthy();
+    expect(within(entry).getAllByText(/正在检查 Python、Selenium 和 ChromeDriver/)).toHaveLength(1);
   });
 });

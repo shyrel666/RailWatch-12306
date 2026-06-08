@@ -9,7 +9,7 @@ import type { CommandRunner, ConfirmDialog } from "./componentTypes";
 function resetStore() {
   railwatchStore.setState({
     runtime: { ...defaultRuntimeInfo, state: { ...defaultStatus } },
-    status: { ...defaultStatus },
+    status: { ...defaultStatus, query_ready: true },
     config: { ...defaultConfig, train_code: "" },
     logs: [],
     results: [],
@@ -44,24 +44,44 @@ describe("TripSetupPage", () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
-  test("keeps trip setup as a form workspace without dashboard workflow", () => {
+  test("renders the reference trip setup card without dashboard workflow", () => {
     const confirm = vi.fn(async () => false) as ConfirmDialog;
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
 
     render(<TripSetupPage busy={null} confirm={confirm} runCommand={runCommand} />);
 
     expect(screen.getByRole("heading", { name: "行程设置" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "安全确认" })).toBeTruthy();
-    expect(screen.getByLabelText("出发")).toBeTruthy();
-    expect(screen.getByLabelText("到达")).toBeTruthy();
+    expect(screen.getByText("配置查询条件与监控策略")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "恢复上次保存" })).toBeTruthy();
+    expect(screen.getByLabelText("出发站")).toBeTruthy();
+    expect(screen.getByLabelText("到达站")).toBeTruthy();
+    expect(screen.getByLabelText("出发日期")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "日期范围" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "席别" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "优先级" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "保存配置" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "分析" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "开始监控" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /高级选项/ })).toBeNull();
+    expect(screen.queryByRole("list", { name: "监控流程" })).toBeNull();
+    expect(screen.getByText("高级选项")).toBeTruthy();
     expect(screen.getByText("自动提交关闭")).toBeTruthy();
     expect(screen.getByText("候补排队关闭")).toBeTruthy();
-    expect(screen.getByText("开启时需要确认；开启后命中车票可能自动进入订单流程。")).toBeTruthy();
-    expect(screen.getByText("开启时需要确认；开启后无票时可能自动提交候补。")).toBeTruthy();
-    expect(screen.queryByText(/进入订单流程前必须确认|排队前必须确认/)).toBeNull();
     expect(screen.getByRole("switch", { name: "定时启动" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "保持会话" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "智能轮询" })).toBeTruthy();
-    expect(screen.queryByRole("list", { name: "监控流程" })).toBeNull();
+  });
+
+  test("swaps departure and arrival stations", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.fn(async () => false) as ConfirmDialog;
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+
+    render(<TripSetupPage busy={null} confirm={confirm} runCommand={runCommand} />);
+
+    await user.click(screen.getByRole("button", { name: "交换出发站与到达站" }));
+
+    expect(railwatchStore.getState().config.from_station_cn).toBe("上海");
+    expect(railwatchStore.getState().config.to_station_cn).toBe("北京");
   });
 });

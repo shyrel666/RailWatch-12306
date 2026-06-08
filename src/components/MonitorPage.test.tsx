@@ -15,7 +15,7 @@ function resetStore() {
     results: [],
     hits: [],
     notifications: [],
-    activePage: "监控",
+    activePage: "购票监控",
     logPaused: false,
     eventPanelVisible: true,
   });
@@ -31,7 +31,7 @@ describe("MonitorPage", () => {
     render(<MonitorPage busy={null} runCommand={runCommand} />);
 
     expect((screen.getByRole("button", { name: /启动监控/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: /停止监控/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /停止/ }) as HTMLButtonElement).disabled).toBe(true);
 
     act(() => {
       railwatchStore.setState({
@@ -51,7 +51,7 @@ describe("MonitorPage", () => {
 
     expect((screen.getByRole("button", { name: /启动监控/ }) as HTMLButtonElement).disabled).toBe(true);
 
-    await user.click(screen.getByRole("button", { name: /停止监控/ }));
+    await user.click(screen.getByRole("button", { name: /停止/ }));
 
     expect(runCommand).toHaveBeenCalledWith("stopMonitor");
   });

@@ -9,7 +9,7 @@ from typing import Mapping, Optional, Tuple
 
 APP_DISPLAY_NAME = "RailWatch 12306"
 APP_SLUG = "railwatch-12306"
-APP_PAGES = ("仪表盘", "行程设置", "监控", "设置")
+APP_PAGES = ("仪表盘", "行程设置", "购票监控", "系统设置")
 
 
 class AppPhase(str, Enum):

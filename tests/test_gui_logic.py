@@ -119,6 +119,51 @@ class FakeDriver:
         raise TimeoutException("no confirm button")
 
 
+class FakeAlternateSubmitButton:
+    def __init__(self):
+        self.clicked = False
+
+    def is_displayed(self):
+        return True
+
+    def click(self):
+        self.clicked = True
+
+
+class FakeAlternateButton(FakeAlternateSubmitButton):
+    pass
+
+
+class FakeAlternateRow:
+    def __init__(self):
+        self.alternate_button = FakeAlternateButton()
+
+    def find_element(self, by=None, value=None):
+        if value in ("a.btn-houbu", ".//a[contains(text(),'候补')]"):
+            return self.alternate_button
+        raise NoSuchElementException("not found")
+
+
+class FakeAlternateDriver:
+    def __init__(self):
+        self.submit_button = FakeAlternateSubmitButton()
+        self.selection_attempted = False
+
+    def execute_script(self, script, *args):
+        if "targetNames" in script:
+            self.selection_attempted = True
+            return 0
+        return None
+
+    def find_element(self, by=None, value=None):
+        if value == "#submitHoubu_id":
+            return self.submit_button
+        raise NoSuchElementException("not found")
+
+    def next_wait_result(self):
+        return object()
+
+
 class FakeWait:
     def __init__(self, driver, timeout):
         self.driver = driver
@@ -156,6 +201,20 @@ class TicketMonitorLogicTests(unittest.TestCase):
 
         with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda seconds: None):
             monitor._try_auto_submit(FakeButton(), "一等座")
+
+        self.assertTrue(driver.selection_attempted)
+        self.assertFalse(driver.submit_button.clicked)
+
+    def test_alternate_submit_aborts_when_no_passenger_selected(self):
+        driver = FakeAlternateDriver()
+        monitor = TicketMonitor(
+            driver,
+            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
+            log_callback=lambda msg: None,
+        )
+
+        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda seconds: None):
+            monitor._try_alternate_order(FakeAlternateRow(), "G101", "二等座")
 
         self.assertTrue(driver.selection_attempted)
         self.assertFalse(driver.submit_button.clicked)

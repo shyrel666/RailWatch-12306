@@ -1,7 +1,11 @@
 import { contextBridge, ipcRenderer } from "electron";
+import { isRailWatchCommand } from "./ipcSecurity";
 
 contextBridge.exposeInMainWorld("railwatch", {
   command: <T>(command: string, payload: Record<string, unknown> = {}) => {
+    if (!isRailWatchCommand(command)) {
+      return Promise.reject(new Error(`Unsupported RailWatch command: ${command}`));
+    }
     return ipcRenderer.invoke("railwatch:command", command, payload) as Promise<T>;
   },
   onEvent: (callback: (event: unknown) => void) => {

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { app } from "electron";
@@ -26,11 +26,21 @@ export type RuntimeMessage = RuntimeEvent | RuntimeResponse;
 export class JsonLineDecoder {
   private buffer = "";
 
+  constructor(private readonly onInvalidLine: (line: string, error: unknown) => void = () => undefined) {}
+
   push(chunk: string): RuntimeMessage[] {
     this.buffer += chunk;
     const lines = this.buffer.split(/\r?\n/);
     this.buffer = lines.pop() ?? "";
-    return lines.filter(Boolean).map((line) => JSON.parse(line) as RuntimeMessage);
+    const messages: RuntimeMessage[] = [];
+    for (const line of lines.filter(Boolean)) {
+      try {
+        messages.push(JSON.parse(line) as RuntimeMessage);
+      } catch (error) {
+        this.onInvalidLine(line, error);
+      }
+    }
+    return messages;
   }
 }
 
@@ -86,15 +96,43 @@ export function createPythonRuntimeCommand(projectRoot: string = path.resolve(__
   return { executable: python, args: [runtimeScript], cwd: projectRoot };
 }
 
+export function resolveRailWatchAppVersion(projectRoot: string = path.resolve(__dirname, "..")): string {
+  const candidates = [path.join(projectRoot, "package.json")];
+  const appPath = typeof app?.getAppPath === "function" ? app.getAppPath() : "";
+  if (appPath) {
+    candidates.push(path.join(appPath, "package.json"));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const payload = JSON.parse(readFileSync(candidate, "utf8")) as { version?: string };
+      const version = payload.version?.trim();
+      if (version) {
+        return version;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return "未知";
+}
+
 export class RailWatchPythonRuntimeClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
-  private readonly decoder = new JsonLineDecoder();
+  private readonly decoder: JsonLineDecoder;
   private readonly pending = new PendingRequests();
   private nextId = 1;
 
   constructor(private readonly command: RuntimeCommand = createPythonRuntimeCommand()) {
     super();
+    this.appVersion = resolveRailWatchAppVersion(path.resolve(__dirname, ".."));
+    this.decoder = new JsonLineDecoder((line) => {
+      this.emit("stderr", `Ignored non-JSON stdout from Python runtime: ${line}`);
+    });
   }
+
+  private readonly appVersion: string;
 
   start(): void {
     if (this.child) {
@@ -104,6 +142,10 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
       cwd: this.command.cwd,
       stdio: "pipe",
       windowsHide: true,
+      env: {
+        ...process.env,
+        RAILWATCH_APP_VERSION: this.appVersion,
+      },
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => {

@@ -29,7 +29,7 @@ function isStatusPayload(value: unknown): value is RailWatchStatus {
 }
 
 export function RailWatchApp() {
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(true);
   const runtimeTheme = useMemo(
     () => ({
       algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
@@ -157,6 +157,25 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
     [confirm, message],
   );
 
+  const saveTheme = useCallback(
+    async (nextDarkMode: boolean) => {
+      if (nextDarkMode === darkMode) {
+        return;
+      }
+      setDarkMode(nextDarkMode);
+      await runCommand("savePreferences", { theme: nextDarkMode ? "dark" : "light" });
+    },
+    [darkMode, runCommand, setDarkMode],
+  );
+
+  const exportLog = useCallback(async () => {
+    const defaultPath = runtime.data_dir ? `${runtime.data_dir}/railwatch-events.txt` : undefined;
+    const path = await railwatchApi.showSaveDialog(defaultPath);
+    if (path) {
+      await runCommand("exportLog", { path }, "事件已导出");
+    }
+  }, [runCommand, runtime.data_dir]);
+
   useEffect(() => {
     const unsubscribe = railwatchApi.onEvent(applyEvent);
     void (async () => {
@@ -169,23 +188,40 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
         railwatchStore.getState().setConfig(config);
       }
       const preferences = await runCommand<{ theme: "light" | "dark" }>("loadPreferences");
-      setDarkMode(preferences?.theme === "dark");
+      if (preferences?.theme) {
+        setDarkMode(preferences.theme === "dark");
+      }
     })();
-    return unsubscribe;
+
+    const refreshRuntime = window.setInterval(() => {
+      void railwatchApi
+        .command<RuntimeInfo>("getRuntimeInfo")
+        .then((runtimeInfo) => {
+          if (runtimeInfo) {
+            railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
+          }
+        })
+        .catch(() => undefined);
+    }, 30000);
+
+    return () => {
+      window.clearInterval(refreshRuntime);
+      unsubscribe();
+    };
   }, [applyEvent, runCommand]);
 
   const content = useMemo(() => {
     if (activePage === "行程设置") {
       return <TripSetupPage busy={busy} confirm={confirm} runCommand={runCommand} />;
     }
-    if (activePage === "监控") {
+    if (activePage === "购票监控") {
       return <MonitorPage busy={busy} runCommand={runCommand} />;
     }
-    if (activePage === "设置") {
-      return <SettingsPage busy={busy} darkMode={darkMode} runCommand={runCommand} setDarkMode={setDarkMode} />;
+    if (activePage === "系统设置") {
+      return <SettingsPage busy={busy} runCommand={runCommand} />;
     }
     return <DashboardPage />;
-  }, [activePage, busy, confirm, darkMode, runCommand]);
+  }, [activePage, busy, confirm, runCommand]);
 
   return (
     <ShellLayout
@@ -198,6 +234,8 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
       runtime={runtime}
       status={status}
       onPageChange={setActivePage}
+      onExportLog={() => void exportLog()}
+      onThemeChange={saveTheme}
       onToggleEventPanel={() => setEventPanelVisible(!eventPanelVisible)}
     >
       {content}

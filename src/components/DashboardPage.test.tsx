@@ -24,40 +24,55 @@ describe("DashboardPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
 
-  test("guides the user to check the environment first and hides raw risk codes", async () => {
+  test("renders the screenshot-style dashboard chrome and hides raw risk codes", async () => {
     const user = userEvent.setup();
 
     render(<DashboardPage />);
 
-    expect(screen.getByRole("heading", { name: "下一步" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /检查环境/ })).toBeTruthy();
+    expect(screen.getByLabelText("当前行程")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "行程概览" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "查询分析" })).toBeTruthy();
+    expect(screen.getByText("检查环境")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "监控未运行" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "危险自动化（已锁定）" })).toBeTruthy();
     expect(screen.getByText("低风险")).toBeTruthy();
     expect(screen.queryByText("notice")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: /检查环境/ }));
+    await user.click(screen.getByRole("button", { name: "查看 / 编辑行程" }));
 
-    expect(railwatchStore.getState().activePage).toBe("设置");
+    expect(railwatchStore.getState().activePage).toBe("行程设置");
   });
 
-  test("shows the operational workflow and keeps setup fields off the dashboard", () => {
+  test("shows a five-step workflow and keeps setup fields off the dashboard", () => {
     render(<DashboardPage />);
 
     const workflow = screen.getByRole("list", { name: "监控流程" });
     const steps = within(workflow).getAllByRole("listitem");
 
-    expect(steps).toHaveLength(6);
-    expect(steps[0].textContent).toContain("环境检查");
-    expect(steps[0].textContent).toContain("当前");
-    expect(steps.some((step) => step.textContent?.includes("命中提醒"))).toBe(true);
-    expect(steps[5].textContent).toContain("人工确认");
-    expect(screen.getByLabelText("当前路线")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "就绪状态" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "监控结果" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "风险控制" })).toBeTruthy();
+    expect(steps).toHaveLength(5);
+    expect(steps[0].textContent).toContain("环境");
+    expect(steps[2].textContent).toContain("查询");
+    expect(steps[4].textContent).toContain("命中");
+    expect(screen.getByText("站点范围")).toBeTruthy();
+    expect(screen.getByText("请求模式")).toBeTruthy();
+    expect(screen.getByText("并发请求")).toBeTruthy();
+    expect(screen.getByLabelText("自动化状态")).toBeTruthy();
     expect(screen.queryByLabelText("乘客")).toBeNull();
   });
 
-  test("moves the workflow current step to manual confirmation after a ticket hit", () => {
+  test("uses a single dashboard action to enter the monitor page", async () => {
+    const user = userEvent.setup();
+
+    render(<DashboardPage />);
+
+    expect(screen.queryByRole("button", { name: /启动监控/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /停止监控/ })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /进入购票监控/ }));
+    expect(railwatchStore.getState().activePage).toBe("购票监控");
+  });
+
+  test("moves the workflow current step to hit after a ticket hit", () => {
     railwatchStore.setState({
       status: {
         ...defaultStatus,
@@ -82,17 +97,13 @@ describe("DashboardPage", () => {
 
     const workflow = screen.getByRole("list", { name: "监控流程" });
     const currentSteps = workflow.querySelectorAll('[aria-current="step"]');
-    const steps = within(workflow).getAllByRole("listitem");
-    const hitStep = steps.find((step) => step.textContent?.includes("命中提醒"));
 
     expect(currentSteps).toHaveLength(1);
-    expect(currentSteps[0].textContent).toContain("人工确认");
-    expect(hitStep).toBeTruthy();
-    expect(hitStep?.textContent).toContain("完成");
-    expect(hitStep?.getAttribute("aria-current")).toBeNull();
+    expect(currentSteps[0].textContent).toContain("命中");
+    expect(currentSteps[0].textContent).toContain("发现记录");
   });
 
-  test("keeps manual confirmation as the only current step when a hit arrives before readiness flags", () => {
+  test("keeps hit as the only current step when a hit arrives before readiness flags", () => {
     railwatchStore.setState({
       hits: [
         {
@@ -112,10 +123,10 @@ describe("DashboardPage", () => {
     const currentSteps = workflow.querySelectorAll('[aria-current="step"]');
     const environmentStep = within(workflow)
       .getAllByRole("listitem")
-      .find((step) => step.textContent?.includes("环境检查"));
+      .find((step) => step.textContent?.includes("环境"));
 
     expect(currentSteps).toHaveLength(1);
-    expect(currentSteps[0].textContent).toContain("人工确认");
+    expect(currentSteps[0].textContent).toContain("命中");
     expect(environmentStep).toBeTruthy();
     expect(environmentStep?.getAttribute("aria-current")).toBeNull();
   });

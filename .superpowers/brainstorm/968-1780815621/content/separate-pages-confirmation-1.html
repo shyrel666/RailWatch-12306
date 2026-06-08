@@ -1,0 +1,129 @@
+<style>
+  .separate-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px;
+    margin-top: 18px;
+  }
+
+  .screen-card {
+    overflow: hidden;
+    border: 1px solid #d7dde8;
+    border-radius: 18px;
+    background: #fff;
+    box-shadow: 0 22px 56px rgba(17, 24, 39, 0.14);
+  }
+
+  .screen-card img {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #0d1219;
+  }
+
+  .screen-copy {
+    padding: 16px;
+  }
+
+  .screen-copy h3 {
+    margin: 0 0 8px;
+  }
+
+  .screen-copy p {
+    margin: 0;
+    color: #4a5568;
+    line-height: 1.55;
+  }
+
+  .rules {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 18px;
+  }
+
+  .rule {
+    border: 1px solid #d7dde8;
+    border-radius: 14px;
+    padding: 14px;
+    background: #fff;
+  }
+
+  .rule h3 {
+    margin: 0 0 8px;
+    font-size: 15px;
+  }
+
+  .rule p {
+    margin: 0;
+    color: #4a5568;
+    line-height: 1.55;
+  }
+
+  .approve {
+    margin-top: 18px;
+    border: 1px solid #1b8a62;
+    border-radius: 16px;
+    padding: 16px;
+    background: linear-gradient(180deg, #eefbf6, #ffffff);
+    cursor: pointer;
+  }
+
+  .approve h3 {
+    margin: 0 0 8px;
+    color: #0b6b4d;
+  }
+
+  .approve p {
+    margin: 0;
+    color: #4a5568;
+  }
+
+  @media (max-width: 1100px) {
+    .separate-grid,
+    .rules {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<h2>独立页面方向确认</h2>
+<p class="subtitle">仪表盘和行程设置不合并在同一个屏幕里。它们共享同一套 macOS 深色主题，但各自采用不同页面结构。</p>
+
+<div class="separate-grid">
+  <div class="screen-card">
+    <img src="/files/dashboard-direction-2.png" alt="Dashboard uses direction 2 dispatch darkroom style" />
+    <div class="screen-copy">
+      <h3>仪表盘：采用 2 的调度台样式</h3>
+      <p>强调流程线、路线状态、监控就绪度、事件态势和风险提示。它是总览页，不承载完整行程表单。</p>
+    </div>
+  </div>
+
+  <div class="screen-card">
+    <img src="/files/trip-setup-direction-3.png" alt="Trip setup uses direction 3 quiet safety desk style" />
+    <div class="screen-copy">
+      <h3>行程设置：采用 3 的安全表单样式</h3>
+      <p>强调舒适填写、清晰焦点、定时与轮询设置、安全审查和危险自动化确认。它是配置页，不做调度台仪表盘。</p>
+    </div>
+  </div>
+</div>
+
+<div class="rules">
+  <div class="rule">
+    <h3>共享主题</h3>
+    <p>深色 macOS 高级感、统一侧栏、统一按钮、统一事件抽屉、统一状态色。</p>
+  </div>
+  <div class="rule">
+    <h3>页面分工</h3>
+    <p>仪表盘负责看状态；行程设置负责填配置；监控页负责启动、停止和结果。</p>
+  </div>
+  <div class="rule">
+    <h3>安全边界</h3>
+    <p>自动提交、候补排队、清除数据和关闭浏览器仍需要显著确认。</p>
+  </div>
+</div>
+
+<div class="approve" data-choice="approve-separate-pages" onclick="toggleSelect(this)">
+  <h3>确认独立页面设计</h3>
+  <p>确认后我会把这个方向整理成设计规格文档，再进入实现计划。</p>
+</div>

@@ -1,0 +1,335 @@
+<style>
+  .direction-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 18px;
+  }
+
+  .direction-card {
+    min-height: 560px;
+    border: 1px solid #293342;
+    border-radius: 18px;
+    overflow: hidden;
+    background: #0f141b;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.24);
+    cursor: pointer;
+  }
+
+  .direction-card .chrome {
+    height: 38px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+  }
+
+  .red { background: #ff5f57; }
+  .amber-dot { background: #ffbd2e; }
+  .green-dot { background: #28c840; }
+
+  .direction-card .body {
+    display: grid;
+    grid-template-columns: 74px minmax(0, 1fr) 110px;
+    gap: 10px;
+    height: 324px;
+    padding: 12px;
+  }
+
+  .mini-side,
+  .mini-main,
+  .mini-log,
+  .mini-panel,
+  .mini-strip,
+  .mini-safety {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.045);
+  }
+
+  .mini-side {
+    border-radius: 12px;
+    padding: 12px 8px;
+  }
+
+  .mini-logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, #153b5c, #0d7f6f);
+  }
+
+  .mini-nav {
+    height: 18px;
+    border-radius: 6px;
+    margin-bottom: 9px;
+    background: rgba(80, 140, 230, 0.18);
+  }
+
+  .mini-main {
+    border-radius: 14px;
+    padding: 12px;
+  }
+
+  .mini-toolbar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .pill {
+    height: 20px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .mini-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .mini-tile {
+    height: 72px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: linear-gradient(180deg, rgba(255,255,255,0.075), rgba(255,255,255,0.035));
+  }
+
+  .mini-wide {
+    height: 58px;
+    border-radius: 12px;
+    margin-top: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .mini-log {
+    border-radius: 14px;
+    padding: 10px;
+  }
+
+  .log-row {
+    height: 28px;
+    border-left: 3px solid #4cc38d;
+    margin-bottom: 8px;
+    background: rgba(255, 255, 255, 0.045);
+  }
+
+  .dispatch .body {
+    grid-template-columns: 74px minmax(0, 1fr) 112px;
+  }
+
+  .dispatch .mini-main {
+    background: radial-gradient(circle at 48% 42%, rgba(59, 130, 246, 0.16), transparent 38%), rgba(255,255,255,0.035);
+  }
+
+  .dispatch .rail {
+    height: 48px;
+    border-radius: 999px;
+    margin: 8px 0 12px;
+    background: linear-gradient(90deg, #41c982 0 42%, #3f8cff 42% 58%, rgba(255,255,255,0.18) 58% 100%);
+  }
+
+  .dispatch .mini-safety {
+    height: 70px;
+    border-color: rgba(217, 141, 35, 0.5);
+    border-radius: 12px;
+    margin-top: 10px;
+    background: rgba(140, 84, 20, 0.24);
+  }
+
+  .quiet .body {
+    grid-template-columns: 74px minmax(0, 1.45fr) minmax(0, .9fr);
+  }
+
+  .quiet .mini-main {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .quiet .mini-field {
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.065);
+  }
+
+  .quiet .mini-panel {
+    border-radius: 14px;
+    padding: 10px;
+  }
+
+  .quiet .mini-panel .mini-safety {
+    height: 96px;
+    border-color: rgba(217, 141, 35, 0.42);
+    border-radius: 12px;
+    background: rgba(140, 84, 20, 0.16);
+  }
+
+  .card-copy {
+    padding: 16px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+
+  .card-copy h3 {
+    margin: 0 0 8px;
+    color: #eef4fb;
+  }
+
+  .card-copy p {
+    margin: 0 0 12px;
+    color: #a8b4c1;
+    line-height: 1.55;
+  }
+
+  .tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .tag-row span {
+    border-radius: 999px;
+    padding: 4px 8px;
+    color: #9fb2c7;
+    background: rgba(91, 140, 220, 0.12);
+    font-size: 12px;
+  }
+
+  @media (max-width: 1100px) {
+    .direction-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<h2>选择 RailWatch 的视觉方向</h2>
+<p class="subtitle">三套都保留现有工作流：仪表盘、行程设置、监控、设置、事件日志和危险操作确认。点击你最想继续深化的一套。</p>
+
+<div class="direction-grid cards">
+  <div class="direction-card card" data-choice="mac-native-control" onclick="toggleSelect(this)">
+    <div class="chrome">
+      <span class="dot red"></span>
+      <span class="dot amber-dot"></span>
+      <span class="dot green-dot"></span>
+    </div>
+    <div class="body">
+      <div class="mini-side">
+        <div class="mini-logo"></div>
+        <div class="mini-nav"></div>
+        <div class="mini-nav"></div>
+        <div class="mini-nav"></div>
+      </div>
+      <div class="mini-main">
+        <div class="mini-toolbar">
+          <div class="pill" style="width: 44%"></div>
+          <div class="pill" style="width: 28%"></div>
+        </div>
+        <div class="mini-grid">
+          <div class="mini-tile"></div>
+          <div class="mini-tile"></div>
+          <div class="mini-tile"></div>
+          <div class="mini-tile"></div>
+        </div>
+        <div class="mini-wide"></div>
+        <div class="mini-wide"></div>
+      </div>
+      <div class="mini-log">
+        <div class="log-row"></div>
+        <div class="log-row"></div>
+        <div class="log-row"></div>
+        <div class="log-row"></div>
+        <div class="log-row"></div>
+      </div>
+    </div>
+    <div class="card-copy">
+      <h3>1. Mac Native Control</h3>
+      <p>最接近 macOS 原生高级工具：毛玻璃、分组状态、右侧事件抽屉，整体稳、克制、精致。</p>
+      <div class="tag-row"><span>推荐</span><span>暗色优先</span><span>仪表盘强化</span></div>
+    </div>
+  </div>
+
+  <div class="direction-card card dispatch" data-choice="rail-dispatch-darkroom" onclick="toggleSelect(this)">
+    <div class="chrome">
+      <span class="dot red"></span>
+      <span class="dot amber-dot"></span>
+      <span class="dot green-dot"></span>
+    </div>
+    <div class="body">
+      <div class="mini-side">
+        <div class="mini-logo"></div>
+        <div class="mini-nav"></div>
+        <div class="mini-nav"></div>
+        <div class="mini-nav"></div>
+      </div>
+      <div class="mini-main">
+        <div class="mini-toolbar">
+          <div class="pill" style="width: 74%"></div>
+        </div>
+        <div class="rail"></div>
+        <div class="mini-grid">
+          <div class="mini-tile"></div>
+          <div class="mini-tile"></div>
+        </div>
+        <div class="mini-wide"></div>
+        <div class="mini-safety"></div>
+      </div>
+      <div class="mini-log">
+        <div class="log-row"></div>
+        <div class="log-row"></div>
+        <div class="log-row" style="border-left-color:#dca451"></div>
+        <div class="log-row"></div>
+        <div class="log-row" style="border-left-color:#eb7070"></div>
+      </div>
+    </div>
+    <div class="card-copy">
+      <h3>2. Rail Dispatch Darkroom</h3>
+      <p>更像深色高铁调度台：流程时间线、路线概览、监控控制强，安全区更醒目。</p>
+      <div class="tag-row"><span>流程感强</span><span>监控页强化</span><span>风险隔离</span></div>
+    </div>
+  </div>
+
+  <div class="direction-card card quiet" data-choice="quiet-safety-desk" onclick="toggleSelect(this)">
+    <div class="chrome">
+      <span class="dot red"></span>
+      <span class="dot amber-dot"></span>
+      <span class="dot green-dot"></span>
+    </div>
+    <div class="body">
+      <div class="mini-side">
+        <div class="mini-logo"></div>
+        <div class="mini-nav"></div>
+        <div class="mini-nav"></div>
+        <div class="mini-nav"></div>
+      </div>
+      <div class="mini-main">
+        <div class="mini-field"></div>
+        <div class="mini-field"></div>
+        <div class="mini-field"></div>
+        <div class="mini-field"></div>
+        <div class="mini-field"></div>
+        <div class="mini-field"></div>
+        <div class="mini-wide" style="grid-column:1 / -1"></div>
+      </div>
+      <div class="mini-panel">
+        <div class="mini-wide"></div>
+        <div class="mini-safety"></div>
+        <div class="mini-wide"></div>
+      </div>
+    </div>
+    <div class="card-copy">
+      <h3>3. Quiet Safety Desk</h3>
+      <p>更像长期使用的精致生产力工具：表单、状态和安全确认并排，减少误操作。</p>
+      <div class="tag-row"><span>表单最顺</span><span>低误操作</span><span>抽屉事件</span></div>
+    </div>
+  </div>
+</div>

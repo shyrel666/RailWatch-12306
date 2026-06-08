@@ -7,15 +7,25 @@ describe("railwatchStore", () => {
 
     store.getState().applyRuntimeInfo({
       app_display_name: "RailWatch 12306",
+      app_version: "0.1.0",
       app_slug: "railwatch-12306",
-      pages: ["仪表盘", "行程设置", "监控", "设置"],
+      pages: ["仪表盘", "行程设置", "购票监控", "系统设置"],
       data_dir: "C:/Users/test/AppData/Local/railwatch-12306",
+      data_dir_writable: true,
+      data_dir_free_bytes: 64_000_000_000,
       chromedriver_path: "C:/driver/chromedriver.exe",
       chrome_version: "Chrome 120",
       core_available: true,
       core_import_error: "",
       selenium_available: true,
       chromedriver_manager_available: true,
+      network_ok: true,
+      network_label: "正常",
+      railway_ok: true,
+      railway_label: "正常",
+      proxy_configured: false,
+      proxy_label: "未配置",
+      proxy_value: "",
       state: {
         phase: "query_ready",
         environment_ready: true,
@@ -35,7 +45,7 @@ describe("railwatchStore", () => {
 
     const state = store.getState();
     expect(state.runtime.app_display_name).toBe("RailWatch 12306");
-    expect(state.runtime.pages).toEqual(["仪表盘", "行程设置", "监控", "设置"]);
+    expect(state.runtime.pages).toEqual(["仪表盘", "行程设置", "购票监控", "系统设置"]);
     expect(state.status.phase).toBe("query_ready");
     expect(state.status.query_ready).toBe(true);
   });
