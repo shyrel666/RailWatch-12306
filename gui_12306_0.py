@@ -313,6 +313,24 @@ class BaseHandler:
             return False
         return "候补" in value.strip()
 
+    def _parse_rows(self) -> List[dict]:
+        """解析当前查询结果表格行 -> [{"train","raw"}]"""
+        try:
+            table = self.driver.find_element(By.ID, "queryLeftTable")
+            rows = table.find_elements(By.CSS_SELECTOR, "tr[id^='ticket_']")
+            results = []
+            for row in rows:
+                text = row.text.strip()
+                if not text:
+                    continue
+                train_code = self.extract_train_code(text)
+                if not train_code:
+                    continue
+                results.append({"train": train_code, "raw": text})
+            return results
+        except (NoSuchElementException, StaleElementReferenceException):
+            return []
+
 
 # ==================== 站点编码解析器 ====================
 class StationCodeResolver:
@@ -513,25 +531,6 @@ class PageAnalyzer(BaseHandler):
 
         return rows
 
-    def _parse_rows(self) -> List[dict]:
-        """解析结果行"""
-        try:
-            table = self.driver.find_element(By.ID, "queryLeftTable")
-            rows = table.find_elements(By.CSS_SELECTOR, "tr[id^='ticket_']")
-
-            results = []
-            for row in rows:
-                text = row.text.strip()
-                if not text:
-                    continue
-                train_code = self.extract_train_code(text)
-                if not train_code:
-                    continue
-                results.append({"train": train_code, "raw": text})
-            return results
-        except (NoSuchElementException, StaleElementReferenceException):
-            return []
-
     @staticmethod
     def _format_row(row: dict) -> str:
         """格式化行显示"""
@@ -557,12 +556,16 @@ class TicketMonitor(BaseHandler):
         cfg: dict, 
         log_callback: Optional[Callable[[str], None]] = None, 
         stop_check: Optional[Callable[[], bool]] = None, 
-        notify_callback: Optional[Callable[[str, str], None]] = None
+        notify_callback: Optional[Callable[[str, str], None]] = None,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+        on_hit: Optional[Callable[[dict], None]] = None,
     ):
         super().__init__(driver, log_callback)
         self.cfg = cfg
         self.should_stop = stop_check or (lambda: False)
         self.notify = notify_callback or (lambda title, msg: print(title, msg))
+        self.progress = progress_callback
+        self.on_hit = on_hit
         
         # 解析目标车次和席别
         self.target_trains = self._parse_train_targets()
@@ -738,6 +741,12 @@ class TicketMonitor(BaseHandler):
         if self.rate_limiter:
             self.rate_limiter.on_success()
 
+        if self.progress:
+            try:
+                self.progress({"loop": loop_count, "date": self.current_loop_date or str(self.cfg.get("date", "")), "rows": self._parse_rows()})
+            except Exception:
+                pass
+
         # 6) 找到席别列索引（兆底用）
         seat_col_indices = {}
         for seat in self.target_seats:
@@ -761,12 +770,24 @@ class TicketMonitor(BaseHandler):
                 self._try_auto_submit(book_btn, seat_name)
 
             # 提醒（GUI 会语音+弹窗）
-            self.notify(
-                "🎉 发现目标车次/席别可用",
+            title = "🎉 发现目标车次/席别可用"
+            message = (
                 f"命中：{train_code}\n{seat_name}：{seat_value}\n\n"
                 f"已为你定位并高亮该车次行与【{'候补' if action_type == 'alternate' else '预订'}】按钮。\n"
                 f"请立即切回浏览器{'确认候补订单' if action_type == 'alternate' else ('确认订单' if self.auto_submit else '手动点击【预订】')}→ 选择乘车人 → 提交订单 → 支付。"
             )
+            if self.on_hit:
+                self.on_hit(
+                    {
+                        "train_code": train_code,
+                        "seat_type": seat_name,
+                        "status": str(seat_value),
+                        "source": "alternate" if action_type == "alternate" else "regular",
+                        "title": title,
+                        "message": message,
+                    }
+                )
+            self.notify(title, message)
 
             self.log("⏸ 已命中，暂停自动刷新。如需继续监控，请点击【停止】再重新【开始监控余票】。")
             return True

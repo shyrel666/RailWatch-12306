@@ -12,6 +12,7 @@ function resetStore() {
     config: { ...defaultConfig },
     logs: [],
     results: [],
+    monitorLoops: 0,
     hits: [],
     notifications: [],
     activePage: "仪表盘",
@@ -83,6 +84,19 @@ describe("DashboardPage", () => {
 
     expect(screen.getByText("6月10日（±2天）")).toBeTruthy();
     expect(screen.queryByText("6月10日（±3天）")).toBeNull();
+  });
+
+  test("does not fabricate elapsed time or submission counts", () => {
+    railwatchStore.setState({
+      status: { ...defaultStatus, query_ready: true, monitoring: true },
+      monitorLoops: 9,
+    });
+
+    render(<DashboardPage />);
+
+    expect(screen.queryByText("00:12")).toBeNull();
+    expect(screen.queryByText("成功提交")).toBeNull();
+    expect(screen.getByText("请求次数").parentElement?.textContent).toContain("9");
   });
 
   test("moves the workflow current step to hit after a ticket hit", () => {

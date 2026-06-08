@@ -25,6 +25,18 @@ describe("presentEventLogs", () => {
     expect(events[1]?.title).toBe("应用启动");
   });
 
+  test("filters non-G query result rows out of the event feed", () => {
+    const events = presentEventLogs(
+      [
+        { time: "09:00:00", level: "INFO", message: "🚄 D321 | 北京 上海 二等座 有" },
+        { time: "09:00:01", level: "INFO", message: "系统就绪" },
+      ],
+      "全部",
+    );
+
+    expect(events.map((event) => event.title)).toEqual(["系统就绪"]);
+  });
+
   test("collapses technical environment logs into one entry", () => {
     const events = presentEventLogs(envCheckLogs, "全部");
 

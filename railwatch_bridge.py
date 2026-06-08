@@ -226,6 +226,7 @@ class RailWatchBridge:
         self.behavior_simulator = None
         self.device_id_protector = None
         self.is_monitoring = False
+        self._driver_lock = threading.RLock()
         self.worker_threads: List[threading.Thread] = []
         self.log_entries: List[Dict[str, str]] = []
         self.query_results: List[dict] = []
@@ -304,6 +305,8 @@ class RailWatchBridge:
         raise RuntimeError("保存设置失败。")
 
     def check_environment(self) -> dict:
+        if self.is_monitoring:
+            return self.emit_state(self.state.with_error("监控运行中，请先停止监控后再检查环境。"))
         try:
             self.log("正在检查 Python、Selenium 和 ChromeDriver...")
             if not SELENIUM_AVAILABLE:
@@ -326,10 +329,11 @@ class RailWatchBridge:
                 else:
                     self.log("提示: 请手动下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing/", "INFO")
 
-            driver = self._ensure_driver(test_only=True)
-            driver.quit()
-            if self.driver is driver:
-                self.driver = None
+            with self._driver_lock:
+                driver = self._ensure_driver(test_only=True)
+                driver.quit()
+                if self.driver is driver:
+                    self.driver = None
             return self.emit_state(self.state.with_environment(True, "环境就绪"))
         except Exception as exc:
             error_msg = str(exc)
@@ -350,7 +354,7 @@ class RailWatchBridge:
             self.log("未检测到 Chrome 浏览器，无法自动匹配版本。", "WARN")
             self.log("请先安装 Chrome: https://www.google.com/chrome/", "WARN")
             return {"chromedriver_path": self.chromedriver_path, "chrome_version": ""}
-        dest_dir = os.path.dirname(self.chromedriver_path) or self.data_dir
+        dest_dir = self.data_dir
         dest_path = download_and_install_chromedriver(
             target_dir=dest_dir,
             major_version=chrome_ver,
@@ -362,27 +366,53 @@ class RailWatchBridge:
         return {"chromedriver_path": dest_path, "chrome_version": f"Chrome {chrome_ver}"}
 
     def open_login(self) -> dict:
+        if self.is_monitoring:
+            return self.emit_state(self.state.with_error("监控运行中，请先停止监控后再打开登录页。"))
         try:
-            driver = self._ensure_driver()
-            driver.get(LOGIN_URL)
-            self.log("登录页面已打开，请在浏览器中完成 12306 登录。")
-            return self.emit_state(self.state.with_login_opened("登录页面已打开，请在浏览器中完成 12306 登录。"))
+            with self._driver_lock:
+                driver = self._ensure_driver()
+                driver.get(LOGIN_URL)
+                self.log("登录页面已打开，请在浏览器中完成 12306 登录。")
+                return self.emit_state(self.state.with_login_opened("登录页面已打开，请在浏览器中完成 12306 登录。"))
         except Exception as exc:
             return self.emit_state(self.state.with_error(f"打开登录页失败: {exc}"))
 
+    def _record_device_id_after_login(self) -> None:
+        if self.device_id_protector is None:
+            return
+        try:
+            self.device_id_protector.save_device_id()
+        except Exception as exc:
+            self.log(f"RAIL_DEVICEID 记录失败: {exc}", "WARN")
+
+    def _check_device_id_consistency(self) -> None:
+        if self.device_id_protector is None:
+            return
+        try:
+            if not self.device_id_protector.check_consistency():
+                self.log("会话设备标识发生变化，请关注官方页面提示。", "WARN")
+        except Exception as exc:
+            self.log(f"RAIL_DEVICEID 检查失败: {exc}", "WARN")
+
     def check_login(self) -> dict:
+        if self.is_monitoring:
+            return self.emit_state(self.state.with_login_verified(False, "监控运行中，请先停止监控后再检查登录。"))
         if not self.driver:
             return self.emit_state(self.state.with_login_verified(False, "请先打开登录页。"))
         try:
-            result = self.driver.execute_script(
-                """
-                return fetch('/otn/login/checkUser', {credentials: 'include'})
-                  .then(response => response.json())
-                  .catch(() => ({data: {flag: false}}));
-                """
-            )
+            with self._driver_lock:
+                result = self.driver.execute_async_script(
+                    """
+                    const done = arguments[arguments.length - 1];
+                    fetch('/otn/login/checkUser', {credentials: 'include'})
+                      .then(response => response.json())
+                      .then(data => done(data))
+                      .catch(() => done({data: {flag: false}}));
+                    """
+                )
             ready = bool(((result or {}).get("data") or {}).get("flag"))
             if ready:
+                self._record_device_id_after_login()
                 self.log("12306 登录状态已验证。", "SUCCESS")
                 return self.emit_state(self.state.with_login_verified(True, "登录已验证"))
             return self.emit_state(self.state.with_login_verified(False, "12306 登录未完成。"))
@@ -390,28 +420,31 @@ class RailWatchBridge:
             return self.emit_state(self.state.with_login_verified(False, f"登录状态检查失败: {exc}"))
 
     def analyze_query(self, raw_config: dict) -> dict:
+        if self.is_monitoring:
+            return self.emit_state(self.state.with_error("监控运行中，请先停止监控后再分析。"))
         config = validate_config(raw_config)
         self.save_config(config)
         self.state = self.state.with_safety(config["auto_submit"], config["auto_alternate"])
         self.emit_state()
-        try:
-            if not CORE_AVAILABLE or PageAnalyzer is None:
-                raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
-            driver = self._ensure_driver()
-            analyzer = PageAnalyzer(driver, log_callback=self.log, base_dir=self.data_dir)
-            rows = []
-            for travel_date in expand_travel_dates(config["date"], config["date_range"]):
-                date_config = {**config, "date": travel_date}
-                date_rows = analyzer.open_fill_query_and_analyze(date_config)
-                if date_rows:
-                    rows.extend([{**row, "date": travel_date} for row in date_rows])
-            if not rows:
-                raise RuntimeError("未解析到查询结果行。")
-            self.query_results = rows
-            self.emit("results", {"rows": rows})
-            return self.emit_state(self.state.with_query_ready(True, config, f"已解析 {len(rows)} 行查询结果"))
-        except Exception as exc:
-            return self.emit_state(self.state.with_error(f"查询分析失败: {exc}"))
+        with self._driver_lock:
+            try:
+                if not CORE_AVAILABLE or PageAnalyzer is None:
+                    raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
+                driver = self._ensure_driver()
+                analyzer = PageAnalyzer(driver, log_callback=self.log, base_dir=self.data_dir)
+                rows = []
+                for travel_date in expand_travel_dates(config["date"], config["date_range"]):
+                    date_config = {**config, "date": travel_date}
+                    date_rows = analyzer.open_fill_query_and_analyze(date_config)
+                    if date_rows:
+                        rows.extend([{**row, "date": travel_date} for row in date_rows])
+                if not rows:
+                    raise RuntimeError("未解析到查询结果行。")
+                self.query_results = rows
+                self.emit("results", {"rows": rows})
+                return self.emit_state(self.state.with_query_ready(True, config, f"已解析 {len(rows)} 行查询结果"))
+            except Exception as exc:
+                return self.emit_state(self.state.with_error(f"查询分析失败: {exc}"))
 
     def start_monitor(self, raw_config: dict, confirmed: bool = False) -> dict:
         config = validate_config(raw_config)
@@ -503,15 +536,18 @@ class RailWatchBridge:
                 return
             if not CORE_AVAILABLE or TicketMonitor is None:
                 raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
-            driver = self._ensure_driver()
-            monitor = TicketMonitor(
-                driver,
-                config,
-                log_callback=self.log,
-                stop_check=lambda: not self.is_monitoring,
-                notify_callback=self._handle_notify,
-            )
-            monitor.run()
+            with self._driver_lock:
+                driver = self._ensure_driver()
+                monitor = TicketMonitor(
+                    driver,
+                    config,
+                    log_callback=self.log,
+                    stop_check=lambda: not self.is_monitoring,
+                    notify_callback=self._handle_notify,
+                    progress_callback=self._handle_progress,
+                    on_hit=self._handle_hit,
+                )
+                monitor.run()
         except Exception as exc:
             self.emit_state(self.state.with_error(f"监控失败: {exc}"))
         finally:
@@ -547,6 +583,7 @@ class RailWatchBridge:
                 """
             )
             self.log("会话保活已发送。")
+            self._check_device_id_consistency()
         except Exception as exc:
             self.log(f"会话保活失败: {exc}", "WARN")
 
@@ -593,13 +630,57 @@ class RailWatchBridge:
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         options.add_experimental_option("useAutomationExtension", False)
+        # 反检测首选项
+        options.add_experimental_option("prefs", {
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+            "webrtc.ip_handling_policy": "disable_non_proxied_udp",
+            "webrtc.multiple_routes_enabled": False,
+            "webrtc.nonproxied_udp_enabled": False,
+        })
         service = Service(executable_path=self.chromedriver_path) if Service and os.path.exists(self.chromedriver_path) else None
         driver = webdriver.Chrome(options=options, service=service) if service else webdriver.Chrome(options=options)
+        # 注入基础反检测脚本（即使 AntiDetect 模块不可用）
+        self._inject_basic_anti_detect(driver)
         if not test_only:
             self.driver = driver
         return driver
+
+    def _inject_basic_anti_detect(self, driver) -> None:
+        """Inject minimal anti-detect JS when AntiDetect module is unavailable."""
+        basic_js = '''
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined, configurable: true});
+        delete navigator.__proto__.webdriver;
+        window.chrome = window.chrome || {};
+        window.chrome.runtime = window.chrome.runtime || {};
+        delete window.__puppeteer_evaluation_script__;
+        delete window.__playwright_evaluation_script__;
+        delete window.__selenium_unwrapped;
+        delete window.__webdriver_evaluate;
+        delete window.__driver_evaluate;
+        delete window.__webdriver_unwrapped;
+        delete window.__driver_unwrapped;
+        Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN','zh','en-US','en']});
+        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+        const originalQuery = navigator.permissions && navigator.permissions.query;
+        const origToString = Function.prototype.toString;
+        Function.prototype.toString = function() {
+            if (originalQuery && this === originalQuery) return 'function query() { [native code] }';
+            return origToString.apply(this, arguments);
+        };
+        console.log('[RailWatch] 基础浏览器环境脚本已注入');
+        '''
+        try:
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": basic_js})
+            self.log("基础反检测脚本注入成功（回退模式）。", "SUCCESS")
+        except Exception:
+            try:
+                driver.execute_script(basic_js)
+                self.log("基础反检测脚本注入成功（直接执行）。")
+            except Exception as exc:
+                self.log(f"基础反检测脚本注入失败: {exc}", "WARN")
 
     def _run_worker(self, name: str, target: Callable[[], None]) -> None:
         def run() -> None:
@@ -614,18 +695,28 @@ class RailWatchBridge:
 
     def _handle_notify(self, title: str, message: str) -> None:
         self.log(f"{title}: {message}", "SUCCESS")
-        train = self._extract_after(message, "命中：", "\n") or "目标"
-        source = "alternate" if "候补" in message or "候补" in title else "regular"
-        hit = TicketHit(train_code=train, seat_type="目标席别", status="available", source=source, detail=message)
+
+    def _handle_progress(self, payload: dict) -> None:
+        rows = payload.get("rows") or []
+        self.query_results = rows
+        self.emit(
+            "monitorTick",
+            {"loop": int(payload.get("loop", 0)), "date": str(payload.get("date", "")), "rows": rows},
+        )
+
+    def _handle_hit(self, payload: dict) -> None:
+        source = "alternate" if payload.get("source") == "alternate" else "regular"
+        hit = TicketHit(
+            train_code=str(payload.get("train_code", "目标")),
+            seat_type=str(payload.get("seat_type", "目标席别")),
+            status=str(payload.get("status", "available")),
+            source=source,
+            detail=str(payload.get("message", "")),
+        )
+        title = str(payload.get("title", "发现目标车次/席别可用"))
+        message = str(payload.get("message", ""))
         self.emit("notify", {"title": title, "message": message, "hit": ticket_hit_to_payload(hit)})
         self.emit_state(self.state.with_hit(hit, title))
-
-    @staticmethod
-    def _extract_after(text: str, prefix: str, stop: str) -> str:
-        if prefix not in text:
-            return ""
-        tail = text.split(prefix, 1)[1]
-        return tail.split(stop, 1)[0].strip()
 
     def _automation_confirmation(self, config: dict) -> Optional[dict]:
         enabled = []

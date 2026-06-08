@@ -43,7 +43,7 @@ const technicalDetailPatterns = [
   /^提示: /,
 ];
 
-const queryRowPattern = /^G[A-Z0-9]+\s+\|/;
+const queryRowPattern = /^[GDCKTZS]\d+[A-Z0-9]*\s+\|/;
 const queryStepPatterns = [
   /^正在打开 12306/,
   /^等待查询输入框/,

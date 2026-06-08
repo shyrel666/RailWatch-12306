@@ -21,6 +21,7 @@ function resetStore() {
     notifications: [],
     activePage: "仪表盘",
     logPaused: false,
+    pausedLogs: [],
     eventPanelVisible: true,
   });
 }
@@ -84,5 +85,16 @@ describe("EventPanel", () => {
 
     expect(within(entry).getByText("环境检查")).toBeTruthy();
     expect(within(entry).getAllByText(/正在检查 Python、Selenium 和 ChromeDriver/)).toHaveLength(1);
+  });
+
+  test("toggles the paused state from the panel", async () => {
+    const user = userEvent.setup();
+    render(<EventPanel onClose={() => undefined} runCommand={(async () => undefined) as CommandRunner} />);
+
+    await user.click(screen.getByRole("button", { name: "暂停事件流" }));
+    expect(railwatchStore.getState().logPaused).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "恢复事件流" }));
+    expect(railwatchStore.getState().logPaused).toBe(false);
   });
 });

@@ -151,7 +151,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         class FakeDriver:
-            def execute_script(self, script):
+            def execute_async_script(self, script):
                 return {"data": {"flag": True}}
 
         bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
@@ -171,6 +171,38 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
         self.assertFalse(state["login_ready"])
         self.assertIn("请先打开登录页", state["error_message"])
+
+    def test_check_login_uses_async_script_not_sync_script(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class PromiseStyleDriver:
+            """Mimics WebDriver: execute_script returns the unresolved value, only execute_async_script resolves."""
+
+            def execute_script(self, script):
+                return {}
+
+            def execute_async_script(self, script):
+                return {"data": {"flag": True}}
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.driver = PromiseStyleDriver()
+
+        state = bridge.check_login()
+
+        self.assertTrue(state["login_ready"])
+
+    def test_analyze_query_refuses_while_monitoring(self):
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.is_monitoring = True
+
+        state = bridge.analyze_query(
+            {"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-06-10"}
+        )
+
+        self.assertEqual(state["phase"], "error")
+        self.assertIn("监控运行中", state["error_message"])
 
     def test_analyze_query_expands_date_range_and_tags_rows(self):
         from railwatch_bridge import RailWatchBridge
@@ -317,7 +349,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         emitted = []
         runtime = RailWatchRuntime(bridge=bridge, writer=lambda payload: emitted.append(payload))
 
-        runtime.handle_line('{"id":"1","command":"getRuntimeInfo","payload":{}}')
+        runtime.handle_line('{"id":"1","command":"getRuntimeInfo","payload":{}}').result(timeout=5)
 
         self.assertEqual(
             emitted,
@@ -339,10 +371,179 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         emitted = []
         runtime = RailWatchRuntime(bridge=bridge, writer=lambda payload: emitted.append(payload))
 
-        runtime.handle_line('{"id":"1","command":"checkLogin","payload":{}}')
+        runtime.handle_line('{"id":"1","command":"checkLogin","payload":{}}').result(timeout=5)
 
         self.assertEqual(emitted[0]["result"], {"login_ready": True})
         bridge.check_login.assert_called_once_with()
+
+    def test_runtime_does_not_block_fast_command_behind_slow_command(self):
+        import threading
+
+        from railwatch_runtime import RailWatchRuntime
+
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        order = []
+        order_lock = threading.Lock()
+
+        class SlowBridge:
+            def check_environment(self):
+                slow_started.set()
+                release_slow.wait(timeout=5)
+                return {"slow": True}
+
+            def get_runtime_info(self):
+                return {"fast": True}
+
+        def writer(payload):
+            with order_lock:
+                order.append(payload["id"])
+
+        runtime = RailWatchRuntime(bridge=SlowBridge(), writer=writer)
+
+        slow_future = runtime.handle_line('{"id":"slow","command":"checkEnvironment","payload":{}}')
+        self.assertTrue(slow_started.wait(timeout=5))
+
+        fast_future = runtime.handle_line('{"id":"fast","command":"getRuntimeInfo","payload":{}}')
+        fast_future.result(timeout=5)
+
+        self.assertEqual(order, ["fast"])
+        release_slow.set()
+        slow_future.result(timeout=5)
+        runtime.shutdown()
+        self.assertEqual(order, ["fast", "slow"])
+
+    def test_check_login_records_device_id_after_verified_login(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def execute_async_script(self, script):
+                return {"data": {"flag": True}}
+
+        class FakeDeviceIdTracker:
+            def __init__(self):
+                self.saved = False
+
+            def save_device_id(self):
+                self.saved = True
+                return True
+
+        tracker = FakeDeviceIdTracker()
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.driver = FakeDriver()
+        bridge.device_id_protector = tracker
+
+        bridge.check_login()
+
+        self.assertTrue(tracker.saved)
+
+    def test_keep_alive_checks_device_id_consistency(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def execute_script(self, script):
+                return None
+
+        class FakeDeviceIdTracker:
+            def __init__(self):
+                self.checked = False
+
+            def check_consistency(self):
+                self.checked = True
+                return True
+
+        tracker = FakeDeviceIdTracker()
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.driver = FakeDriver()
+        bridge.device_id_protector = tracker
+
+        bridge._send_keep_alive()
+
+        self.assertTrue(tracker.checked)
+
+    def test_handle_progress_emits_monitor_tick_and_results(self):
+        from railwatch_bridge import RailWatchBridge
+
+        events = []
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+
+        bridge._handle_progress({"loop": 3, "date": "2026-06-10", "rows": [{"train": "G7", "raw": "G7 有"}]})
+
+        tick = [event for event in events if event["event"] == "monitorTick"][0]
+        self.assertEqual(tick["payload"]["loop"], 3)
+        self.assertEqual(tick["payload"]["rows"], [{"train": "G7", "raw": "G7 有"}])
+        self.assertEqual(bridge.query_results, [{"train": "G7", "raw": "G7 有"}])
+
+    def test_handle_hit_emits_structured_hit_and_state(self):
+        from railwatch_bridge import RailWatchBridge
+
+        events = []
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+
+        bridge._handle_hit(
+            {
+                "train_code": "G101",
+                "seat_type": "二等座",
+                "status": "有",
+                "source": "regular",
+                "title": "命中",
+                "message": "命中：G101",
+            }
+        )
+
+        notify = [event for event in events if event["event"] == "notify"][0]
+        self.assertEqual(notify["payload"]["hit"]["seat_type"], "二等座")
+        self.assertEqual(notify["payload"]["hit"]["status"], "有")
+        state = [event for event in events if event["event"] == "state"][-1]
+        self.assertEqual(state["payload"]["hits"][-1]["seat_type"], "二等座")
+
+    def test_download_chromedriver_targets_writable_data_dir(self):
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            bridge.chromedriver_path = os.path.join("C:\\", "Program Files", "packaged", "chromedriver.exe")
+            captured = {}
+
+            def fake_install(target_dir, major_version, log_callback):
+                captured["target_dir"] = target_dir
+                return os.path.join(target_dir, "chromedriver.exe")
+
+            with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", True), \
+                patch("railwatch_bridge.detect_chrome_version", lambda: "148"), \
+                patch("railwatch_bridge.download_and_install_chromedriver", fake_install):
+                result = bridge.download_chromedriver()
+
+            self.assertEqual(captured["target_dir"], temp_dir)
+            self.assertEqual(os.path.dirname(result["chromedriver_path"]), temp_dir)
+
+    def test_basic_anti_detect_injection_prefers_cdp(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def __init__(self):
+                self.commands = []
+                self.executed_scripts = []
+
+            def execute_cdp_cmd(self, command, payload):
+                self.commands.append((command, payload))
+
+            def execute_script(self, script):
+                self.executed_scripts.append(script)
+
+        driver = FakeDriver()
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+
+        bridge._inject_basic_anti_detect(driver)
+
+        self.assertEqual(driver.commands[0][0], "Page.addScriptToEvaluateOnNewDocument")
+        source = driver.commands[0][1]["source"]
+        self.assertIn("navigator", source)
+        self.assertIn("webdriver", source)
+        self.assertIn("const originalQuery = navigator.permissions && navigator.permissions.query", source)
+        self.assertNotIn("this === navigator.permissions.query", source)
+        self.assertIn("window.chrome = window.chrome || {}", source)
+        self.assertEqual(driver.executed_scripts, [])
 
     def test_runtime_process_outputs_utf8_json(self):
         completed = subprocess.run(

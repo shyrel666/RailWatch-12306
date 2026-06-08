@@ -7,7 +7,6 @@ import {
   Database,
   Lock,
   MonitorPlay,
-  Pause,
   Radar,
   Search,
   ShieldAlert,
@@ -193,6 +192,7 @@ export function DashboardPage() {
   const status = useRailWatchStore((state) => state.status);
   const config = useRailWatchStore((state) => state.config);
   const hits = useRailWatchStore((state) => state.hits);
+  const monitorLoops = useRailWatchStore((state) => state.monitorLoops);
   const setActivePage = useRailWatchStore((state) => state.setActivePage);
   const setConfig = useRailWatchStore((state) => state.setConfig);
   const hasHits = hits.length > 0;
@@ -371,24 +371,14 @@ export function DashboardPage() {
             <strong>{status.monitoring ? `${config.interval} 秒` : "-"}</strong>
           </span>
           <span>
-            <Pause size={13} />
-            <em>已运行时间</em>
-            <strong>{status.monitoring ? "00:12" : "-"}</strong>
-          </span>
-          <span>
             <Search size={13} />
             <em>请求次数</em>
-            <strong>0</strong>
+            <strong>{status.monitoring ? monitorLoops : "-"}</strong>
           </span>
           <span>
             <Bell size={13} />
             <em>命中记录</em>
             <strong>{hits.length}</strong>
-          </span>
-          <span>
-            <Check size={13} />
-            <em>成功提交</em>
-            <strong>0</strong>
           </span>
         </div>
       </section>

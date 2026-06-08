@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { act, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
 import { MonitorPage } from "./MonitorPage";
 import type { CommandRunner } from "./componentTypes";
@@ -13,6 +13,7 @@ function resetStore() {
     config: { ...defaultConfig, train_code: "G101" },
     logs: [],
     results: [],
+    monitorLoops: 0,
     hits: [],
     notifications: [],
     activePage: "购票监控",
@@ -23,6 +24,7 @@ function resetStore() {
 
 describe("MonitorPage", () => {
   beforeEach(resetStore);
+  afterEach(cleanup);
 
   test("keeps monitor controls gated by query and monitoring state", async () => {
     const user = userEvent.setup();
@@ -54,5 +56,20 @@ describe("MonitorPage", () => {
     await user.click(screen.getByRole("button", { name: /停止/ }));
 
     expect(runCommand).toHaveBeenCalledWith("stopMonitor");
+  });
+
+  test("shows the backend loop count as the query count", () => {
+    act(() => {
+      railwatchStore.setState({
+        status: { ...defaultStatus, query_ready: true, monitoring: true },
+        monitorLoops: 12,
+        results: [{ train: "G55", raw: "G55 北京 上海 二等座 有" }],
+      });
+    });
+
+    render(<MonitorPage busy={null} runCommand={(async () => undefined) as CommandRunner} />);
+
+    expect(screen.getByText("12")).toBeTruthy();
+    expect(screen.getByText("G55")).toBeTruthy();
   });
 });

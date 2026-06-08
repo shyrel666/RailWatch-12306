@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Optional
 
 from railwatch_bridge import RailWatchBridge, dumps_json
@@ -18,23 +20,36 @@ def configure_stdio() -> None:
 
 
 class RailWatchRuntime:
-    def __init__(self, bridge: Optional[RailWatchBridge] = None, writer: Optional[Callable[[dict], None]] = None):
+    def __init__(
+        self,
+        bridge: Optional[RailWatchBridge] = None,
+        writer: Optional[Callable[[dict], None]] = None,
+        max_workers: int = 4,
+    ):
+        self._write_lock = threading.Lock()
         self.writer = writer or self._stdout_writer
         self.bridge = bridge or RailWatchBridge(event_callback=self.emit_event)
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="railwatch-cmd")
 
     def emit_event(self, event: dict) -> None:
-        self.writer({"type": "event", **event})
+        self._write({"type": "event", **event})
 
-    def handle_line(self, line: str) -> None:
+    def _write(self, payload: dict) -> None:
+        self.writer(payload)
+
+    def handle_line(self, line: str) -> "Future":
         request = json.loads(line)
         request_id = request.get("id")
         command = request.get("command")
         payload = request.get("payload") or {}
+        return self._executor.submit(self._run_command, request_id, command, payload)
+
+    def _run_command(self, request_id, command: str, payload: dict) -> None:
         try:
             result = self._dispatch(command, payload)
-            self.writer({"type": "response", "id": request_id, "ok": True, "result": result})
+            self._write({"type": "response", "id": request_id, "ok": True, "result": result})
         except Exception as exc:
-            self.writer(
+            self._write(
                 {
                     "type": "response",
                     "id": request_id,
@@ -69,20 +84,26 @@ class RailWatchRuntime:
             raise ValueError(f"未知命令: {command}")
         return handlers[command]()
 
-    @staticmethod
-    def _stdout_writer(payload: dict) -> None:
-        sys.stdout.write(dumps_json(payload) + "\n")
-        sys.stdout.flush()
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=True)
+
+    def _stdout_writer(self, payload: dict) -> None:
+        with self._write_lock:
+            sys.stdout.write(dumps_json(payload) + "\n")
+            sys.stdout.flush()
 
 
 def main() -> int:
     configure_stdio()
     runtime = RailWatchRuntime()
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        runtime.handle_line(line)
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            runtime.handle_line(line)
+    finally:
+        runtime.shutdown()
     return 0
 
 

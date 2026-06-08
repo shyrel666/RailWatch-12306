@@ -123,6 +123,7 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
   const status = useRailWatchStore((state) => state.status);
   const results = useRailWatchStore((state) => state.results);
   const hits = useRailWatchStore((state) => state.hits);
+  const monitorLoops = useRailWatchStore((state) => state.monitorLoops);
   const setConfig = useRailWatchStore((state) => state.setConfig);
 
   const elapsed = useElapsedTime(status.monitoring);
@@ -186,7 +187,7 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
         <div className="st-metric">
           <RefreshCw size={14} className={status.monitoring ? "spin-slow" : ""} />
           <em>查询次数</em>
-          <strong className="st-mono">{results.length || 0}</strong>
+          <strong className="st-mono">{monitorLoops}</strong>
         </div>
         <div className="st-metric">
           <Bell size={14} />

@@ -136,9 +136,10 @@ Typical local files include `user_config.json`, `railwatch.log`, `ui_preferences
 ## Safety Notes
 
 - Automatic submit and automatic alternate are disabled by default.
-- Login, captcha, order confirmation and payment remain manual on official 12306 pages.
+- Browser environment helpers keep local Chrome profile and page-visible values stable for low-frequency monitoring.
+- RailWatch does not bypass login, captcha, order confirmation, payment, website rules or service rate limits.
 - New automation behavior must be opt-in and guarded by explicit confirmation.
-- Keep refresh intervals reasonable and stop monitoring if 12306 shows verification, risk prompts or unusual page states.
+- Stop monitoring if 12306 shows verification, risk prompts or unusual page states.
 
 ## Contributing
 

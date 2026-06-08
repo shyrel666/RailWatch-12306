@@ -1,6 +1,7 @@
 import { createStore } from "zustand/vanilla";
 import type {
   LogEntry,
+  MonitorTickPayload,
   NotifyPayload,
   QueryResultRow,
   RailWatchConfig,
@@ -78,7 +79,9 @@ export type RailWatchStore = {
   status: RailWatchStatus;
   config: RailWatchConfig;
   logs: LogEntry[];
+  pausedLogs: LogEntry[];
   results: QueryResultRow[];
+  monitorLoops: number;
   hits: TicketHit[];
   notifications: NotifyPayload[];
   activePage: RailWatchPage;
@@ -89,6 +92,7 @@ export type RailWatchStore = {
   applyState: (status: RailWatchStatus) => void;
   applyLog: (entry: LogEntry) => void;
   applyResults: (payload: ResultsPayload) => void;
+  applyMonitorTick: (payload: MonitorTickPayload) => void;
   applyNotify: (payload: NotifyPayload) => void;
   setConfig: (patch: Partial<RailWatchConfig>) => void;
   setActivePage: (page: RailWatchPage) => void;
@@ -112,7 +116,9 @@ export function createRailWatchStore() {
     status: defaultStatus,
     config: defaultConfig,
     logs: [],
+    pausedLogs: [],
     results: [],
+    monitorLoops: 0,
     hits: [],
     notifications: [],
     activePage: "仪表盘",
@@ -135,17 +141,23 @@ export function createRailWatchStore() {
       });
     },
     applyLog: (entry) => {
+      if (get().logPaused) {
+        set({ pausedLogs: [...get().pausedLogs, entry] });
+        return;
+      }
       set({ logs: [...get().logs, entry] });
     },
     applyResults: (payload) => {
       set({ results: payload.rows, activePage: "购票监控" });
+    },
+    applyMonitorTick: (payload) => {
+      set({ results: payload.rows, monitorLoops: payload.loop });
     },
     applyNotify: (payload) => {
       const nextHits = payload.hit ? [...get().hits, payload.hit] : get().hits;
       set({
         notifications: [...get().notifications, payload],
         hits: nextHits,
-        activePage: "仪表盘",
       });
     },
     setConfig: (patch) => {
@@ -155,13 +167,17 @@ export function createRailWatchStore() {
       set({ activePage: page });
     },
     setLogPaused: (paused) => {
+      if (!paused && get().pausedLogs.length > 0) {
+        set({ logs: [...get().logs, ...get().pausedLogs], pausedLogs: [], logPaused: false });
+        return;
+      }
       set({ logPaused: paused });
     },
     setEventPanelVisible: (visible) => {
       set({ eventPanelVisible: visible });
     },
     clearLogs: () => {
-      set({ logs: [] });
+      set({ logs: [], pausedLogs: [] });
     },
     errorCount: () => get().logs.filter((entry) => entry.level === "ERROR").length,
     filteredLogs: (filter) => {

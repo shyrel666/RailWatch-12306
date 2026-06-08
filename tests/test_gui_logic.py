@@ -301,6 +301,52 @@ class TicketMonitorLogicTests(unittest.TestCase):
 
         self.assertEqual(observed_timeout, [23])
 
+    def test_monitor_emits_progress_rows_and_structured_hit(self):
+        progress_events = []
+        hit_events = []
+
+        class Row:
+            def __init__(self, text):
+                self._text = text
+                self.text = text
+
+            def find_elements(self, by=None, value=None):
+                return []
+
+        class Table:
+            def find_elements(self, by=None, value=None):
+                return [Row("G101 北京 上海 二等座 有")]
+
+        class Driver:
+            def refresh(self):
+                return None
+
+            def find_element(self, by=None, value=None):
+                return Table()
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 1, "query_timeout": 1, "train_code": ""},
+            log_callback=lambda msg: None,
+            progress_callback=lambda payload: progress_events.append(payload),
+            on_hit=lambda payload: hit_events.append(payload),
+        )
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
+        monitor._find_hit_row = lambda indices: ("G101", "二等座", "有", object(), None, "book")
+        monitor._focus_and_highlight = lambda row, btn: None
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: None):
+            hit = monitor._run_single_loop(1, 1)
+
+        self.assertTrue(hit)
+        self.assertEqual(progress_events[0]["loop"], 1)
+        self.assertEqual(progress_events[0]["rows"], [{"train": "G101", "raw": "G101 北京 上海 二等座 有"}])
+        self.assertEqual(hit_events[0]["train_code"], "G101")
+        self.assertEqual(hit_events[0]["seat_type"], "二等座")
+        self.assertEqual(hit_events[0]["status"], "有")
+        self.assertEqual(hit_events[0]["source"], "regular")
+
     def test_monitor_run_preserves_decimal_interval_for_randomized_delay(self):
         class Driver:
             pass

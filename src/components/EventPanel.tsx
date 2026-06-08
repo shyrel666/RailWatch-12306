@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Tooltip } from "antd";
-import { Eraser } from "lucide-react";
+import { Eraser, Pause, Play } from "lucide-react";
 import { countEventsByFilter, presentEventLogs } from "../lib/formatEventLog";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { CommandRunner } from "./componentTypes";
@@ -11,6 +11,8 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
   const logs = useRailWatchStore((state) => state.logs);
   const logPaused = useRailWatchStore((state) => state.logPaused);
   const clearLogs = useRailWatchStore((state) => state.clearLogs);
+  const setLogPaused = useRailWatchStore((state) => state.setLogPaused);
+  const pausedCount = useRailWatchStore((state) => state.pausedLogs.length);
   const [filter, setFilter] = useState<(typeof filterLabels)[number]>("全部");
   const clearBothLogs = async () => {
     clearLogs();
@@ -26,6 +28,18 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
       <div className="event-head">
         <h2>事件日志</h2>
         <div className="event-head-actions">
+          <Tooltip title={logPaused ? "恢复事件流" : "暂停事件流"}>
+            <button
+              aria-label={logPaused ? "恢复事件流" : "暂停事件流"}
+              aria-pressed={logPaused}
+              className={logPaused ? "event-clear-btn active" : "event-clear-btn"}
+              onClick={() => setLogPaused(!logPaused)}
+              type="button"
+            >
+              {logPaused ? <Play size={14} /> : <Pause size={14} />}
+              <span>{logPaused ? `恢复${pausedCount ? `(${pausedCount})` : ""}` : "暂停"}</span>
+            </button>
+          </Tooltip>
           <Tooltip title="清空事件">
             <button aria-label="清空事件" className="event-clear-btn" onClick={() => void clearBothLogs()} type="button">
               <Eraser size={14} />

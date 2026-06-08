@@ -88,6 +88,12 @@ export type ResultsPayload = {
   rows: QueryResultRow[];
 };
 
+export type MonitorTickPayload = {
+  loop: number;
+  date: string;
+  rows: QueryResultRow[];
+};
+
 export type NotifyPayload = {
   title: string;
   message: string;
@@ -99,6 +105,7 @@ export type BridgeEvent =
   | { event: "state"; payload: RailWatchStatus }
   | { event: "results"; payload: ResultsPayload }
   | { event: "notify"; payload: NotifyPayload }
+  | { event: "monitorTick"; payload: MonitorTickPayload }
   | { event: "labels"; payload: { chromedriver_path?: string; chrome_version?: string } }
   | { event: string; payload: unknown };
 

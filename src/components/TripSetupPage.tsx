@@ -134,7 +134,7 @@ export function TripSetupPage({
   const config = useRailWatchStore((state) => state.config);
   const setConfig = useRailWatchStore((state) => state.setConfig);
   const [dateRange, setDateRange] = useState<DateRangePreset>(() => (config.date_range as DateRangePreset) || "±1天");
-  const [priority, setPriority] = useState<PriorityMode>("速度优先");
+  const [priority, setPriority] = useState<PriorityMode>(() => (config.smart_rate ? "速度优先" : "成功率优先"));
   const [requestMode, setRequestMode] = useState<RequestMode>(() => smartRateToRequestMode(config.smart_rate, config.interval));
   const [passengerDraft, setPassengerDraft] = useState("");
 
@@ -217,7 +217,7 @@ export function TripSetupPage({
       .split(/[,，、\s]+/)
       .map((code) => code.trim())
       .filter(Boolean);
-    const merged = [...new Set([...current, COMMON_TRAINS[0]])];
+    const merged = [...new Set([...current, ...COMMON_TRAINS])];
     update({ train_code: merged.join(", ") });
   };
 
@@ -251,6 +251,7 @@ export function TripSetupPage({
     if (loaded) {
       setConfig(loaded);
       setRequestMode(smartRateToRequestMode(loaded.smart_rate, loaded.interval));
+      setPriority(loaded.smart_rate ? "速度优先" : "成功率优先");
       setDateRange((loaded.date_range as DateRangePreset) || "±1天");
     }
   };

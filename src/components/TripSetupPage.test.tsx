@@ -44,6 +44,20 @@ describe("TripSetupPage", () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
+  test("常用车次 merges every preset code", async () => {
+    const user = userEvent.setup();
+    railwatchStore.setState({ config: { ...defaultConfig, train_code: "" } });
+
+    render(
+      <TripSetupPage busy={null} confirm={(async () => false) as ConfirmDialog} runCommand={(async () => undefined) as CommandRunner} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "常用车次" }));
+
+    const codes = railwatchStore.getState().config.train_code.split(/[,，、\s]+/).filter(Boolean);
+    expect(codes).toEqual(expect.arrayContaining(["G1", "G3", "G17", "D313", "D321"]));
+  });
+
   test("renders the reference trip setup card without dashboard workflow", () => {
     const confirm = vi.fn(async () => false) as ConfirmDialog;
     const runCommand = vi.fn(async () => undefined) as CommandRunner;

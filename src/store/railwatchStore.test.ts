@@ -63,6 +63,20 @@ describe("railwatchStore", () => {
     ]);
   });
 
+  test("buffers logs while paused and flushes them on resume", () => {
+    const store = createRailWatchStore();
+
+    store.getState().applyLog({ time: "09:00:00", level: "INFO", message: "before pause" });
+    store.getState().setLogPaused(true);
+    store.getState().applyLog({ time: "09:00:01", level: "INFO", message: "while paused" });
+
+    expect(store.getState().logs.map((entry) => entry.message)).toEqual(["before pause"]);
+
+    store.getState().setLogPaused(false);
+
+    expect(store.getState().logs.map((entry) => entry.message)).toEqual(["before pause", "while paused"]);
+  });
+
   test("records query results and ticket hits from runtime events", () => {
     const store = createRailWatchStore();
 
@@ -89,6 +103,41 @@ describe("railwatchStore", () => {
     expect(state.results.map((row) => row.train)).toEqual(["G101", "G103"]);
     expect(state.hits[0].train_code).toBe("G101");
     expect(state.notifications[0].title).toBe("发现目标车票");
+  });
+
+  test("does not yank the active page when a hit notification arrives", () => {
+    const store = createRailWatchStore();
+    store.getState().setActivePage("行程设置");
+
+    store.getState().applyNotify({
+      title: "发现目标车票",
+      message: "命中：G101",
+      hit: {
+        train_code: "G101",
+        seat_type: "二等座",
+        status: "有",
+        source: "regular",
+        detail: "命中：G101",
+        label: "G101 二等座 有票: 有",
+      },
+    });
+
+    expect(store.getState().activePage).toBe("行程设置");
+    expect(store.getState().notifications).toHaveLength(1);
+  });
+
+  test("applies live monitor ticks to results and loop count", () => {
+    const store = createRailWatchStore();
+
+    store.getState().applyMonitorTick({
+      loop: 7,
+      date: "2026-06-10",
+      rows: [{ train: "G55", raw: "G55 北京 上海 二等座 有" }],
+    });
+
+    expect(store.getState().monitorLoops).toBe(7);
+    expect(store.getState().results.map((row) => row.train)).toEqual(["G55"]);
+    expect(store.getState().activePage).toBe("仪表盘");
   });
 
   test("applies runtime label patches from backend events", () => {

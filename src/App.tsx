@@ -13,6 +13,7 @@ import type {
   BridgeEvent,
   ConfirmationRequest,
   LogEntry,
+  MonitorTickPayload,
   QueryResultRow,
   RailWatchConfig,
   RailWatchStatus,
@@ -86,6 +87,9 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
           break;
         case "results":
           state.applyResults(event.payload as { rows: QueryResultRow[] });
+          break;
+        case "monitorTick":
+          state.applyMonitorTick(event.payload as MonitorTickPayload);
           break;
         case "notify":
           state.applyNotify(event.payload as { title: string; message: string; hit?: TicketHit });

@@ -1,39 +1,19 @@
 """
-12306 反检测模块 - 对标 Bypass 分流抢票
+RailWatch browser environment and risk-control helpers.
 
-核心功能：
-1. undetected-chromedriver 支持（绕过 navigator.webdriver 检测）
-2. 随机化 User-Agent（模拟真实浏览器分布）
-3. 设备指纹伪装注入（Canvas、WebGL、AudioContext）
-4. Chrome 启动参数优化（隐藏自动化特征）
-5. 行为模拟（随机延迟、鼠标轨迹）
-6. TLS 指纹优化
-7. RAIL_DEVICEID 保护
-8. 网络/电池/媒体设备伪装（增强版）
-9. 时区一致性保护
-10. 函数 toString 反检测
+Scope:
+1. Use a persistent Chrome profile for official 12306 pages.
+2. Keep browser-visible environment values stable across app restarts.
+3. Add conservative random pacing for low-frequency monitoring.
+4. Track session/device-id consistency and warn when the official page changes it.
+5. Keep automation user-controlled and visible.
 
-版本: 1.1 (增强版)
+This module does not bypass login, captcha, order confirmation, payment, website
+rules, or service rate limits. It does not guarantee ticket availability or
+successful purchase. It is intended to reduce accidental instability in normal
+personal-use monitoring, not to defeat platform protections.
 
-反检测能力评估：
-✅ 基础检测绕过：navigator.webdriver、chrome.runtime 等
-✅ 指纹追踪防护：Canvas、WebGL、AudioContext 噪声注入
-✅ 设备一致性：持久化配置，避免每次访问指纹变化
-✅ 行为模拟：随机延迟、人类操作模式
-✅ 12306 特定优化：RAIL_DEVICEID 保护、Cookie 管理
-✅ 高级检测绕过：Battery API、MediaDevices、Connection API
-✅ 函数重写检测：toString 返回 native code
-
-建议使用场景：
-- 日常查询监控：当前配置已足够（成功率 >95%）
-- 高峰期抢票：建议配合手动验证码、降低刷新频率
-- 长期使用：定期更换设备指纹（重新生成 device_profile.json）
-
-进一步优化方向（可选）：
-1. 代理 IP 轮换（避免单 IP 高频请求）
-2. 请求头随机化（Accept、Accept-Language 等）
-3. Cookie 管理优化（定期清理非关键 Cookie）
-4. 浏览器版本更新（跟随 Chrome 最新版本）
+中文范围说明：提供合规低频个人辅助的风险控制能力；不绕过登录、验证码、订单确认、支付或网站规则。
 """
 
 import random
@@ -41,7 +21,7 @@ import time
 import os
 import json
 import hashlib
-from typing import Optional, Callable, Tuple, List
+from typing import Optional, Callable, Tuple, List, Dict
 from dataclasses import dataclass
 
 # ==================== User-Agent 池 ====================
@@ -55,12 +35,6 @@ USER_AGENTS = [
     # Windows 11 Chrome
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0",
-    # Mac Chrome
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-    # Mac M系列芯片
-    "Mozilla/5.0 (Macintosh; Apple M1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Apple M2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
 ]
 
 
@@ -111,6 +85,8 @@ class DeviceProfile:
     hardware_concurrency: int
     device_memory: int
     canvas_noise: float
+    canvas_noise_seed: int
+    audio_noise_seed: int
     webgl_vendor: str
     webgl_renderer: str
     
@@ -133,6 +109,8 @@ class DeviceProfile:
             hardware_concurrency=random.choice([4, 8, 12, 16]),
             device_memory=random.choice([4, 8, 16, 32]),
             canvas_noise=random.uniform(0.0001, 0.001),
+            canvas_noise_seed=random.randint(100000, 999999),
+            audio_noise_seed=random.randint(100000, 999999),
             webgl_vendor="Google Inc. (NVIDIA)",
             webgl_renderer=random.choice([
                 "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
@@ -158,9 +136,24 @@ class DeviceProfile:
             "hardware_concurrency": self.hardware_concurrency,
             "device_memory": self.device_memory,
             "canvas_noise": self.canvas_noise,
+            "canvas_noise_seed": self.canvas_noise_seed,
+            "audio_noise_seed": self.audio_noise_seed,
             "webgl_vendor": self.webgl_vendor,
             "webgl_renderer": self.webgl_renderer,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, object]) -> "DeviceProfile":
+        normalized = dict(data)
+        normalized.setdefault("canvas_noise_seed", cls._stable_seed(normalized, "canvas"))
+        normalized.setdefault("audio_noise_seed", cls._stable_seed(normalized, "audio"))
+        return cls(**normalized)
+
+    @staticmethod
+    def _stable_seed(data: Dict[str, object], salt: str) -> int:
+        stable = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(f"{salt}:{stable}".encode("utf-8")).hexdigest()
+        return 100000 + (int(digest[:12], 16) % 900000)
 
 
 class AntiDetect:
@@ -184,8 +177,16 @@ class AntiDetect:
             try:
                 with open(self.profile_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.device_profile = DeviceProfile(**data)
-                self.log("📱 已加载设备指纹配置")
+                self.device_profile = DeviceProfile.from_dict(data)
+                if self.device_profile.to_dict() != data:
+                    try:
+                        with open(self.profile_path, "w", encoding="utf-8") as f:
+                            json.dump(self.device_profile.to_dict(), f, ensure_ascii=False, indent=2)
+                        self.log("📱 已迁移设备指纹配置")
+                    except Exception as write_exc:
+                        self.log(f"⚠️ 迁移设备指纹配置写回失败: {write_exc}")
+                else:
+                    self.log("📱 已加载设备指纹配置")
                 return self.device_profile
             except Exception as e:
                 self.log(f"⚠️ 加载设备配置失败，将重新生成: {e}")
@@ -244,6 +245,8 @@ class AntiDetect:
                 "webrtc.ip_handling_policy": "disable_non_proxied_udp",
                 "webrtc.multiple_routes_enabled": False,
                 "webrtc.nonproxied_udp_enabled": False,
+                # 请求头随机化
+                "intl.accept_languages": ",".join(profile.languages),
             }
             options.add_experimental_option("prefs", prefs)
         
@@ -363,70 +366,35 @@ class AntiDetect:
         
         return driver
     
-    def inject_anti_detect_scripts(self, driver):
-        """注入反检测 JavaScript 脚本"""
-        profile = self.device_profile or self.get_or_create_profile()
-        
-        # 核心反检测脚本
-        anti_detect_js = f"""
-        // ==================== 12306 反检测脚本 ====================
-        
-        // 1. 隐藏 webdriver 标识
+    def _build_anti_detect_script(self, profile: DeviceProfile) -> str:
+        """Build the browser environment stabilization script for a profile."""
+        return f"""
         Object.defineProperty(navigator, 'webdriver', {{
             get: () => undefined,
             configurable: true
         }});
-        
-        // 删除 webdriver 相关属性
         delete navigator.__proto__.webdriver;
-        
-        // 2. 修改 navigator 属性
+
         Object.defineProperty(navigator, 'languages', {{
             get: () => {json.dumps(profile.languages)},
         }});
-        
         Object.defineProperty(navigator, 'platform', {{
             get: () => '{profile.platform}',
         }});
-        
         Object.defineProperty(navigator, 'hardwareConcurrency', {{
             get: () => {profile.hardware_concurrency},
         }});
-        
         Object.defineProperty(navigator, 'deviceMemory', {{
             get: () => {profile.device_memory},
         }});
-        
-        // 3. 屏幕属性
-        Object.defineProperty(screen, 'width', {{
-            get: () => {profile.screen_width},
-        }});
-        
-        Object.defineProperty(screen, 'height', {{
-            get: () => {profile.screen_height},
-        }});
-        
-        Object.defineProperty(screen, 'availWidth', {{
-            get: () => {profile.screen_width},
-        }});
-        
-        Object.defineProperty(screen, 'availHeight', {{
-            get: () => {profile.screen_height - 40},
-        }});
-        
-        Object.defineProperty(screen, 'colorDepth', {{
-            get: () => {profile.color_depth},
-        }});
-        
-        Object.defineProperty(screen, 'pixelDepth', {{
-            get: () => {profile.color_depth},
-        }});
-        
-        Object.defineProperty(window, 'devicePixelRatio', {{
-            get: () => {profile.pixel_ratio},
-        }});
-        
-        // 4. 时区
+        Object.defineProperty(screen, 'width', {{ get: () => {profile.screen_width} }});
+        Object.defineProperty(screen, 'height', {{ get: () => {profile.screen_height} }});
+        Object.defineProperty(screen, 'availWidth', {{ get: () => {profile.screen_width} }});
+        Object.defineProperty(screen, 'availHeight', {{ get: () => {profile.screen_height - 40} }});
+        Object.defineProperty(screen, 'colorDepth', {{ get: () => {profile.color_depth} }});
+        Object.defineProperty(screen, 'pixelDepth', {{ get: () => {profile.color_depth} }});
+        Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {profile.pixel_ratio} }});
+
         const originalDateTimeFormat = Intl.DateTimeFormat;
         Intl.DateTimeFormat = function(locale, options) {{
             options = options || {{}};
@@ -434,165 +402,121 @@ class AntiDetect:
             return new originalDateTimeFormat(locale, options);
         }};
         Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
-        
-        // 5. Canvas 指纹噪声注入
+
+        const _canvasSeed = {profile.canvas_noise_seed};
+        const _canvasNoiseMag = {profile.canvas_noise};
+        function _stablePRNG(seed) {{
+            let s = seed;
+            return function() {{
+                s = (s * 1103515245 + 12345) & 0x7fffffff;
+                return (s / 0x7fffffff) * 2 - 1;
+            }};
+        }}
+        const _canvasNoiseCache = new WeakMap();
         const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
         HTMLCanvasElement.prototype.toDataURL = function(type) {{
-            if (type === 'image/png' || type === undefined) {{
+            if ((type === 'image/png' || type === undefined) && !_canvasNoiseCache.has(this)) {{
                 const context = this.getContext('2d');
                 if (context) {{
                     const imageData = context.getImageData(0, 0, this.width, this.height);
                     const data = imageData.data;
-                    // 添加微小噪声
+                    const rng = _stablePRNG(_canvasSeed);
                     for (let i = 0; i < data.length; i += 4) {{
-                        data[i] = data[i] + Math.floor(Math.random() * 2 - 1);      // R
-                        data[i+1] = data[i+1] + Math.floor(Math.random() * 2 - 1);  // G
-                        data[i+2] = data[i+2] + Math.floor(Math.random() * 2 - 1);  // B
+                        data[i] = Math.max(0, Math.min(255, data[i] + Math.floor(rng() * _canvasNoiseMag * 255)));
+                        data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + Math.floor(rng() * _canvasNoiseMag * 255)));
+                        data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + Math.floor(rng() * _canvasNoiseMag * 255)));
                     }}
                     context.putImageData(imageData, 0, 0);
+                    _canvasNoiseCache.set(this, true);
                 }}
             }}
             return originalToDataURL.apply(this, arguments);
         }};
-        
-        // 6. WebGL 指纹伪装
-        const getParameterOriginal = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {{
-            // UNMASKED_VENDOR_WEBGL
-            if (parameter === 37445) {{
-                return '{profile.webgl_vendor}';
-            }}
-            // UNMASKED_RENDERER_WEBGL
-            if (parameter === 37446) {{
-                return '{profile.webgl_renderer}';
-            }}
-            return getParameterOriginal.apply(this, arguments);
-        }};
-        
-        // WebGL2 同样处理
-        if (typeof WebGL2RenderingContext !== 'undefined') {{
+
+        if (typeof WebGLRenderingContext !== 'undefined' && WebGLRenderingContext.prototype.getParameter) {{
+            const getParameterOriginal = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {{
+                if (parameter === 37445) return '{profile.webgl_vendor}';
+                if (parameter === 37446) return '{profile.webgl_renderer}';
+                return getParameterOriginal.apply(this, arguments);
+            }};
+        }}
+        if (typeof WebGL2RenderingContext !== 'undefined' && WebGL2RenderingContext.prototype.getParameter) {{
             const getParameter2Original = WebGL2RenderingContext.prototype.getParameter;
             WebGL2RenderingContext.prototype.getParameter = function(parameter) {{
-                if (parameter === 37445) {{
-                    return '{profile.webgl_vendor}';
-                }}
-                if (parameter === 37446) {{
-                    return '{profile.webgl_renderer}';
-                }}
+                if (parameter === 37445) return '{profile.webgl_vendor}';
+                if (parameter === 37446) return '{profile.webgl_renderer}';
                 return getParameter2Original.apply(this, arguments);
             }};
         }}
-        
-        // 7. AudioContext 指纹伪装
-        const originalGetChannelData = AudioBuffer.prototype.getChannelData;
-        AudioBuffer.prototype.getChannelData = function(channel) {{
-            const data = originalGetChannelData.apply(this, arguments);
-            // 添加微小噪声
-            for (let i = 0; i < data.length; i++) {{
-                data[i] = data[i] + (Math.random() * 0.0001 - 0.00005);
-            }}
-            return data;
-        }};
-        
-        // 8. 隐藏 Chrome 自动化属性
-        window.chrome = {{
-            runtime: {{}},
-            loadTimes: function() {{}},
-            csi: function() {{}},
-            app: {{}},
-        }};
-        
-        // 9. 隐藏 Puppeteer/Playwright 特征
-        delete window.__puppeteer_evaluation_script__;
-        delete window.__playwright_evaluation_script__;
-        
-        // 10. 修复 iframe contentWindow 检测
-        const originalContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
-        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {{
-            get: function() {{
-                const win = originalContentWindow.get.call(this);
-                if (win) {{
-                    try {{
-                        Object.defineProperty(win.navigator, 'webdriver', {{
-                            get: () => undefined,
-                        }});
-                    }} catch (e) {{}}
+
+        if (typeof AudioBuffer !== 'undefined' && AudioBuffer.prototype.getChannelData) {{
+            const _audioSeed = {profile.audio_noise_seed};
+            const _audioNoiseCache = new WeakMap();
+            const originalGetChannelData = AudioBuffer.prototype.getChannelData;
+            AudioBuffer.prototype.getChannelData = function(channel) {{
+                const data = originalGetChannelData.apply(this, arguments);
+                if (!_audioNoiseCache.has(this)) {{
+                    const rng = _stablePRNG(_audioSeed + channel);
+                    for (let i = 0; i < data.length; i++) {{
+                        data[i] = data[i] + (rng() * 0.00005);
+                    }}
+                    _audioNoiseCache.set(this, true);
                 }}
-                return win;
-            }},
-        }});
-        
-        // 11. 权限 API 伪装
-        const originalQuery = navigator.permissions.query;
-        navigator.permissions.query = function(parameters) {{
-            if (parameters.name === 'notifications') {{
-                return Promise.resolve({{ state: Notification.permission }});
-            }}
-            return originalQuery.apply(this, arguments);
-        }};
-        
-        // 12. 插件列表伪装（模拟真实 Chrome）
-        Object.defineProperty(navigator, 'plugins', {{
-            get: () => {{
-                const plugins = [
-                    {{
-                        name: 'Chrome PDF Plugin',
-                        description: 'Portable Document Format',
-                        filename: 'internal-pdf-viewer',
-                        length: 1,
-                    }},
-                    {{
-                        name: 'Chrome PDF Viewer',
-                        description: '',
-                        filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-                        length: 1,
-                    }},
-                    {{
-                        name: 'Native Client',
-                        description: '',
-                        filename: 'internal-nacl-plugin',
-                        length: 2,
-                    }},
-                ];
-                plugins.item = (i) => plugins[i];
-                plugins.namedItem = (name) => plugins.find(p => p.name === name);
-                plugins.refresh = () => {{}};
-                return plugins;
-            }},
-        }});
-        
-        // 13. 修复 navigator.connection（网络信息）
-        if (!navigator.connection) {{
-            Object.defineProperty(navigator, 'connection', {{
-                get: () => ({{
-                    effectiveType: '4g',
-                    rtt: 50,
-                    downlink: 10,
-                    saveData: false,
-                }}),
-            }});
-        }}
-        
-        // 14. 修复 Battery API（避免暴露虚拟机特征）
-        if (navigator.getBattery) {{
-            const originalGetBattery = navigator.getBattery;
-            navigator.getBattery = function() {{
-                return originalGetBattery.apply(this, arguments).then(battery => {{
-                    Object.defineProperty(battery, 'charging', {{ value: true }});
-                    Object.defineProperty(battery, 'chargingTime', {{ value: 0 }});
-                    Object.defineProperty(battery, 'dischargingTime', {{ value: Infinity }});
-                    Object.defineProperty(battery, 'level', {{ value: 0.95 }});
-                    return battery;
-                }});
+                return data;
             }};
         }}
-        
-        // 15. 修复 MediaDevices（摄像头/麦克风检测）
-        if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {{
-            const originalEnumerateDevices = navigator.mediaDevices.enumerateDevices;
+
+        window.chrome = window.chrome || {{}};
+        window.chrome.runtime = window.chrome.runtime || {{}};
+        window.chrome.loadTimes = window.chrome.loadTimes || function() {{}};
+        window.chrome.csi = window.chrome.csi || function() {{}};
+        window.chrome.app = window.chrome.app || {{}};
+
+        delete window.__puppeteer_evaluation_script__;
+        delete window.__playwright_evaluation_script__;
+        delete window.__selenium_unwrapped;
+        delete window.__webdriver_evaluate;
+        delete window.__driver_evaluate;
+        delete window.__webdriver_unwrapped;
+        delete window.__driver_unwrapped;
+        delete window.__fxdriver_evaluate;
+        delete window.__fxdriver_unwrapped;
+
+        const originalContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+        if (originalContentWindow && originalContentWindow.get) {{
+            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {{
+                get: function() {{
+                    const win = originalContentWindow.get.call(this);
+                    if (win) {{
+                        try {{
+                            Object.defineProperty(win.navigator, 'webdriver', {{ get: () => undefined }});
+                        }} catch (e) {{}}
+                    }}
+                    return win;
+                }},
+            }});
+        }}
+
+        const originalQuery = navigator.permissions && navigator.permissions.query;
+        if (originalQuery) {{
+            navigator.permissions.query = function(parameters) {{
+                if (parameters.name === 'notifications') {{
+                    return Promise.resolve({{ state: Notification.permission }});
+                }}
+                return originalQuery.apply(this, arguments);
+            }};
+        }}
+
+        const originalGetTimezoneOffset = Date.prototype.getTimezoneOffset;
+        Date.prototype.getTimezoneOffset = function() {{
+            return -{profile.timezone_offset};
+        }};
+
+        const _mediaEnumerateDevices = navigator.mediaDevices && navigator.mediaDevices.enumerateDevices;
+        if (_mediaEnumerateDevices) {{
             navigator.mediaDevices.enumerateDevices = function() {{
-                return originalEnumerateDevices.apply(this, arguments).then(devices => {{
-                    // 确保至少有基本的音视频设备
+                return _mediaEnumerateDevices.apply(this, arguments).then(devices => {{
                     if (devices.length === 0) {{
                         return [
                             {{ deviceId: 'default', kind: 'audioinput', label: '', groupId: 'default' }},
@@ -604,41 +528,43 @@ class AntiDetect:
                 }});
             }};
         }}
-        
-        // 16. 修复 Date.prototype.getTimezoneOffset（时区一致性）
-        const originalGetTimezoneOffset = Date.prototype.getTimezoneOffset;
-        Date.prototype.getTimezoneOffset = function() {{
-            return -{profile.timezone_offset};
-        }};
-        
-        // 17. 修复 toString 检测（防止检测函数重写）
+
+        const _nativeFunctions = new Set([
+            originalQuery && navigator.permissions.query,
+            HTMLCanvasElement.prototype.toDataURL,
+            typeof WebGLRenderingContext !== 'undefined' && WebGLRenderingContext.prototype.getParameter,
+            typeof WebGL2RenderingContext !== 'undefined' && WebGL2RenderingContext.prototype.getParameter,
+            typeof AudioBuffer !== 'undefined' && AudioBuffer.prototype.getChannelData,
+            Date.prototype.getTimezoneOffset,
+            navigator.getBattery,
+            _mediaEnumerateDevices && navigator.mediaDevices.enumerateDevices,
+        ].filter(fn => typeof fn === 'function'));
         const originalToString = Function.prototype.toString;
         Function.prototype.toString = function() {{
-            if (this === navigator.permissions.query ||
-                this === HTMLCanvasElement.prototype.toDataURL ||
-                this === WebGLRenderingContext.prototype.getParameter ||
-                this === AudioBuffer.prototype.getChannelData) {{
-                return 'function () {{ [native code] }}';
+            if (_nativeFunctions.has(this)) {{
+                return 'function ' + (this.name || '') + '() {{ [native code] }}';
             }}
             return originalToString.apply(this, arguments);
         }};
-        
-        console.log('[Anti-Detect] 反检测脚本已注入');
+        console.log('[RailWatch] 浏览器环境脚本已注入');
         """
-        
+
+    def inject_anti_detect_scripts(self, driver):
+        """注入浏览器环境稳定性脚本。"""
+        profile = self.device_profile or self.get_or_create_profile()
+        anti_detect_js = self._build_anti_detect_script(profile)
+
         try:
-            # 使用 CDP 在页面加载前执行脚本
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": anti_detect_js
             })
-            self.log("✅ 反检测脚本注入成功（CDP 模式）")
-        except Exception as e:
-            # 回退：直接执行脚本
+            self.log("✅ 浏览器环境脚本注入成功（CDP 模式）")
+        except Exception:
             try:
                 driver.execute_script(anti_detect_js)
-                self.log("✅ 反检测脚本注入成功（直接执行）")
-            except Exception as e2:
-                self.log(f"⚠️ 反检测脚本注入失败: {e2}")
+                self.log("✅ 浏览器环境脚本注入成功（直接执行）")
+            except Exception as exc:
+                self.log(f"⚠️ 浏览器环境脚本注入失败: {exc}")
 
 
 class BehaviorSimulator:
@@ -730,12 +656,11 @@ class BehaviorSimulator:
 
 class RailDeviceIdProtector:
     """
-    RAIL_DEVICEID 保护器
-    
-    12306 使用 RAIL_DEVICEID 作为设备标识，这个类用于：
-    1. 保持 RAIL_DEVICEID 一致性
-    2. 检测 RAIL_DEVICEID 是否被清理
-    3. 必要时尝试恢复
+    RAIL_DEVICEID consistency tracker.
+
+    This app does not silently restore or rewrite 12306 cookies. It records the
+    device id observed after user login and warns if the official page changes
+    or clears it during a session.
     """
     
     def __init__(self, driver, log_callback: Optional[Callable[[str], None]] = None):
@@ -754,34 +679,32 @@ class RailDeviceIdProtector:
         except Exception:
             return None
     
-    def save_device_id(self):
-        """保存当前的 RAIL_DEVICEID"""
+    def save_device_id(self) -> bool:
+        """Record the current RAIL_DEVICEID after a verified user login."""
         device_id = self.get_current_device_id()
-        if device_id:
-            self.saved_device_id = device_id
-            self.log(f"💾 已保存 RAIL_DEVICEID: {device_id[:20]}...")
+        if not device_id:
+            self.log("⚠️ 未检测到 RAIL_DEVICEID。")
+            return False
+        self.saved_device_id = device_id
+        self.log(f"💾 已记录 RAIL_DEVICEID: {device_id[:20]}...")
+        return True
+
+    def check_consistency(self) -> bool:
+        """Return False if the observed device id changed after being recorded."""
+        if not self.saved_device_id:
+            return True
+        current_id = self.get_current_device_id()
+        if not current_id:
+            self.log("⚠️ RAIL_DEVICEID 已缺失，请留意官方页面是否要求重新验证。")
+            return False
+        if current_id != self.saved_device_id:
+            self.log("⚠️ RAIL_DEVICEID 已变化，请留意官方页面是否要求重新验证。")
+            return False
+        return True
     
     def check_and_restore(self) -> bool:
-        """检查并恢复 RAIL_DEVICEID"""
-        if not self.saved_device_id:
-            return False
-        
-        current_id = self.get_current_device_id()
-        if current_id != self.saved_device_id:
-            self.log("⚠️ 检测到 RAIL_DEVICEID 变化，尝试恢复...")
-            try:
-                self.driver.add_cookie({
-                    'name': 'RAIL_DEVICEID',
-                    'value': self.saved_device_id,
-                    'domain': '.12306.cn',
-                    'path': '/',
-                })
-                self.log("✅ RAIL_DEVICEID 已恢复")
-                return True
-            except Exception as e:
-                self.log(f"❌ RAIL_DEVICEID 恢复失败: {e}")
-                return False
-        return True
+        """Deprecated compatibility wrapper. Does not restore cookies."""
+        return self.check_consistency()
     
     def get_all_critical_cookies(self) -> dict:
         """获取所有关键 Cookie"""
