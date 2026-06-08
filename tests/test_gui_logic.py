@@ -418,10 +418,487 @@ class TicketMonitorLogicTests(unittest.TestCase):
         )
 
         with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda seconds: None):
-            monitor._try_alternate_order(FakeAlternateRow(), "G101", "二等座")
+            result = monitor._try_alternate_order(FakeAlternateRow(), "G101", "二等座")
 
+        self.assertEqual(result, "failed")
         self.assertTrue(driver.selection_attempted)
         self.assertFalse(driver.submit_button.clicked)
+
+    def test_find_hit_row_uses_houbu_button_not_seat_text(self):
+        class Row:
+            text = "G101 北京 上海 二等座 无"
+
+            def find_elements(self, by=None, value=None):
+                return []
+
+        class Table:
+            def find_elements(self, by=None, value=None):
+                return [Row()]
+
+        class Driver:
+            def find_element(self, by=None, value=None):
+                return Table()
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"train_code": "G101", "seat_keyword": "二等座", "auto_alternate": True},
+            log_callback=lambda m: None,
+        )
+        monitor._get_seat_value = lambda row, seat, idx: "无"
+        monitor._find_book_button = lambda row: None
+        monitor._find_alternate_button = lambda row: object()
+
+        hit = monitor._find_hit_row({})
+
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[0], "G101")
+        self.assertEqual(hit[5], "alternate")
+
+    def test_find_hit_row_prefers_available_ticket_over_houbu(self):
+        class Row:
+            text = "G101 北京 上海 二等座 有"
+
+            def find_elements(self, by=None, value=None):
+                return []
+
+        class Table:
+            def find_elements(self, by=None, value=None):
+                return [Row()]
+
+        class Driver:
+            def find_element(self, by=None, value=None):
+                return Table()
+
+        book = object()
+        monitor = TicketMonitor(
+            Driver(),
+            {"train_code": "G101", "seat_keyword": "二等座", "auto_alternate": True},
+            log_callback=lambda m: None,
+        )
+        monitor._get_seat_value = lambda row, seat, idx: "有"
+        monitor._find_book_button = lambda row: book
+        monitor._find_alternate_button = lambda row: object()
+
+        hit = monitor._find_hit_row({})
+
+        self.assertEqual(hit[5], "book")
+        self.assertIs(hit[4], book)
+
+    def test_find_hit_row_unlimited_seat_triggers_houbu(self):
+        class Row:
+            text = "G101 北京 上海"
+
+            def find_elements(self, by=None, value=None):
+                return []
+
+        class Table:
+            def find_elements(self, by=None, value=None):
+                return [Row()]
+
+        class Driver:
+            def find_element(self, by=None, value=None):
+                return Table()
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"train_code": "", "seat_keyword": "", "auto_alternate": True},
+            log_callback=lambda m: None,
+        )
+        monitor._find_book_button = lambda row: None
+        monitor._find_alternate_button = lambda row: object()
+
+        hit = monitor._find_hit_row({})
+
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[1], "未指定席别")
+        self.assertEqual(hit[5], "alternate")
+
+    def test_find_hit_row_no_houbu_when_auto_alternate_disabled(self):
+        class Row:
+            text = "G101 北京 上海 二等座 无"
+
+            def find_elements(self, by=None, value=None):
+                return []
+
+        class Table:
+            def find_elements(self, by=None, value=None):
+                return [Row()]
+
+        class Driver:
+            def find_element(self, by=None, value=None):
+                return Table()
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"train_code": "G101", "seat_keyword": "二等座", "auto_alternate": False},
+            log_callback=lambda m: None,
+        )
+        monitor._get_seat_value = lambda row, seat, idx: "无"
+        monitor._find_book_button = lambda row: None
+        monitor._find_alternate_button = lambda row: object()
+
+        self.assertIsNone(monitor._find_hit_row({}))
+
+    def test_alternate_submit_success_when_passenger_selected(self):
+        humans = []
+
+        class Btn:
+            def __init__(self):
+                self.clicked = False
+
+            def is_displayed(self):
+                return True
+
+            def click(self):
+                self.clicked = True
+
+        class Row:
+            def __init__(self):
+                self.btn = Btn()
+
+            def find_element(self, by=None, value=None):
+                if value in ("a.btn-houbu", ".//a[contains(text(),'候补')]", "a.btn72.btn-houbu", "a[onclick*='houbu']"):
+                    return self.btn
+                raise NoSuchElementException("nf")
+
+        class Driver:
+            def __init__(self):
+                self.submit = Btn()
+                self.confirm = Btn()
+
+            def execute_script(self, script, *args):
+                if "targetNames" in script:
+                    return 1
+                if "deadline" in script:
+                    return True
+                return False
+
+            def find_element(self, by=None, value=None):
+                if value == "#submitHoubu_id":
+                    return self.submit
+                if value == "#confirmHB_id":
+                    return self.confirm
+                raise NoSuchElementException("nf")
+
+            def next_wait_result(self):
+                return object()
+
+        driver = Driver()
+        monitor = TicketMonitor(
+            driver,
+            {"auto_alternate": True, "passenger_count": 1, "passengers": "", "alternate_deadline": ""},
+            log_callback=lambda m: None,
+            human_action_callback=lambda p: humans.append(p),
+        )
+        monitor._alternate_success_present = lambda: True
+
+        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+
+        self.assertEqual(result, "success")
+        self.assertTrue(driver.submit.clicked)
+        self.assertEqual(humans, [])
+
+    def test_alternate_submit_hands_off_when_success_not_confirmed(self):
+        # 已点击提交但无成功标记：不得谎报 success，应交人工核对
+        humans = []
+
+        class Btn:
+            def __init__(self):
+                self.clicked = False
+
+            def is_displayed(self):
+                return True
+
+            def click(self):
+                self.clicked = True
+
+        class Row:
+            def __init__(self):
+                self.btn = Btn()
+
+            def find_element(self, by=None, value=None):
+                if value in ("a.btn-houbu", ".//a[contains(text(),'候补')]", "a.btn72.btn-houbu", "a[onclick*='houbu']"):
+                    return self.btn
+                raise NoSuchElementException("nf")
+
+        class Switch:
+            def window(self, handle):
+                return None
+
+        class Driver:
+            current_window_handle = "w"
+            switch_to = Switch()
+
+            def __init__(self):
+                self.submit = Btn()
+                self.confirm = Btn()
+
+            def execute_script(self, script, *args):
+                if "targetNames" in script:
+                    return 1
+                return False  # no verification, and (crucially) no success marker
+
+            def find_element(self, by=None, value=None):
+                if value == "#submitHoubu_id":
+                    return self.submit
+                if value == "#confirmHB_id":
+                    return self.confirm
+                raise NoSuchElementException("nf")
+
+            def next_wait_result(self):
+                return object()
+
+        driver = Driver()
+        monitor = TicketMonitor(
+            driver,
+            {"auto_alternate": True, "passenger_count": 1, "passengers": "", "alternate_deadline": ""},
+            log_callback=lambda m: None,
+            human_action_callback=lambda p: humans.append(p),
+        )
+
+        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+
+        self.assertEqual(result, "human")
+        self.assertTrue(driver.submit.clicked)
+        self.assertEqual(len(humans), 1)
+
+    def test_alternate_submit_retry_when_button_missing(self):
+        # 候补按钮暂不可点（尚未离开查询页）：返回 retry，不打扰用户
+        humans = []
+
+        class Row:
+            def find_element(self, by=None, value=None):
+                raise NoSuchElementException("nf")
+
+        monitor = TicketMonitor(
+            object(),
+            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
+            log_callback=lambda m: None,
+            human_action_callback=lambda p: humans.append(p),
+        )
+
+        with patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+
+        self.assertEqual(result, "retry")
+        self.assertEqual(humans, [])
+
+    def test_alternate_success_present_reflects_driver_result_and_is_safe(self):
+        class Driver:
+            def __init__(self, value):
+                self.value = value
+
+            def execute_script(self, script, *args):
+                return self.value
+
+        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None)._alternate_success_present())
+        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None)._alternate_success_present())
+
+        class BadDriver:
+            def execute_script(self, script, *args):
+                raise RuntimeError("boom")
+
+        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None)._alternate_success_present())
+
+    def test_alternate_submit_hands_off_on_verification(self):
+        humans = []
+
+        class Btn:
+            def __init__(self):
+                self.clicked = False
+
+            def is_displayed(self):
+                return True
+
+            def click(self):
+                self.clicked = True
+
+        class Row:
+            def __init__(self):
+                self.btn = Btn()
+
+            def find_element(self, by=None, value=None):
+                if value in ("a.btn-houbu", ".//a[contains(text(),'候补')]", "a.btn72.btn-houbu", "a[onclick*='houbu']"):
+                    return self.btn
+                raise NoSuchElementException("nf")
+
+        class Switch:
+            def window(self, handle):
+                return None
+
+        class Driver:
+            current_window_handle = "w"
+            switch_to = Switch()
+
+            def __init__(self):
+                self.submit = Btn()
+
+            def execute_script(self, script, *args):
+                if "targetNames" in script:
+                    return 1
+                return True  # verification present
+
+            def find_element(self, by=None, value=None):
+                if value == "#submitHoubu_id":
+                    return self.submit
+                raise NoSuchElementException("nf")
+
+            def next_wait_result(self):
+                return object()
+
+        driver = Driver()
+        monitor = TicketMonitor(
+            driver,
+            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
+            log_callback=lambda m: None,
+            human_action_callback=lambda p: humans.append(p),
+        )
+
+        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+
+        self.assertEqual(result, "human")
+        self.assertEqual(len(humans), 1)
+        self.assertFalse(driver.submit.clicked)
+
+    def test_run_single_loop_alternate_success_emits_alternate_hit(self):
+        hits = []
+
+        class Driver:
+            def refresh(self):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
+            log_callback=lambda m: None,
+            on_hit=lambda p: hits.append(p),
+        )
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
+        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
+        monitor._focus_and_highlight = lambda row, btn: None
+        monitor._try_alternate_order = lambda row, code, seat: "success"
+
+        with patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._run_single_loop(1, 1)
+
+        self.assertTrue(result)
+        self.assertEqual(hits[0]["source"], "alternate")
+        self.assertEqual(hits[0]["status"], "候补已提交")
+
+    def test_run_single_loop_alternate_failed_hands_off_and_stops(self):
+        hits = []
+        humans = []
+
+        class Switch:
+            def window(self, handle):
+                return None
+
+        class Driver:
+            current_window_handle = "w"
+            switch_to = Switch()
+
+            def refresh(self):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
+            log_callback=lambda m: None,
+            on_hit=lambda p: hits.append(p),
+            human_action_callback=lambda p: humans.append(p),
+        )
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
+        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
+        monitor._focus_and_highlight = lambda row, btn: None
+        monitor._try_alternate_order = lambda row, code, seat: "failed"
+
+        with patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._run_single_loop(1, 1)
+
+        # 失败后停止刷新（避免停留在候补页空转），并交人工处理
+        self.assertTrue(result)
+        self.assertEqual(hits, [])
+        self.assertEqual(len(humans), 1)
+
+    def test_run_single_loop_alternate_retry_keeps_monitoring(self):
+        hits = []
+        humans = []
+
+        class Driver:
+            def refresh(self):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
+            log_callback=lambda m: None,
+            on_hit=lambda p: hits.append(p),
+            human_action_callback=lambda p: humans.append(p),
+        )
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
+        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
+        monitor._focus_and_highlight = lambda row, btn: None
+        monitor._try_alternate_order = lambda row, code, seat: "retry"
+
+        with patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._run_single_loop(1, 1)
+
+        # retry 表示尚未进入候补流程：继续监控，不命中、不打扰用户
+        self.assertFalse(result)
+        self.assertEqual(hits, [])
+        self.assertEqual(humans, [])
+
+    def test_run_single_loop_alternate_human_stops_without_hit_or_double_signal(self):
+        hits = []
+        humans = []
+
+        class Driver:
+            def refresh(self):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
+            log_callback=lambda m: None,
+            on_hit=lambda p: hits.append(p),
+            human_action_callback=lambda p: humans.append(p),
+        )
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
+        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
+        monitor._focus_and_highlight = lambda row, btn: None
+        # "human" 约定：_try_alternate_order 内部已发出人工接管信号，循环不应重复发信号或误报命中
+        monitor._try_alternate_order = lambda row, code, seat: "human"
+
+        with patch("gui_12306_0.time.sleep", lambda s: None):
+            result = monitor._run_single_loop(1, 1)
+
+        self.assertTrue(result)
+        self.assertEqual(hits, [])
+        self.assertEqual(humans, [])
+
+    def test_verification_present_reflects_driver_result_and_is_safe(self):
+        class Driver:
+            def __init__(self, value):
+                self.value = value
+
+            def execute_script(self, script, *args):
+                return self.value
+
+        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None)._verification_present())
+        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None)._verification_present())
+
+        class BadDriver:
+            def execute_script(self, script, *args):
+                raise RuntimeError("boom")
+
+        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None)._verification_present())
 
 
 class TicketMonitorDateRangeTests(unittest.TestCase):

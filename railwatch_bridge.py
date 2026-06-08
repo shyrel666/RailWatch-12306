@@ -226,6 +226,7 @@ class RailWatchBridge:
         self.behavior_simulator = None
         self.device_id_protector = None
         self.is_monitoring = False
+        self._pending_human_action: Optional[str] = None
         self._driver_lock = threading.RLock()
         self.worker_threads: List[threading.Thread] = []
         self.log_entries: List[Dict[str, str]] = []
@@ -531,6 +532,7 @@ class RailWatchBridge:
         return {"theme": selected}
 
     def _monitor_worker(self, config: dict) -> None:
+        self._pending_human_action = None
         try:
             if config.get("timer_enabled") and not self._wait_for_target_time(config):
                 return
@@ -546,14 +548,20 @@ class RailWatchBridge:
                     notify_callback=self._handle_notify,
                     progress_callback=self._handle_progress,
                     on_hit=self._handle_hit,
+                    human_action_callback=self._handle_human_action,
                 )
                 monitor.run()
         except Exception as exc:
             self.emit_state(self.state.with_error(f"监控失败: {exc}"))
         finally:
             self.is_monitoring = False
+            pending_human = self._pending_human_action
+            self._pending_human_action = None
             if self.state.phase.value != "error":
-                self.emit_state(self.state.with_monitoring(False, "监控已停止"))
+                if pending_human:
+                    self.emit_state(self.state.with_human_action(pending_human))
+                else:
+                    self.emit_state(self.state.with_monitoring(False, "监控已停止"))
 
     def _wait_for_target_time(self, config: dict) -> bool:
         target_str = str(config.get("target_time", ""))
@@ -717,6 +725,19 @@ class RailWatchBridge:
         message = str(payload.get("message", ""))
         self.emit("notify", {"title": title, "message": message, "hit": ticket_hit_to_payload(hit)})
         self.emit_state(self.state.with_hit(hit, title))
+
+    def _handle_human_action(self, payload: dict) -> None:
+        title = str(payload.get("title", "需要人工操作"))
+        message = str(payload.get("message", ""))
+        status = f"{title}：{message}" if message else title
+        self._pending_human_action = status
+        self.log(f"{title}: {message}", "WARN")
+        self.emit(
+            "humanAction",
+            {"title": title, "message": message, "train_code": str(payload.get("train_code", ""))},
+        )
+        # 非错误的警示状态，让界面在停止后仍显示「需要人工核验」，而不是普通的「监控已停止」
+        self.emit_state(self.state.with_human_action(status))
 
     def _automation_confirmation(self, config: dict) -> Optional[dict]:
         enabled = []

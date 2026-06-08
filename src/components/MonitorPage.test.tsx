@@ -16,6 +16,7 @@ function resetStore() {
     monitorLoops: 0,
     hits: [],
     notifications: [],
+    lastHumanAction: null,
     activePage: "购票监控",
     logPaused: false,
     eventPanelVisible: true,
@@ -56,6 +57,31 @@ describe("MonitorPage", () => {
     await user.click(screen.getByRole("button", { name: /停止/ }));
 
     expect(runCommand).toHaveBeenCalledWith("stopMonitor");
+  });
+
+  test("surfaces and dismisses a human-action handoff banner", async () => {
+    const user = userEvent.setup();
+
+    act(() => {
+      railwatchStore.setState({
+        lastHumanAction: {
+          title: "需要人工操作",
+          message: "候补需要人工核验，请在浏览器中完成。",
+          train_code: "G101",
+        },
+      });
+    });
+
+    const { container } = render(<MonitorPage busy={null} runCommand={(async () => undefined) as CommandRunner} />);
+
+    expect(screen.getByText("候补需要人工核验，请在浏览器中完成。")).toBeTruthy();
+
+    const closeButton = container.querySelector(".ant-alert-close-icon");
+    expect(closeButton).not.toBeNull();
+    await user.click(closeButton as HTMLElement);
+
+    expect(railwatchStore.getState().lastHumanAction).toBeNull();
+    expect(screen.queryByText("候补需要人工核验，请在浏览器中完成。")).toBeNull();
   });
 
   test("shows the backend loop count as the query count", () => {

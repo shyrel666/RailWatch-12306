@@ -178,6 +178,24 @@ describe("railwatchStore", () => {
     expect(store.getState().hits).toEqual([]);
   });
 
+  test("records the latest human-action handoff", () => {
+    const store = createRailWatchStore();
+
+    expect(store.getState().lastHumanAction).toBeNull();
+
+    store.getState().applyHumanAction({
+      title: "需要人工操作",
+      message: "候补需要人工核验，请在浏览器中完成。",
+      train_code: "G101",
+    });
+
+    expect(store.getState().lastHumanAction).toEqual({
+      title: "需要人工操作",
+      message: "候补需要人工核验，请在浏览器中完成。",
+      train_code: "G101",
+    });
+  });
+
   test("syncs ticket hits from runtime info state", () => {
     const store = createRailWatchStore();
     const backendHit = {

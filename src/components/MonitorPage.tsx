@@ -1,4 +1,4 @@
-import { Button, Switch } from "antd";
+import { Alert, Button, Switch } from "antd";
 import { useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -125,6 +125,8 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
   const hits = useRailWatchStore((state) => state.hits);
   const monitorLoops = useRailWatchStore((state) => state.monitorLoops);
   const setConfig = useRailWatchStore((state) => state.setConfig);
+  const lastHumanAction = useRailWatchStore((state) => state.lastHumanAction);
+  const clearHumanAction = useRailWatchStore((state) => state.clearHumanAction);
 
   const elapsed = useElapsedTime(status.monitoring);
   const countdown = useCountdown(config.interval, status.monitoring);
@@ -303,6 +305,17 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
         </aside>
       </div>
 
+      {lastHumanAction ? (
+        <Alert
+          className="st-human-action"
+          type="warning"
+          showIcon
+          closable
+          message={lastHumanAction.title}
+          description={lastHumanAction.message}
+          onClose={clearHumanAction}
+        />
+      ) : null}
     </div>
   );
 }

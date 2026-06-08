@@ -497,6 +497,25 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         state = [event for event in events if event["event"] == "state"][-1]
         self.assertEqual(state["payload"]["hits"][-1]["seat_type"], "二等座")
 
+    def test_handle_human_action_emits_human_action_event(self):
+        from railwatch_bridge import RailWatchBridge
+
+        events = []
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+
+        bridge._handle_human_action({"train_code": "G101", "title": "需要人工操作", "message": "请完成核验"})
+
+        human = [event for event in events if event["event"] == "humanAction"][0]
+        self.assertEqual(human["payload"]["title"], "需要人工操作")
+        self.assertIn("核验", human["payload"]["message"])
+        self.assertEqual(human["payload"]["train_code"], "G101")
+
+        # 同时发出非错误的警示状态，让界面在停止后仍显示需要人工核验
+        state = [event for event in events if event["event"] == "state"][-1]
+        self.assertNotEqual(state["payload"]["phase"], "error")
+        self.assertEqual(state["payload"]["risk_level"], "warning")
+        self.assertIn("核验", state["payload"]["status_message"])
+
     def test_download_chromedriver_targets_writable_data_dir(self):
         from railwatch_bridge import RailWatchBridge
 

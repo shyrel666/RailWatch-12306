@@ -12,6 +12,7 @@ import { useRailWatchStore } from "./store/useRailWatchStore";
 import type {
   BridgeEvent,
   ConfirmationRequest,
+  HumanActionPayload,
   LogEntry,
   MonitorTickPayload,
   QueryResultRow,
@@ -91,6 +92,18 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
         case "monitorTick":
           state.applyMonitorTick(event.payload as MonitorTickPayload);
           break;
+        case "humanAction": {
+          const human = event.payload as HumanActionPayload;
+          state.applyHumanAction(human);
+          notification.warning({
+            key: "railwatch-human-action",
+            message: human.title,
+            description: human.message,
+            placement: "topRight",
+            duration: 0,
+          });
+          break;
+        }
         case "notify":
           state.applyNotify(event.payload as { title: string; message: string; hit?: TicketHit });
           notification.success({

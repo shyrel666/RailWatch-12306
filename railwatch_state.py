@@ -146,6 +146,20 @@ class RailWatchState:
             error_message=message,
         )
 
+    def with_human_action(self, message: str = "") -> "RailWatchState":
+        """需要人工核验时的非错误警示状态：停止监控，保留命中阶段，不翻转为 error。"""
+        next_phase = AppPhase.QUERY_READY
+        if self.phase in (AppPhase.HIT, AppPhase.ALTERNATE):
+            next_phase = self.phase
+        return replace(
+            self,
+            phase=next_phase,
+            monitoring=False,
+            risk_level="warning",
+            status_message=message or "需要人工核验",
+            error_message="",
+        )
+
     def with_safety(self, auto_submit: bool, auto_alternate: bool) -> "RailWatchState":
         level = "warning" if auto_submit or auto_alternate else self.risk_level
         return replace(

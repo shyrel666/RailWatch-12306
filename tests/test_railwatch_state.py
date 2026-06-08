@@ -47,6 +47,28 @@ class RailWatchStateTests(unittest.TestCase):
         self.assertEqual(state.hits, (hit,))
         self.assertIn("G101", state.summary())
 
+    def test_human_action_is_non_error_warning_and_stops_monitoring(self):
+        state = (
+            RailWatchState.initial()
+            .with_query_ready(True)
+            .with_monitoring(True)
+            .with_human_action("需要人工操作：候补需要人工核验")
+        )
+
+        self.assertNotEqual(state.phase, AppPhase.ERROR)
+        self.assertFalse(state.monitoring)
+        self.assertEqual(state.risk_level, "warning")
+        self.assertEqual(state.error_message, "")
+        self.assertIn("核验", state.status_message)
+
+    def test_human_action_preserves_alternate_hit_phase(self):
+        hit = TicketHit(train_code="G101", seat_type="二等座", status="候补已提交", source="alternate")
+        state = RailWatchState.initial().with_monitoring(True).with_hit(hit).with_human_action("需要人工核验")
+
+        self.assertEqual(state.phase, AppPhase.ALTERNATE)
+        self.assertFalse(state.monitoring)
+        self.assertEqual(state.risk_level, "warning")
+
     def test_login_opened_is_not_login_ready(self):
         state = RailWatchState.initial().with_login_opened("登录页面已打开")
 

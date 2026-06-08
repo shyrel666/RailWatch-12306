@@ -64,7 +64,7 @@ export function SettingsPage({
         </div>
         <div className="sw-header-copy">
           <h2>系统设置</h2>
-          <p>运行环境状态与维护操作</p>
+          <p>运行环境状态与启动步骤</p>
         </div>
         <span className={`sw-phase-badge ${status.monitoring ? "active" : "idle"}`}>
           {status.monitoring ? "运行中" : "待命"}
@@ -127,7 +127,7 @@ export function SettingsPage({
         <div className="sw-section-head">
           <h3>
             <Zap size={15} />
-            维护操作
+            启动步骤
           </h3>
         </div>
         <div className="sw-action-grid">

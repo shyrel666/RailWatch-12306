@@ -100,11 +100,18 @@ export type NotifyPayload = {
   hit?: TicketHit;
 };
 
+export type HumanActionPayload = {
+  title: string;
+  message: string;
+  train_code?: string;
+};
+
 export type BridgeEvent =
   | { event: "log"; payload: LogEntry }
   | { event: "state"; payload: RailWatchStatus }
   | { event: "results"; payload: ResultsPayload }
   | { event: "notify"; payload: NotifyPayload }
+  | { event: "humanAction"; payload: HumanActionPayload }
   | { event: "monitorTick"; payload: MonitorTickPayload }
   | { event: "labels"; payload: { chromedriver_path?: string; chrome_version?: string } }
   | { event: string; payload: unknown };

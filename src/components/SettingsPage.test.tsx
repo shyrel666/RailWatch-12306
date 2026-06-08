@@ -29,7 +29,7 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("heading", { name: "系统设置" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "环境健康" })).toBeTruthy();
     expect(screen.getByText("C:/RailWatch/data")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "维护操作" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "启动步骤" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "高风险操作" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /清除数据/ })).toBeTruthy();
 

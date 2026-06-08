@@ -1,5 +1,6 @@
 import { createStore } from "zustand/vanilla";
 import type {
+  HumanActionPayload,
   LogEntry,
   MonitorTickPayload,
   NotifyPayload,
@@ -84,6 +85,7 @@ export type RailWatchStore = {
   monitorLoops: number;
   hits: TicketHit[];
   notifications: NotifyPayload[];
+  lastHumanAction: HumanActionPayload | null;
   activePage: RailWatchPage;
   logPaused: boolean;
   eventPanelVisible: boolean;
@@ -94,6 +96,8 @@ export type RailWatchStore = {
   applyResults: (payload: ResultsPayload) => void;
   applyMonitorTick: (payload: MonitorTickPayload) => void;
   applyNotify: (payload: NotifyPayload) => void;
+  applyHumanAction: (payload: HumanActionPayload) => void;
+  clearHumanAction: () => void;
   setConfig: (patch: Partial<RailWatchConfig>) => void;
   setActivePage: (page: RailWatchPage) => void;
   setLogPaused: (paused: boolean) => void;
@@ -121,6 +125,7 @@ export function createRailWatchStore() {
     monitorLoops: 0,
     hits: [],
     notifications: [],
+    lastHumanAction: null,
     activePage: "仪表盘",
     logPaused: false,
     eventPanelVisible: true,
@@ -159,6 +164,12 @@ export function createRailWatchStore() {
         notifications: [...get().notifications, payload],
         hits: nextHits,
       });
+    },
+    applyHumanAction: (payload) => {
+      set({ lastHumanAction: payload });
+    },
+    clearHumanAction: () => {
+      set({ lastHumanAction: null });
     },
     setConfig: (patch) => {
       set({ config: { ...get().config, ...patch } });

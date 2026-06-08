@@ -778,32 +778,35 @@ class TicketMonitor(BaseHandler):
 
             if action_type == "alternate":
                 result = self._try_alternate_order(row_el, train_code, seat_name)
-                if result == "failed":
-                    self.log("⚠️ 候补提交未完成，将继续监控。")
+                if result == "success":
+                    title = "🎉 候补已提交"
+                    message = (
+                        f"命中：{train_code}\n{seat_name}：候补已提交\n\n"
+                        f"请切回浏览器确认候补订单状态（如需支付定金请尽快完成）。"
+                    )
+                    if self.on_hit:
+                        self.on_hit(
+                            {
+                                "train_code": train_code,
+                                "seat_type": seat_name,
+                                "status": "候补已提交",
+                                "source": "alternate",
+                                "title": title,
+                                "message": message,
+                            }
+                        )
+                    self.notify(title, message)
+                    self.log("⏸ 候补已提交，暂停自动刷新。如需继续监控，请点击【停止】再重新开始。")
+                    return True
+                if result == "retry":
+                    # 尚未进入候补流程（候补按钮暂不可点）：继续监控，不打扰用户
+                    self.log("↻ 候补暂不可用，继续监控...")
                     time.sleep(interval)
                     return False
-                if result == "human":
-                    self.log("⏸ 候补需要人工核验，已暂停，请在浏览器中完成。")
-                    return True
-                # success
-                title = "🎉 候补已提交"
-                message = (
-                    f"命中：{train_code}\n{seat_name}：候补已提交\n\n"
-                    f"请切回浏览器确认候补订单状态（如需支付定金请尽快完成）。"
-                )
-                if self.on_hit:
-                    self.on_hit(
-                        {
-                            "train_code": train_code,
-                            "seat_type": seat_name,
-                            "status": "候补已提交",
-                            "source": "alternate",
-                            "title": title,
-                            "message": message,
-                        }
-                    )
-                self.notify(title, message)
-                self.log("⏸ 候补已提交，暂停自动刷新。如需继续监控，请点击【停止】再重新开始。")
+                # 已进入候补流程：失败或需要人工核验都停止刷新，避免停留在候补页空转。
+                if result == "failed":
+                    self._signal_human_action(train_code, "候补未能自动完成，请在浏览器中手动检查并提交。")
+                self.log("⏸ 候补流程已暂停，请在浏览器中处理后再决定是否重新监控。")
                 return True
 
             # 有票路径
@@ -859,8 +862,9 @@ class TicketMonitor(BaseHandler):
 
     def _find_hit_row(self, seat_col_indices: Dict[str, int]) -> Optional[Tuple[str, str, str, Any, Any, str]]:
         """
-        查找命中的车次行
-        返回：(车次号, 席别名, 席别值, 行元素, 预订按钮) 或 None
+        查找命中的车次行。
+        返回 6 元组：(车次号, 席别名, 席别值, 行元素, 操作按钮, 动作类型) 或 None。
+        动作类型为 "book"（有票预订）或 "alternate"（候补）。
         """
         try:
             table = self.driver.find_element(By.ID, "queryLeftTable")
@@ -966,8 +970,8 @@ class TicketMonitor(BaseHandler):
                 continue
         return None
 
-    def _focus_and_highlight(self, row_el, book_btn):
-        """定位并高亮元素"""
+    def _focus_and_highlight(self, row_el, action_btn):
+        """定位并高亮命中行与操作按钮（预订/候补）"""
         try:
             # 滚动到视图
             self.driver.execute_script(
@@ -982,16 +986,16 @@ class TicketMonitor(BaseHandler):
                 row_el
             )
 
-            # 预订按钮高亮
-            if book_btn is not None:
+            # 操作按钮高亮（预订 / 候补）
+            if action_btn is not None:
                 self.driver.execute_script(
                     "arguments[0].style.outline='4px solid #52c41a';"
                     "arguments[0].style.boxShadow='0 0 12px rgba(82,196,26,.8)';",
-                    book_btn
+                    action_btn
                 )
                 # 移动鼠标到按钮
                 try:
-                    ActionChains(self.driver).move_to_element(book_btn).perform()
+                    ActionChains(self.driver).move_to_element(action_btn).perform()
                 except Exception:
                     pass
 
@@ -1604,16 +1608,70 @@ class TicketMonitor(BaseHandler):
         """检测页面是否出现需要人工处理的核验（滑块/验证码/人脸核验/跳登录）。"""
         js = r"""
         try {
-            var slider = document.querySelector(
-                '#nc_1_n1z, .nc-container, .nc_scale, .slide-verify, .verify-bar, [id*="slide"], [class*="slider"]'
-            );
-            if (slider && slider.offsetParent !== null) return true;
-            var captcha = document.querySelector('#J-loginImg, .login-pwd-code, .captcha, #randCode, img[src*="captcha"]');
-            if (captcha && captcha.offsetParent !== null) return true;
+            function visible(el) { return !!(el && el.offsetParent !== null); }
+            // 1) 真实交互式核验组件（阿里 nc 滑块 / 图形验证码），必须可见
+            if (visible(document.querySelector('#nc_1_n1z, .nc_scale, .nc-container, .slide-verify, .geetest_slider_button'))) return true;
+            if (visible(document.querySelector('#J-loginImg, #randCode, img[src*="captcha"]'))) return true;
+            // 2) 可见对话框中出现人脸核验/滑动验证（避免命中页面说明性文案）
+            var dialogs = document.querySelectorAll('.dhtmlx_window_active, .modal, .layui-layer, [class*="dialog"]');
+            for (var i = 0; i < dialogs.length; i++) {
+                var d = dialogs[i];
+                if (!visible(d)) continue;
+                var dt = d.innerText || '';
+                if (dt.indexOf('人脸') !== -1 && dt.indexOf('核验') !== -1) return true;
+                if ((dt.indexOf('滑') !== -1 || dt.indexOf('拖动') !== -1) && dt.indexOf('验证') !== -1) return true;
+            }
+            // 3) 明确的“正在要求操作”短语（不命中被动说明文案）
             var t = (document.body && document.body.innerText) ? document.body.innerText : '';
-            if (t.indexOf('人脸') !== -1 || t.indexOf('核验') !== -1 || t.indexOf('请完成') !== -1
-                || t.indexOf('请拖动') !== -1 || t.indexOf('请滑动') !== -1 || t.indexOf('身份核验') !== -1) return true;
-            if (location.href.indexOf('login') !== -1) return true;
+            if (t.indexOf('请完成安全验证') !== -1 || t.indexOf('拖动下方滑块') !== -1
+                || t.indexOf('向右滑动') !== -1 || t.indexOf('请按住滑块') !== -1) return true;
+            // 4) 会话失效跳转登录页（精确匹配登录页 URL）
+            var href = location.href || '';
+            if (href.indexOf('login.html') !== -1 || href.indexOf('/otn/login/init') !== -1) return true;
+            return false;
+        } catch (e) { return false; }
+        """
+        try:
+            return bool(self.driver.execute_script(js))
+        except Exception:
+            return False
+
+    def _alternate_success_present(self) -> bool:
+        """检测候补是否确实提交成功。
+
+        只信任「强信号」，避免误命中页面/确认弹层里的说明性文字（如「提交成功后…」），
+        否则会重演“误报成功后停止监控、令用户错过车票”的问题：
+        - 明确的成功标记元素；
+        - 跳转到候补/订单查询页（URL 变化）；
+        - 成功提示弹层/Toast 内的明确成功文案，且该弹层不再带有「确认候补/提交候补」按钮文案
+          （带这些动作文案的是确认弹层，其说明文字可能包含「提交成功」，必须排除）。
+        """
+        js = r"""
+        try {
+            function visible(el) { return !!(el && el.offsetParent !== null); }
+            // 1) 明确的成功标记元素
+            if (visible(document.querySelector(
+                '#houbu_success_id, .candidate-success, .houbu-success, .order-success, .success-tip'
+            ))) return true;
+            // 2) 跳转到候补/订单查询页（强信号）
+            var href = location.href || '';
+            if (href.indexOf('candidateQueue') !== -1 || href.indexOf('queryMyOrderNoComplete') !== -1
+                || href.indexOf('candidate_view') !== -1) return true;
+            // 3) 成功提示弹层/Toast：仅在窄范围弹层内匹配，且排除仍带提交/确认动作的确认弹层
+            var boxes = document.querySelectorAll(
+                '.dhtmlx_window_active, .layui-layer, .modal, [role="dialog"], .ant-message-notice, .toast'
+            );
+            for (var i = 0; i < boxes.length; i++) {
+                var b = boxes[i];
+                if (!visible(b)) continue;
+                var t = b.innerText || '';
+                // 确认弹层（含「确认候补/提交候补」按钮文案）的说明文字可能含「提交成功」，跳过
+                if (t.indexOf('确认候补') !== -1 || t.indexOf('提交候补') !== -1) continue;
+                if (t.indexOf('候补订单提交成功') !== -1) return true;
+                if (t.indexOf('已加入候补') !== -1) return true;
+                if (t.indexOf('候补成功') !== -1) return true;
+                if (t.indexOf('提交成功') !== -1) return true;
+            }
             return false;
         } catch (e) { return false; }
         """
@@ -1662,36 +1720,21 @@ class TicketMonitor(BaseHandler):
 
     def _try_alternate_order(self, row, train_code: str, seat_name: str) -> str:
         """
-        尝试提交候补订单。返回三态：
-        - "success"：候补已提交（含自动确认「确认候补」对话框）
-        - "human"  ：出现人脸核验/验证码/滑块，已交人工接管
-        - "failed" ：未找到元素/暂时失败，调用方应继续监控
+        尝试提交候补订单。返回四态：
+        - "success"：候补确实已提交（检测到成功标记/订单页跳转）
+        - "human"  ：出现人脸核验/验证码/滑块，或已提交但无法确认结果，已交人工接管
+        - "failed" ：已进入候补流程后中途失败（页面已离开查询页），调用方应停止并交人工
+        - "retry"  ：尚未进入候补流程（候补按钮暂不可点），调用方可安全地继续监控
         """
         try:
             self.log(f"🔄 尝试为 {train_code} {seat_name} 提交候补订单...")
 
-            # 查找候补按钮
-            alternate_btn = None
-            alternate_selectors = [
-                "a.btn-houbu",          # 候补按钮类
-                "a[onclick*='houbu']",   # onclick包含houbu
-                ".//a[contains(text(),'候补')]",  # 文本包含候补
-                "a.btn72.btn-houbu",     # 组合选择器
-            ]
-            for selector in alternate_selectors:
-                try:
-                    if selector.startswith(".//"):
-                        alternate_btn = row.find_element(By.XPATH, selector)
-                    else:
-                        alternate_btn = row.find_element(By.CSS_SELECTOR, selector)
-                    if alternate_btn and alternate_btn.is_displayed():
-                        break
-                except NoSuchElementException:
-                    continue
-
+            # 查找候补按钮（复用 _find_hit_row 的同一套选择器，避免逻辑分叉）
+            alternate_btn = self._find_alternate_button(row)
             if not alternate_btn:
-                self.log("⚠️ 未找到候补按钮，该车次可能不支持候补")
-                return "failed"
+                # 还没点击任何东西，页面仍停留在查询页：可安全地继续下一轮监控
+                self.log("↻ 候补按钮暂不可点，继续监控")
+                return "retry"
 
             # 点击候补按钮
             try:
@@ -1722,7 +1765,10 @@ class TicketMonitor(BaseHandler):
 
             # 选择乘车人
             target_passengers = [p.strip() for p in self.cfg.get("passengers", "").split(",") if p.strip()]
-            target_count = self.cfg.get("passenger_count", 1)
+            try:
+                target_count = max(1, int(self.cfg.get("passenger_count", 1) or 1))
+            except (TypeError, ValueError):
+                target_count = 1
 
             js_select_candidates = """
             const targetNames = arguments[0];
@@ -1853,8 +1899,16 @@ class TicketMonitor(BaseHandler):
                 self._signal_human_action(train_code, "候补确认需要人工核验，请在浏览器中完成。")
                 return "human"
 
-            self.log("✅ 候补订单已提交")
-            return "success"
+            # 仅当检测到明确的成功标记才算成功，避免误报后停止监控、令用户错过车票
+            if self._alternate_success_present():
+                self.log("✅ 候补订单已提交")
+                return "success"
+
+            self._signal_human_action(
+                train_code,
+                "候补已尝试提交，但未能自动确认结果，请在浏览器中核对候补订单状态。",
+            )
+            return "human"
 
         except Exception as e:
             self.log(f"⚠️ 候补订单处理异常: {e}")
