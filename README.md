@@ -88,8 +88,6 @@ python -m py_compile railwatch_state.py gui_12306_0.py anti_detect.py chromedriv
 
 发布 GitHub Release 时上传同一次构建生成的 `release/*.exe`、`release/*.blockmap` 和 `release/latest.yml`。
 
-发布前请按 [docs/release-qa.md](docs/release-qa.md) 做手工 QA。
-
 ## Architecture
 
 ```text

@@ -18,6 +18,8 @@ describe("local Windows packaging script", () => {
     expect(script).toContain("npm ci");
     expect(script).toContain("python -m pip install -r requirements.txt pyinstaller");
     expect(script).toContain("npm run package");
+    expect(script).toContain("Validating updater metadata assets");
+    expect(script).toContain("release/latest.yml references missing asset");
     expect(script).toContain("release\\latest.yml");
     expect(script).toContain("release\\*.exe");
   });

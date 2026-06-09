@@ -68,6 +68,10 @@ echo [4/5] Building Windows installer
 call npm run package || goto failed
 
 echo.
+echo Validating updater metadata assets
+node -e "const fs=require('fs'), path=require('path'); const latest=fs.readFileSync('release/latest.yml','utf8'); const names=[...latest.matchAll(/^\s*(?:path|url):\s*['\"]?(.+?)['\"]?\s*$/gm)].map(m=>m[1]); for (const name of new Set(names)) { if (!fs.existsSync(path.join('release', name))) { console.error('release/latest.yml references missing asset: '+name); process.exit(1); } }" || goto failed
+
+echo.
 echo [5/5] Packaging complete
 echo Installer:
 dir /b "release\*.exe" 2>nul

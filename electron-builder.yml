@@ -21,7 +21,7 @@ win:
   icon: assets/images/icon.ico
   target:
     - nsis
-  artifactName: "${productName}-${version}-${arch}.${ext}"
+  artifactName: "RailWatch-12306-${version}-${arch}.${ext}"
 nsis:
   oneClick: false
   perMachine: false
