@@ -101,14 +101,41 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
             description: human.message,
             placement: "topRight",
             duration: 0,
+            onClose: () => railwatchApi.stopUrgentAlert(),
           });
           break;
         }
-        case "notify":
-          state.applyNotify(event.payload as { title: string; message: string; hit?: TicketHit });
-          notification.success({
-            message: (event.payload as { title: string }).title,
-            description: (event.payload as { message: string }).message,
+        case "notify": {
+          const notifyPayload = event.payload as { title: string; message: string; hit?: TicketHit; priority?: string };
+          state.applyNotify(notifyPayload);
+          const notifyApi =
+            notifyPayload.priority === "urgent" ? notification.warning : notification.success;
+          notifyApi({
+            key: "railwatch-notify",
+            message: notifyPayload.title,
+            description: notifyPayload.message,
+            placement: "topRight",
+            duration: notifyPayload.priority === "urgent" ? 0 : 4.5,
+            onClose:
+              notifyPayload.priority === "urgent"
+                ? () => railwatchApi.stopUrgentAlert()
+                : undefined,
+          });
+          break;
+        }
+        case "runtimeError":
+        case "runtimeExit":
+          notification.error({
+            message: "Python 运行时异常",
+            description: (event.payload as { message?: string }).message || "请稍后重试。",
+            placement: "topRight",
+            duration: 0,
+          });
+          break;
+        case "runtimeRestarted":
+          notification.info({
+            message: "Python 运行时已恢复",
+            description: (event.payload as { message?: string }).message || "",
             placement: "topRight",
           });
           break;
@@ -145,7 +172,10 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
     async <T,>(command: string, payload: Record<string, unknown> = {}, successText?: string): Promise<T | undefined> => {
       setBusy(command);
       try {
-        const result = await railwatchApi.command<T | ConfirmationRequest>(command, payload);
+        const result = await railwatchApi.command<T | ConfirmationRequest | { cancelled?: boolean }>(command, payload);
+        if (result && typeof result === "object" && "cancelled" in result && result.cancelled) {
+          return undefined;
+        }
         if (isConfirmation(result)) {
           const accepted = await confirm(result.title, result.message);
           if (!accepted) {

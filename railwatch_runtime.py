@@ -38,7 +38,19 @@ class RailWatchRuntime:
         self.writer(payload)
 
     def handle_line(self, line: str) -> "Future":
-        request = json.loads(line)
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            self.emit_event(
+                {
+                    "event": "runtimeError",
+                    "payload": {
+                        "message": f"无效 JSON 输入：{exc}",
+                        "class": exc.__class__.__name__,
+                    },
+                }
+            )
+            return self._executor.submit(lambda: None)
         request_id = request.get("id")
         command = request.get("command")
         payload = request.get("payload") or {}
@@ -78,7 +90,11 @@ class RailWatchRuntime:
             "exportLog": lambda: self.bridge.export_log(payload.get("path")),
             "clearLog": lambda: self.bridge.clear_log(),
             "loadPreferences": lambda: self.bridge.load_preferences(),
-            "savePreferences": lambda: self.bridge.save_preferences(str(payload.get("theme", "light"))),
+            "savePreferences": lambda: self.bridge.save_preferences(
+                str(payload.get("theme", "light")),
+                payload.get("notification_settings"),
+            ),
+            "syncServerTime": lambda: self.bridge.sync_server_time(),
         }
         if command not in handlers:
             raise ValueError(f"未知命令: {command}")

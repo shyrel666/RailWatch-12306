@@ -32,8 +32,8 @@ describe("JsonLineDecoder", () => {
 describe("PendingRequests", () => {
   test("resolves only the matching response id", async () => {
     const pending = new PendingRequests();
-    const first = pending.create("1");
-    const second = pending.create("2");
+    const first = pending.create("1", 5000);
+    const second = pending.create("2", 5000);
 
     pending.resolve({ type: "response", id: "2", ok: true, result: { value: 2 } });
     pending.resolve({ type: "response", id: "1", ok: true, result: { value: 1 } });
@@ -44,7 +44,7 @@ describe("PendingRequests", () => {
 
   test("rejects error responses with the runtime message", async () => {
     const pending = new PendingRequests();
-    const promise = pending.create("1");
+    const promise = pending.create("1", 5000);
 
     pending.resolve({
       type: "response",

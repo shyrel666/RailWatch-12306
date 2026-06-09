@@ -11,6 +11,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Tuple
 
+from railwatch_config_contract import redact_proxy_url
+
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _PROXY_ENV_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
 _PROBE_TIMEOUT = 2.5
@@ -103,5 +105,5 @@ def probe_connectivity() -> Dict[str, object]:
         "railway_label": "正常" if railway_ok else "异常",
         "proxy_configured": proxy_configured,
         "proxy_label": "已配置" if proxy_configured else "未配置",
-        "proxy_value": proxy_value,
+        "proxy_value": redact_proxy_url(proxy_value),
     }

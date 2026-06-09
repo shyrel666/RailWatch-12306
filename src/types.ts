@@ -22,6 +22,26 @@ export type RailWatchConfig = {
   smart_rate: boolean;
   timer_enabled: boolean;
   target_time: string;
+  burst_window_seconds?: number;
+  prewarm_lead_seconds?: number;
+  config_version?: number;
+  automation_route?: string;
+  query_jobs?: RailWatchConfig[];
+};
+
+export type NotificationSettings = {
+  desktop_urgent: boolean;
+  sound_loop: boolean;
+  server_chan_enabled: boolean;
+  server_chan_key: string;
+  email_enabled: boolean;
+  email_smtp_host: string;
+  email_smtp_port: number;
+  email_user: string;
+  email_password: string;
+  email_to: string;
+  wecom_webhook_enabled: boolean;
+  wecom_webhook_url: string;
 };
 
 export type TicketHit = {
@@ -70,6 +90,10 @@ export type RuntimeInfo = {
   proxy_configured: boolean;
   proxy_label: string;
   proxy_value: string;
+  automation_route?: string;
+  server_time_offset_seconds?: number;
+  server_time_last_error?: string;
+  notification_settings?: NotificationSettings;
   state: RailWatchStatus;
 };
 
@@ -98,12 +122,14 @@ export type NotifyPayload = {
   title: string;
   message: string;
   hit?: TicketHit;
+  priority?: "urgent" | "normal" | string;
 };
 
 export type HumanActionPayload = {
   title: string;
   message: string;
   train_code?: string;
+  priority?: "urgent" | "normal" | string;
 };
 
 export type BridgeEvent =

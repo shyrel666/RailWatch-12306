@@ -25,6 +25,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from railwatch_dates import expand_travel_dates
+from railwatch_row_parser import RowParser, TRAIN_CODE_PATTERN
+from railwatch_selectors import (
+    ALTERNATE_BUTTON_SELECTORS,
+    BOOK_BUTTON_SELECTORS,
+    QUERY_BUTTON_ID,
+    QUERY_ROW_SELECTOR,
+    QUERY_TABLE_ID,
+)
+from railwatch_submit_flow import SubmitFlow
+from railwatch_alternate_flow import AlternateFlow
+from railwatch_time import ServerTimeSync, get_server_time_sync
+from railwatch_verification import VerificationDetector
 
 
 def _safe_print(title: str, msg: str) -> None:
@@ -68,10 +80,6 @@ except ImportError:
 STATION_JS_URL = "https://kyfw.12306.cn/otn/resources/js/framework/station_name.js"
 CACHE_FILE = "station_codes_cache.json"
 USER_CONFIG_FILE = "user_config.json"
-
-# 车次正则模式（统一定义，避免重复）
-TRAIN_CODE_PATTERN = re.compile(r"\b([GDKTZCS]\d{1,4})\b")
-
 
 def _read_float(value: object, fallback: float) -> float:
     try:
@@ -150,6 +158,8 @@ class QueryConfig:
     smart_rate: bool = True
     timer_enabled: bool = False
     target_time: str = "00:00:00"
+    burst_window_seconds: float = 45.0
+    prewarm_lead_seconds: float = 120.0
     
     # 新增：多目标支持
     targets: List[MonitorTarget] = field(default_factory=list)
@@ -176,6 +186,8 @@ class QueryConfig:
             "smart_rate": self.smart_rate,
             "timer_enabled": self.timer_enabled,
             "target_time": self.target_time,
+            "burst_window_seconds": self.burst_window_seconds,
+            "prewarm_lead_seconds": self.prewarm_lead_seconds,
         }
     
     @classmethod
@@ -201,6 +213,8 @@ class QueryConfig:
             smart_rate=data.get("smart_rate", True),
             timer_enabled=data.get("timer_enabled", False),
             target_time=data.get("target_time", "00:00:00"),
+            burst_window_seconds=_read_float(data.get("burst_window_seconds", 45), 45.0),
+            prewarm_lead_seconds=_read_float(data.get("prewarm_lead_seconds", 120), 120.0),
         )
 
 
@@ -326,9 +340,11 @@ class BaseHandler:
 
     def _parse_rows(self) -> List[dict]:
         """解析当前查询结果表格行 -> [{"train","raw"}]"""
+        if hasattr(self, "row_parser") and self.row_parser is not None:
+            return self.row_parser.parse_rows()
         try:
-            table = self.driver.find_element(By.ID, "queryLeftTable")
-            rows = table.find_elements(By.CSS_SELECTOR, "tr[id^='ticket_']")
+            table = self.driver.find_element(By.ID, QUERY_TABLE_ID)
+            rows = table.find_elements(By.CSS_SELECTOR, QUERY_ROW_SELECTOR)
             results = []
             for row in rows:
                 text = row.text.strip()
@@ -571,6 +587,7 @@ class TicketMonitor(BaseHandler):
         progress_callback: Optional[Callable[[dict], None]] = None,
         on_hit: Optional[Callable[[dict], None]] = None,
         human_action_callback: Optional[Callable[[dict], None]] = None,
+        server_time_sync: Optional[ServerTimeSync] = None,
     ):
         super().__init__(driver, log_callback)
         self.cfg = cfg
@@ -579,6 +596,7 @@ class TicketMonitor(BaseHandler):
         self.progress = progress_callback
         self.on_hit = on_hit
         self.human_action = human_action_callback
+        self.server_time_sync = server_time_sync or get_server_time_sync(log_callback=self.log)
         
         # 解析目标车次和席别
         self.target_trains = self._parse_train_targets()
@@ -596,6 +614,23 @@ class TicketMonitor(BaseHandler):
         travel_date = str(cfg.get("date", "")).strip()
         self.travel_dates = expand_travel_dates(travel_date, str(cfg.get("date_range", "单日"))) if travel_date else []
         self.current_loop_date = ""
+        self.row_parser = RowParser(self.driver, SeatType.get_prefix)
+        self.verification = VerificationDetector(self.driver, log_callback=self.log)
+        self.submit_flow = SubmitFlow(
+            self.driver,
+            cfg,
+            log_callback=self.log,
+            popup_handler=self._handle_popups,
+            seat_preference_handler=self._select_seat_preference,
+        )
+        self.alternate_flow = AlternateFlow(
+            self.driver,
+            cfg,
+            self.verification,
+            log_callback=self.log,
+            human_action_callback=self.human_action,
+            find_alternate_button=self._find_alternate_button,
+        )
     
     def _parse_train_targets(self) -> List[str]:
         """解析目标车次列表"""
@@ -678,12 +713,23 @@ class TicketMonitor(BaseHandler):
 
         self.log("⏹ 监控结束/停止")
     
+    def _is_burst_mode(self, loop_count: int) -> bool:
+        if self.cfg.get("timer_enabled"):
+            prepare_seconds = _read_float(self.cfg.get("prepare_time", 2), 2.0)
+            burst_seconds = _read_float(self.cfg.get("burst_window_seconds", 45), 45.0)
+            if self.server_time_sync.is_in_burst_window(
+                str(self.cfg.get("target_time", "00:00:00")),
+                prepare_seconds,
+                burst_seconds,
+            ):
+                return True
+            return False
+        return loop_count <= 5
+
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:
         """单次监控循环，返回是否命中（风控优化版）"""
-        # --- 极速优化：前 5 轮定义为“爆发冲刺期”，跳过所有伪装延迟 ---
-        # 这样可以覆盖用户设置的“提前量”时间段，确保在开抢瞬间是最高速的
-        is_burst_mode = (loop_count <= 5)
-        
+        is_burst_mode = self._is_burst_mode(loop_count)
+
         if not is_burst_mode:
             # 1) 刷新前的随机延迟（模拟人类行为，仅在稳定监控期开启）
             human_delay(0.2, 0.8)
@@ -702,7 +748,7 @@ class TicketMonitor(BaseHandler):
         
         if should_refresh:
             if is_burst_mode:
-                self.log(f"🚀 爆发模式 (第 {loop_count} 轮)：正在进行极速查询...")
+                self.log(f"🚀 服务器时间冲刺 (第 {loop_count} 轮)：正在进行极速查询...")
             else:
                 self.log(f"🔄 第 {loop_count} 次：深度刷新页面... (间隔: {interval:.1f}s)")
             self.driver.refresh()
@@ -777,7 +823,7 @@ class TicketMonitor(BaseHandler):
             self._focus_and_highlight(row_el, action_btn)
 
             if action_type == "alternate":
-                result = self._try_alternate_order(row_el, train_code, seat_name)
+                result = self.alternate_flow.try_alternate_order(row_el, train_code, seat_name)
                 if result == "success":
                     title = "🎉 候补已提交"
                     message = (
@@ -795,7 +841,8 @@ class TicketMonitor(BaseHandler):
                                 "message": message,
                             }
                         )
-                    self.notify(title, message)
+                    else:
+                        self.notify(title, message)
                     self.log("⏸ 候补已提交，暂停自动刷新。如需继续监控，请点击【停止】再重新开始。")
                     return True
                 if result == "retry":
@@ -811,7 +858,7 @@ class TicketMonitor(BaseHandler):
 
             # 有票路径
             if self.auto_submit and action_btn:
-                self._try_auto_submit(action_btn, seat_name)
+                self.submit_flow.try_auto_submit(action_btn, seat_name)
             title = "🎉 发现目标车次/席别可用"
             message = (
                 f"命中：{train_code}\n{seat_name}：{seat_value}\n\n"
@@ -829,7 +876,8 @@ class TicketMonitor(BaseHandler):
                         "message": message,
                     }
                 )
-            self.notify(title, message)
+            else:
+                self.notify(title, message)
             self.log("⏸ 已命中，暂停自动刷新。如需继续监控，请点击【停止】再重新【开始监控余票】。")
             return True
 
@@ -839,26 +887,7 @@ class TicketMonitor(BaseHandler):
 
     def _get_seat_col_index(self, seat_keyword: str) -> Optional[int]:
         """获取席别在表头的列索引"""
-        selectors = [
-            "#queryLeftTable thead th",
-            "table thead th",
-            ".t-list thead th",
-            "thead th",
-        ]
-        
-        for selector in selectors:
-            try:
-                headers = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                if headers:
-                    for i, th in enumerate(headers):
-                        header_text = th.text.strip().replace("\n", "")
-                        if header_text == seat_keyword or seat_keyword in header_text:
-                            return i
-                    break
-            except (NoSuchElementException, StaleElementReferenceException):
-                continue
-        
-        return None
+        return self.row_parser.get_seat_col_index(seat_keyword)
 
     def _find_hit_row(self, seat_col_indices: Dict[str, int]) -> Optional[Tuple[str, str, str, Any, Any, str]]:
         """
@@ -912,63 +941,15 @@ class TicketMonitor(BaseHandler):
     
     def _get_seat_value(self, row, seat_keyword: str, col_index: Optional[int]) -> Optional[str]:
         """获取席别值"""
-        # 优先使用 td id 前缀
-        value = self.get_seat_value_by_prefix(row, seat_keyword)
-        if value is not None:
-            return value
-        
-        # 兜底：使用列索引
-        if col_index is not None:
-            try:
-                cells = row.find_elements(By.CSS_SELECTOR, "td")
-                if col_index < len(cells):
-                    return cells[col_index].text.strip().replace("\n", "")
-            except (NoSuchElementException, StaleElementReferenceException):
-                pass
-        
-        return None
+        return self.row_parser.get_seat_value(row, seat_keyword, col_index)
 
     def _find_book_button(self, row) -> Optional[Any]:
         """查找预订按钮（动态定位，不硬编码）"""
-        # 尝试多种选择器
-        selectors = [
-            "a.btn72",
-            "a[onclick*='getSelected']",
-            ".//a[contains(text(),'预订')]",
-        ]
-        
-        for selector in selectors:
-            try:
-                if selector.startswith(".//"):
-                    btn = row.find_element(By.XPATH, selector)
-                else:
-                    btn = row.find_element(By.CSS_SELECTOR, selector)
-                if btn and btn.is_displayed():
-                    return btn
-            except NoSuchElementException:
-                continue
-        
-        return None
+        return self.row_parser.find_button(row, BOOK_BUTTON_SELECTORS)
 
     def _find_alternate_button(self, row) -> Optional[Any]:
         """查找候补按钮"""
-        selectors = [
-            "a.btn-houbu",
-            "a[onclick*='houbu']",
-            ".//a[contains(text(),'候补')]",
-            "a.btn72.btn-houbu",
-        ]
-        for selector in selectors:
-            try:
-                if selector.startswith(".//"):
-                    btn = row.find_element(By.XPATH, selector)
-                else:
-                    btn = row.find_element(By.CSS_SELECTOR, selector)
-                if btn and btn.is_displayed():
-                    return btn
-            except NoSuchElementException:
-                continue
-        return None
+        return self.row_parser.find_button(row, ALTERNATE_BUTTON_SELECTORS)
 
     def _focus_and_highlight(self, row_el, action_btn):
         """定位并高亮命中行与操作按钮（预订/候补）"""
@@ -1126,375 +1107,6 @@ class TicketMonitor(BaseHandler):
         
         return popup_handled
 
-    @staticmethod
-    def _parse_passenger_selection_result(result, target_passengers: List[str]) -> Tuple[int, List[str]]:
-        """解析 JS 乘车人选择结果，兼容旧版只返回数字的结果"""
-        if isinstance(result, dict):
-            selected_count = int(result.get("selectedCount") or 0)
-            missing_names = [str(name) for name in result.get("missingNames") or []]
-            return selected_count, missing_names
-        try:
-            selected_count = int(result or 0)
-        except (TypeError, ValueError):
-            selected_count = 0
-        if target_passengers:
-            return selected_count, list(target_passengers)
-        return selected_count, []
-    
-    @staticmethod
-    def _passenger_selection_sufficient(
-        selected_count: int,
-        missing_names: List[str],
-        target_passengers: List[str],
-        target_count: int,
-    ) -> bool:
-        """确认乘车人选择结果足够安全，可以继续提交"""
-        if missing_names:
-            return False
-        required_count = len(target_passengers) if target_passengers else max(1, int(target_count or 1))
-        return selected_count >= required_count
-    
-    def _find_checkbox_for_label(self, label):
-        """从乘车人 label 中找到对应 checkbox"""
-        try:
-            return label.find_element(By.CSS_SELECTOR, 'input[type="checkbox"]')
-        except Exception:
-            pass
-        try:
-            for_id = label.get_attribute("for")
-            if for_id:
-                return self.driver.find_element(By.ID, for_id)
-        except Exception:
-            pass
-        return None
-    
-    def _select_passengers_with_selenium(self, target_passengers: List[str], target_count: int) -> Tuple[int, List[str]]:
-        """使用 Selenium 备用方案勾选乘车人；指定姓名时禁止退化为前 N 个"""
-        if target_passengers:
-            label_selectors = [
-                '#normal_passenger_id label',
-                '.passenger-list label',
-                'label[for^="normalPassenger"]',
-                '.normal_passenger label',
-            ]
-            labels = []
-            for selector in label_selectors:
-                labels = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                if labels:
-                    break
-            
-            selected_names = []
-            for target_name in target_passengers:
-                matched_label = None
-                for label in labels:
-                    label_text = (getattr(label, "text", "") or "").strip()
-                    if label_text == target_name or target_name in label_text:
-                        matched_label = label
-                        break
-                if not matched_label:
-                    continue
-                checkbox = self._find_checkbox_for_label(matched_label)
-                if not checkbox:
-                    continue
-                if not checkbox.is_selected():
-                    checkbox.click()
-                    time.sleep(0.2)
-                selected_names.append(target_name)
-            
-            missing_names = [name for name in target_passengers if name not in selected_names]
-            if selected_names:
-                self.log(f"✅ 成功勾选了 {len(selected_names)} 位指定乘车人（Selenium 方式）")
-            return len(selected_names), missing_names
-        
-        checkbox_selectors = [
-            'input[type="checkbox"][name^="normalPassenger"]',
-            'input[type="checkbox"][id^="normalPassenger"]',
-            '#normal_passenger_id input[type="checkbox"]',
-            '.passenger-list input[type="checkbox"]',
-        ]
-        checkboxes = []
-        for selector in checkbox_selectors:
-            checkboxes = self.driver.find_elements(By.CSS_SELECTOR, selector)
-            if checkboxes:
-                self.log(f"💡 使用选择器找到 {len(checkboxes)} 个乘车人复选框")
-                break
-        
-        selected_count = 0
-        for checkbox in checkboxes[:target_count]:
-            if checkbox.is_displayed() and not checkbox.is_selected():
-                checkbox.click()
-                time.sleep(0.2)
-            if checkbox.is_selected():
-                selected_count += 1
-        
-        if selected_count > 0:
-            self.log(f"✅ 成功勾选了 {selected_count} 位乘车人（Selenium 方式）")
-        else:
-            self.log("⚠️ 未能勾选乘车人，请手动勾选")
-        return selected_count, []
-
-    def _try_auto_submit(self, book_btn, seat_type_name: str = ""):
-        """
-        尝试自动提交订单
-        流程：点击预订 -> 选择乘车人 -> 选择席别 -> 提交订单 -> 确认购买
-        注意：此功能仅在用户明确开启 auto_submit 时生效
-        """
-        try:
-            self.log("🤖 尝试自动点击【预订】...")
-            
-            # 点击预订按钮
-            try:
-                book_btn.click()
-            except Exception:
-                # 尝试 JS 点击
-                self.driver.execute_script("arguments[0].click();", book_btn)
-            
-            time.sleep(0.8)  # 优化：缩短等待时间
-            
-            # 等待乘车人选择页面加载
-            try:
-                WebDriverWait(self.driver, 10).until(  # 优化：缩短超时时间
-                    EC.presence_of_element_located((By.ID, "normal_passenger_id"))
-                )
-                self.log("✅ 已进入乘车人选择页面")
-            except TimeoutException:
-                self.log("⚠️ 等待乘车人页面超时，尝试继续...")
-            
-            # 获取目标乘车人
-            target_passengers = [p.strip() for p in self.cfg.get("passengers", "").split(",") if p.strip()]
-            target_count = self.cfg.get("passenger_count", 1)
-            
-            if target_passengers:
-                self.log(f"👥 正在尝试勾选：{', '.join(target_passengers)}")
-            else:
-                self.log(f"👥 未指定姓名，将尝试勾选前 {target_count} 位乘车人")
-            
-            # 使用 JS 快速匹配并勾选乘车人
-            js_select_passengers = """
-            const targetNames = arguments[0];
-            const targetCount = arguments[1];
-            const requiredCount = targetNames.length > 0 ? targetNames.length : targetCount;
-            let selectedCount = 0;
-            let selectedNames = [];
-            
-            // 尝试多种选择器（12306 页面结构可能变化）
-            const selectors = [
-                '#normal_passenger_id label',  // 常规选择器
-                '.passenger-list label',        // 备用选择器1
-                'label[for^="normalPassenger"]', // 备用选择器2
-                '.normal_passenger label',      // 备用选择器3
-                'input[name="normalPassenger_"]' // 直接查找复选框
-            ];
-            
-            let labels = [];
-            for (let selector of selectors) {
-                labels = document.querySelectorAll(selector);
-                if (labels.length > 0) {
-                    console.log('使用选择器:', selector, '找到', labels.length, '个乘车人');
-                    break;
-                }
-            }
-            
-            if (labels.length === 0) {
-                console.error('未找到乘车人列表');
-                return 0;
-            }
-            
-            // 遍历所有乘车人
-            for (let label of labels) {
-                if (selectedCount >= requiredCount && requiredCount > 0) break;
-                
-                // 获取乘车人姓名
-                let name = label.innerText ? label.innerText.trim() : '';
-                
-                // 查找复选框
-                let checkbox = label.querySelector('input[type="checkbox"]');
-                if (!checkbox && label.tagName === 'INPUT') {
-                    checkbox = label; // 如果 label 本身就是 input
-                }
-                
-                if (!checkbox) continue;
-                
-                let shouldSelect = false;
-                if (targetNames.length > 0) {
-                    // 如果指定了名字，匹配名字
-                    if (targetNames.includes(name) || targetNames.some(n => name.includes(n))) {
-                        shouldSelect = true;
-                    }
-                } else {
-                    // 没指定名字，按顺序勾选
-                    shouldSelect = true;
-                }
-                
-                if (shouldSelect && !checkbox.checked) {
-                    checkbox.click();
-                    console.log('已勾选:', name);
-                    selectedCount++;
-                    selectedNames.push(name);
-                } else if (shouldSelect && checkbox.checked) {
-                    console.log('已选中:', name);
-                    selectedCount++;
-                    selectedNames.push(name);
-                }
-            }
-             
-            console.log('总共勾选:', selectedCount, '位乘车人');
-            const missingNames = targetNames.filter(target => {
-                return !selectedNames.some(name => name === target || name.includes(target));
-            });
-            return {selectedCount, selectedNames, missingNames};
-            """
-            selection_result = self.driver.execute_script(js_select_passengers, target_passengers, target_count)
-            passengers_selected, missing_names = self._parse_passenger_selection_result(selection_result, target_passengers)
-             
-            if self._passenger_selection_sufficient(passengers_selected, missing_names, target_passengers, target_count):
-                self.log(f"✅ 成功勾选了 {passengers_selected} 位乘车人")
-            else:
-                self.log(f"⚠️ JavaScript 未能勾选乘车人，尝试使用 Selenium 备用方案...")
-                 
-                # 备用方案：使用 Selenium 直接查找并勾选
-                try:
-                    passengers_selected, missing_names = self._select_passengers_with_selenium(
-                        target_passengers,
-                        target_count,
-                    )
-                except Exception as e:
-                    self.log(f"⚠️ 备用方案失败: {e}")
-                    self.log(f"💡 请手动勾选乘车人")
-            
-            if not self._passenger_selection_sufficient(passengers_selected, missing_names, target_passengers, target_count):
-                if missing_names:
-                    self.log(f"❌ 未能匹配到指定乘车人：{', '.join(missing_names)}，已停止自动提交")
-                else:
-                    self.log(f"❌ 未能勾选足够的乘车人，已停止自动提交")
-                return
-            
-            # 给页面一点点响应时间
-            time.sleep(0.3)  # 优化：缩短等待时间
-            
-            # 再处理一次可能出现的弹窗（勾选人后可能弹出学生票询问）
-            self._handle_popups()
-            
-            time.sleep(0.3)  # 优化：缩短等待时间
-            
-            # 选择席别（一等座/二等座/商务座）
-            if seat_type_name:
-                self.log(f"💺 尝试选择席别: {seat_type_name}")
-                js_select_seat_type = """
-                const targetSeatName = arguments[0];
-                const selects = document.querySelectorAll('select[id^="seatType_"]');
-                let count = 0;
-                for (let s of selects) {
-                    if (!s.isDisplayed && s.offsetParent === null) continue; // 过滤隐藏的
-                    for (let opt of s.options) {
-                        if (opt.text.includes(targetSeatName)) {
-                            s.value = opt.value;
-                            s.dispatchEvent(new Event('change', {bubbles: true}));
-                            count++;
-                            break;
-                        }
-                    }
-                }
-                return count;
-                """
-                try:
-                    num_selected = self.driver.execute_script(js_select_seat_type, seat_type_name)
-                    if num_selected > 0:
-                        self.log(f"✅ 已成功为 {num_selected} 位乘车人选择席别: {seat_type_name}")
-                    else:
-                        self.log(f"⚠️ 未能自动选择席别: {seat_type_name}，将使用系统默认席别")
-                except Exception as e:
-                    self.log(f"⚠️ 选择席别过程出错: {e}")
-
-            time.sleep(0.2)  # 优化：缩短等待时间
-            
-            # 选择座位偏好（靠窗/靠过道）
-            seat_prefer = self.cfg.get("seat_prefer", "无偏好")
-            if seat_prefer != "无偏好":
-                self._select_seat_preference(seat_prefer)
-            
-            # 处理可能出现的弹窗（如学生票确认、温馨提示等）
-            self._handle_popups()
-            
-            # 点击提交订单按钮
-            try:
-                submit_btn = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.ID, "submitOrder_id"))
-                )
-                submit_btn.click()
-                self.log("✅ 已点击【提交订单】")
-            except TimeoutException:
-                self.log("⚠️ 未找到提交订单按钮，请手动操作")
-                return
-            except Exception as e:
-                self.log(f"⚠️ 点击提交订单失败: {e}")
-                return
-            
-            # 等待确认订单弹窗
-            time.sleep(1)  # 优化：缩短等待时间
-            
-            # 再次处理可能出现的弹窗
-            self._handle_popups()
-            
-            # 处理可能的排队等待
-            try:
-                queue_count = self.driver.find_element(By.ID, "queueCount")
-                if queue_count.is_displayed():
-                    self.log(f"ℹ️ 排队中: {queue_count.text}")
-            except NoSuchElementException:
-                pass
-            
-            # 点击确认购买按钮（可能需要多次点击）
-            confirm_clicked = False
-            for attempt in range(5):
-                try:
-                    # 等待确认按钮可点击
-                    confirm_btn = WebDriverWait(self.driver, 8).until(
-                        EC.element_to_be_clickable((By.ID, "qr_submit_id"))
-                    )
-                    confirm_btn.click()
-                    confirm_clicked = True
-                    self.log(f"✅ 已点击【确认购买】(第 {attempt + 1} 次)")
-                    time.sleep(1)
-                    
-                    # 检查是否还需要继续点击
-                    try:
-                        # 如果按钮还存在且可见，可能需要再次点击
-                        if not self.driver.find_element(By.ID, "qr_submit_id").is_displayed():
-                            break
-                    except (NoSuchElementException, StaleElementReferenceException):
-                        break
-                        
-                except TimeoutException:
-                    if not confirm_clicked:
-                        self.log("⚠️ 未找到确认购买按钮")
-                    break
-                except StaleElementReferenceException:
-                    # 按钮已被点击，页面更新
-                    break
-                except ElementClickInterceptedException:
-                    self.log("⚠️ 确认按钮被遮挡，重试中...")
-                    time.sleep(0.5)
-                except Exception as e:
-                    self.log(f"⚠️ 点击确认购买异常: {e}")
-                    break
-            
-            if confirm_clicked:
-                self.log("🎉 订单已提交！请尽快完成支付！")
-                
-                # 尝试检测支付页面
-                time.sleep(2)
-                try:
-                    if "pay" in self.driver.current_url.lower():
-                        self.log("💳 已跳转到支付页面，请在 30 分钟内完成支付！")
-                except Exception:
-                    pass
-            else:
-                self.log("⚠️ 自动确认失败，请手动确认订单")
-                    
-        except Exception as e:
-            self.log(f"⚠️ 自动提交过程异常：{e}")
-    
     def _select_seat_preference(self, preference: str):
         """
         选择座位偏好（靠窗/靠过道）- 优化版
@@ -1604,82 +1216,6 @@ class TicketMonitor(BaseHandler):
         except Exception as e:
             self.log(f"⚠️ 座位偏好选择异常: {e}")
     
-    def _verification_present(self) -> bool:
-        """检测页面是否出现需要人工处理的核验（滑块/验证码/人脸核验/跳登录）。"""
-        js = r"""
-        try {
-            function visible(el) { return !!(el && el.offsetParent !== null); }
-            // 1) 真实交互式核验组件（阿里 nc 滑块 / 图形验证码），必须可见
-            if (visible(document.querySelector('#nc_1_n1z, .nc_scale, .nc-container, .slide-verify, .geetest_slider_button'))) return true;
-            if (visible(document.querySelector('#J-loginImg, #randCode, img[src*="captcha"]'))) return true;
-            // 2) 可见对话框中出现人脸核验/滑动验证（避免命中页面说明性文案）
-            var dialogs = document.querySelectorAll('.dhtmlx_window_active, .modal, .layui-layer, [class*="dialog"]');
-            for (var i = 0; i < dialogs.length; i++) {
-                var d = dialogs[i];
-                if (!visible(d)) continue;
-                var dt = d.innerText || '';
-                if (dt.indexOf('人脸') !== -1 && dt.indexOf('核验') !== -1) return true;
-                if ((dt.indexOf('滑') !== -1 || dt.indexOf('拖动') !== -1) && dt.indexOf('验证') !== -1) return true;
-            }
-            // 3) 明确的“正在要求操作”短语（不命中被动说明文案）
-            var t = (document.body && document.body.innerText) ? document.body.innerText : '';
-            if (t.indexOf('请完成安全验证') !== -1 || t.indexOf('拖动下方滑块') !== -1
-                || t.indexOf('向右滑动') !== -1 || t.indexOf('请按住滑块') !== -1) return true;
-            // 4) 会话失效跳转登录页（精确匹配登录页 URL）
-            var href = location.href || '';
-            if (href.indexOf('login.html') !== -1 || href.indexOf('/otn/login/init') !== -1) return true;
-            return false;
-        } catch (e) { return false; }
-        """
-        try:
-            return bool(self.driver.execute_script(js))
-        except Exception:
-            return False
-
-    def _alternate_success_present(self) -> bool:
-        """检测候补是否确实提交成功。
-
-        只信任「强信号」，避免误命中页面/确认弹层里的说明性文字（如「提交成功后…」），
-        否则会重演“误报成功后停止监控、令用户错过车票”的问题：
-        - 明确的成功标记元素；
-        - 跳转到候补/订单查询页（URL 变化）；
-        - 成功提示弹层/Toast 内的明确成功文案，且该弹层不再带有「确认候补/提交候补」按钮文案
-          （带这些动作文案的是确认弹层，其说明文字可能包含「提交成功」，必须排除）。
-        """
-        js = r"""
-        try {
-            function visible(el) { return !!(el && el.offsetParent !== null); }
-            // 1) 明确的成功标记元素
-            if (visible(document.querySelector(
-                '#houbu_success_id, .candidate-success, .houbu-success, .order-success, .success-tip'
-            ))) return true;
-            // 2) 跳转到候补/订单查询页（强信号）
-            var href = location.href || '';
-            if (href.indexOf('candidateQueue') !== -1 || href.indexOf('queryMyOrderNoComplete') !== -1
-                || href.indexOf('candidate_view') !== -1) return true;
-            // 3) 成功提示弹层/Toast：仅在窄范围弹层内匹配，且排除仍带提交/确认动作的确认弹层
-            var boxes = document.querySelectorAll(
-                '.dhtmlx_window_active, .layui-layer, .modal, [role="dialog"], .ant-message-notice, .toast'
-            );
-            for (var i = 0; i < boxes.length; i++) {
-                var b = boxes[i];
-                if (!visible(b)) continue;
-                var t = b.innerText || '';
-                // 确认弹层（含「确认候补/提交候补」按钮文案）的说明文字可能含「提交成功」，跳过
-                if (t.indexOf('确认候补') !== -1 || t.indexOf('提交候补') !== -1) continue;
-                if (t.indexOf('候补订单提交成功') !== -1) return true;
-                if (t.indexOf('已加入候补') !== -1) return true;
-                if (t.indexOf('候补成功') !== -1) return true;
-                if (t.indexOf('提交成功') !== -1) return true;
-            }
-            return false;
-        } catch (e) { return false; }
-        """
-        try:
-            return bool(self.driver.execute_script(js))
-        except Exception:
-            return False
-
     def _signal_human_action(self, train_code: str, message: str) -> None:
         """停止自动化，把控制权交还给用户去完成核验。"""
         self.log(f"🙋 需要人工操作：{message}")
@@ -1692,227 +1228,6 @@ class TicketMonitor(BaseHandler):
                 self.human_action({"train_code": train_code, "title": "需要人工操作", "message": message})
             except Exception:
                 pass
-
-    def _click_confirm_alternate(self) -> None:
-        """尽力自动点击「确认候补」二次确认（无验证码）。"""
-        confirm_selectors = [
-            "#confirmHB_id",
-            "#houbu_qr_id",
-            "#sureClick_id",
-            "a.btn-confirm-houbu",
-            ".//a[contains(text(),'确认')]",
-            ".//a[contains(text(),'确定')]",
-        ]
-        for selector in confirm_selectors:
-            try:
-                if selector.startswith(".//"):
-                    btn = self.driver.find_element(By.XPATH, selector)
-                else:
-                    btn = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if btn and btn.is_displayed():
-                    btn.click()
-                    self.log("✅ 已自动确认候补对话框")
-                    return
-            except NoSuchElementException:
-                continue
-            except Exception:
-                continue
-
-    def _try_alternate_order(self, row, train_code: str, seat_name: str) -> str:
-        """
-        尝试提交候补订单。返回四态：
-        - "success"：候补确实已提交（检测到成功标记/订单页跳转）
-        - "human"  ：出现人脸核验/验证码/滑块，或已提交但无法确认结果，已交人工接管
-        - "failed" ：已进入候补流程后中途失败（页面已离开查询页），调用方应停止并交人工
-        - "retry"  ：尚未进入候补流程（候补按钮暂不可点），调用方可安全地继续监控
-        """
-        try:
-            self.log(f"🔄 尝试为 {train_code} {seat_name} 提交候补订单...")
-
-            # 查找候补按钮（复用 _find_hit_row 的同一套选择器，避免逻辑分叉）
-            alternate_btn = self._find_alternate_button(row)
-            if not alternate_btn:
-                # 还没点击任何东西，页面仍停留在查询页：可安全地继续下一轮监控
-                self.log("↻ 候补按钮暂不可点，继续监控")
-                return "retry"
-
-            # 点击候补按钮
-            try:
-                alternate_btn.click()
-            except Exception:
-                self.driver.execute_script("arguments[0].click();", alternate_btn)
-
-            time.sleep(0.8)
-
-            # 等待候补页面加载
-            try:
-                WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, ".candidate-list, #candidate_passenger_id, #normal_passenger_id")
-                    )
-                )
-                self.log("✅ 已进入候补订单页面")
-            except TimeoutException:
-                if self._verification_present():
-                    self._signal_human_action(train_code, "候补需要人工核验（人脸/验证码/滑块），请在浏览器中完成。")
-                    return "human"
-                self.log("⚠️ 等待候补页面超时")
-                return "failed"
-
-            if self._verification_present():
-                self._signal_human_action(train_code, "候补需要人工核验（人脸/验证码/滑块），请在浏览器中完成。")
-                return "human"
-
-            # 选择乘车人
-            target_passengers = [p.strip() for p in self.cfg.get("passengers", "").split(",") if p.strip()]
-            try:
-                target_count = max(1, int(self.cfg.get("passenger_count", 1) or 1))
-            except (TypeError, ValueError):
-                target_count = 1
-
-            js_select_candidates = """
-            const targetNames = arguments[0];
-            const targetCount = arguments[1];
-            let selectedCount = 0;
-            
-            // 查找候补乘车人复选框
-            const selectors = [
-                '#candidate_passenger_id label',
-                '.candidate-list label',
-                'input[name^="candidate_passenger"]'
-            ];
-            
-            let labels = [];
-            for (let selector of selectors) {
-                labels = document.querySelectorAll(selector);
-                if (labels.length > 0) break;
-            }
-            
-            for (let label of labels) {
-                if (selectedCount >= targetCount && targetCount > 0) break;
-                
-                let name = label.innerText ? label.innerText.trim() : '';
-                let checkbox = label.querySelector('input[type="checkbox"]');
-                if (!checkbox && label.tagName === 'INPUT') checkbox = label;
-                if (!checkbox) continue;
-                
-                let shouldSelect = false;
-                if (targetNames.length > 0) {
-                    if (targetNames.includes(name) || targetNames.some(n => name.includes(n))) {
-                        shouldSelect = true;
-                    }
-                } else {
-                    shouldSelect = true;
-                }
-                
-                if (shouldSelect && !checkbox.checked) {
-                    checkbox.click();
-                    selectedCount++;
-                }
-            }
-            return selectedCount;
-            """
-
-            passengers_selected = self.driver.execute_script(js_select_candidates, target_passengers, target_count)
-            try:
-                passengers_selected = int(passengers_selected or 0)
-            except (TypeError, ValueError):
-                passengers_selected = 0
-
-            if passengers_selected > 0:
-                self.log(f"✅ 已为候补选择 {passengers_selected} 位乘车人")
-            else:
-                self.log("⚠️ 未能选择候补乘车人，请手动选择")
-            if not self._passenger_selection_sufficient(passengers_selected, [], target_passengers, target_count):
-                if target_passengers:
-                    self.log("❌ 未能勾选足够的指定候补乘车人，已停止候补提交")
-                else:
-                    self.log("❌ 未能勾选足够的候补乘车人，已停止候补提交")
-                return "failed"
-
-            time.sleep(0.3)
-
-            # 设置截止时间（如果配置了）
-            alternate_deadline = self.cfg.get("alternate_deadline", "")
-            if alternate_deadline:
-                try:
-                    js_set_deadline = """
-                    const deadline = arguments[0];
-                    const timeInputs = document.querySelectorAll('input[type="time"], input.deadline-time, #deadline_time');
-                    for (let input of timeInputs) {
-                        if (input.offsetParent !== null) {
-                            input.value = deadline;
-                            input.dispatchEvent(new Event('change', {bubbles: true}));
-                            return true;
-                        }
-                    }
-                    return false;
-                    """
-                    if self.driver.execute_script(js_set_deadline, alternate_deadline):
-                        self.log(f"✅ 已设置候补截止时间: {alternate_deadline}")
-                except Exception:
-                    pass
-
-            # 点击提交候补按钮
-            submit_btn = None
-            submit_selectors = [
-                "#submitHoubu_id",
-                "a.btn-submit-houbu",
-                ".//a[contains(text(),'提交候补')]",
-                "#submit_candidate_id",
-            ]
-            for selector in submit_selectors:
-                try:
-                    if selector.startswith(".//"):
-                        submit_btn = self.driver.find_element(By.XPATH, selector)
-                    else:
-                        submit_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    if submit_btn and submit_btn.is_displayed():
-                        break
-                    submit_btn = None
-                except NoSuchElementException:
-                    continue
-
-            if not submit_btn:
-                if self._verification_present():
-                    self._signal_human_action(train_code, "候补需要人工核验，请在浏览器中完成。")
-                    return "human"
-                self.log("⚠️ 未找到候补提交按钮，请手动提交")
-                return "failed"
-
-            try:
-                submit_btn.click()
-            except Exception:
-                self.driver.execute_script("arguments[0].click();", submit_btn)
-            self.log("✅ 已点击提交候补")
-            time.sleep(0.5)
-
-            if self._verification_present():
-                self._signal_human_action(train_code, "候补提交需要人工核验，请在浏览器中完成。")
-                return "human"
-
-            # 自动确认「确认候补」对话框（无验证码）
-            self._click_confirm_alternate()
-            time.sleep(0.3)
-
-            if self._verification_present():
-                self._signal_human_action(train_code, "候补确认需要人工核验，请在浏览器中完成。")
-                return "human"
-
-            # 仅当检测到明确的成功标记才算成功，避免误报后停止监控、令用户错过车票
-            if self._alternate_success_present():
-                self.log("✅ 候补订单已提交")
-                return "success"
-
-            self._signal_human_action(
-                train_code,
-                "候补已尝试提交，但未能自动确认结果，请在浏览器中核对候补订单状态。",
-            )
-            return "human"
-
-        except Exception as e:
-            self.log(f"⚠️ 候补订单处理异常: {e}")
-            return "failed"
 
 
 # ==================== 兼容旧接口 ====================

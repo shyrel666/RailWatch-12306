@@ -302,7 +302,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         bridge.driver = FakeDriver()
         bridge.is_monitoring = True
 
-        with patch("railwatch_bridge.time.time", side_effect=[0, 61, 62]), patch("railwatch_bridge.time.sleep", lambda seconds: None):
+        with patch.object(bridge.server_time_sync, "server_timestamp", side_effect=[0, 61, 62]), patch(
+            "railwatch_bridge.time.monotonic", side_effect=[0, 61, 62]
+        ), patch("railwatch_bridge.time.sleep", lambda seconds: None):
             bridge._wait_for_target_timestamp(62, {"keep_alive": True})
 
         self.assertEqual(bridge.driver.keep_alive_calls, 1)
@@ -321,7 +323,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         bridge.driver = FakeDriver()
         bridge.is_monitoring = True
 
-        with patch("railwatch_bridge.time.time", side_effect=[0, 61, 62]), patch("railwatch_bridge.time.sleep", lambda seconds: None):
+        with patch.object(bridge.server_time_sync, "server_timestamp", side_effect=[0, 61, 62]), patch(
+            "railwatch_bridge.time.sleep", lambda seconds: None
+        ):
             bridge._wait_for_target_timestamp(62, {"keep_alive": False})
 
         self.assertEqual(bridge.driver.keep_alive_calls, 0)

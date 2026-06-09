@@ -24,6 +24,8 @@ import hashlib
 from typing import Optional, Callable, Tuple, List, Dict
 from dataclasses import dataclass
 
+from railwatch_config_contract import redact_sensitive_text
+
 # ==================== User-Agent 池 ====================
 # 基于真实浏览器统计数据的 UA 池 (2025/2026 最新版本)
 USER_AGENTS = [
@@ -686,7 +688,7 @@ class RailDeviceIdProtector:
             self.log("⚠️ 未检测到 RAIL_DEVICEID。")
             return False
         self.saved_device_id = device_id
-        self.log(f"💾 已记录 RAIL_DEVICEID: {device_id[:20]}...")
+        self.log(f"💾 已记录 RAIL_DEVICEID: {redact_sensitive_text(device_id, keep_start=6, keep_end=4)}")
         return True
 
     def check_consistency(self) -> bool:

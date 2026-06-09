@@ -21,4 +21,7 @@ export const railwatchApi = {
     }
     return window.railwatch.showSaveDialog(defaultPath);
   },
+  stopUrgentAlert() {
+    window.railwatch?.stopUrgentAlert();
+  },
 };

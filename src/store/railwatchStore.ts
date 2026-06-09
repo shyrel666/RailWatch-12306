@@ -73,6 +73,10 @@ export const defaultConfig: RailWatchConfig = {
   smart_rate: true,
   timer_enabled: false,
   target_time: "00:00:00",
+  burst_window_seconds: 45,
+  prewarm_lead_seconds: 120,
+  config_version: 1,
+  automation_route: "compliance_alerts",
 };
 
 export type RailWatchStore = {

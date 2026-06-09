@@ -403,8 +403,8 @@ class TicketMonitorLogicTests(unittest.TestCase):
             log_callback=lambda msg: None,
         )
 
-        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda seconds: None):
-            monitor._try_auto_submit(FakeButton(), "一等座")
+        with patch("railwatch_submit_flow.WebDriverWait", FakeWait), patch("railwatch_submit_flow.time.sleep", lambda seconds: None):
+            monitor.submit_flow.try_auto_submit(FakeButton(), "一等座")
 
         self.assertTrue(driver.selection_attempted)
         self.assertFalse(driver.submit_button.clicked)
@@ -417,12 +417,25 @@ class TicketMonitorLogicTests(unittest.TestCase):
             log_callback=lambda msg: None,
         )
 
-        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda seconds: None):
-            result = monitor._try_alternate_order(FakeAlternateRow(), "G101", "二等座")
+        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
+            result = monitor.alternate_flow.try_alternate_order(FakeAlternateRow(), "G101", "二等座")
 
         self.assertEqual(result, "failed")
         self.assertTrue(driver.selection_attempted)
         self.assertFalse(driver.submit_button.clicked)
+
+    def test_alternate_passenger_selection_counts_already_checked_passengers(self):
+        class Driver:
+            def execute_script(self, script, *args):
+                return "else if (shouldSelect && checkbox.checked)" in script
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
+            log_callback=lambda m: None,
+        )
+
+        self.assertEqual(monitor.alternate_flow._select_candidate_passengers([], 1), 1)
 
     def test_find_hit_row_uses_houbu_button_not_seat_text(self):
         class Row:
@@ -590,10 +603,10 @@ class TicketMonitorLogicTests(unittest.TestCase):
             log_callback=lambda m: None,
             human_action_callback=lambda p: humans.append(p),
         )
-        monitor._alternate_success_present = lambda: True
+        monitor.verification.alternate_success_present = lambda: True
 
-        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
+            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
 
         self.assertEqual(result, "success")
         self.assertTrue(driver.submit.clicked)
@@ -657,8 +670,8 @@ class TicketMonitorLogicTests(unittest.TestCase):
             human_action_callback=lambda p: humans.append(p),
         )
 
-        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
+            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
 
         self.assertEqual(result, "human")
         self.assertTrue(driver.submit.clicked)
@@ -679,8 +692,8 @@ class TicketMonitorLogicTests(unittest.TestCase):
             human_action_callback=lambda p: humans.append(p),
         )
 
-        with patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
+            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
 
         self.assertEqual(result, "retry")
         self.assertEqual(humans, [])
@@ -693,14 +706,14 @@ class TicketMonitorLogicTests(unittest.TestCase):
             def execute_script(self, script, *args):
                 return self.value
 
-        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None)._alternate_success_present())
-        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None)._alternate_success_present())
+        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None).verification.alternate_success_present())
+        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None).verification.alternate_success_present())
 
         class BadDriver:
             def execute_script(self, script, *args):
                 raise RuntimeError("boom")
 
-        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None)._alternate_success_present())
+        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None).verification.alternate_success_present())
 
     def test_alternate_submit_hands_off_on_verification(self):
         humans = []
@@ -756,8 +769,8 @@ class TicketMonitorLogicTests(unittest.TestCase):
             human_action_callback=lambda p: humans.append(p),
         )
 
-        with patch("gui_12306_0.WebDriverWait", FakeWait), patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._try_alternate_order(Row(), "G101", "二等座")
+        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
+            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
 
         self.assertEqual(result, "human")
         self.assertEqual(len(humans), 1)
@@ -765,6 +778,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
 
     def test_run_single_loop_alternate_success_emits_alternate_hit(self):
         hits = []
+        notifications = []
 
         class Driver:
             def refresh(self):
@@ -774,13 +788,14 @@ class TicketMonitorLogicTests(unittest.TestCase):
             Driver(),
             {"interval": 1, "query_timeout": 1, "auto_alternate": True},
             log_callback=lambda m: None,
+            notify_callback=lambda title, message: notifications.append((title, message)),
             on_hit=lambda p: hits.append(p),
         )
         monitor.click_query_button = lambda: True
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
         monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
         monitor._focus_and_highlight = lambda row, btn: None
-        monitor._try_alternate_order = lambda row, code, seat: "success"
+        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "success"
 
         with patch("gui_12306_0.time.sleep", lambda s: None):
             result = monitor._run_single_loop(1, 1)
@@ -788,6 +803,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(hits[0]["source"], "alternate")
         self.assertEqual(hits[0]["status"], "候补已提交")
+        self.assertEqual(notifications, [])
 
     def test_run_single_loop_alternate_failed_hands_off_and_stops(self):
         hits = []
@@ -815,7 +831,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
         monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
         monitor._focus_and_highlight = lambda row, btn: None
-        monitor._try_alternate_order = lambda row, code, seat: "failed"
+        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "failed"
 
         with patch("gui_12306_0.time.sleep", lambda s: None):
             result = monitor._run_single_loop(1, 1)
@@ -844,7 +860,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
         monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
         monitor._focus_and_highlight = lambda row, btn: None
-        monitor._try_alternate_order = lambda row, code, seat: "retry"
+        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "retry"
 
         with patch("gui_12306_0.time.sleep", lambda s: None):
             result = monitor._run_single_loop(1, 1)
@@ -873,8 +889,8 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
         monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
         monitor._focus_and_highlight = lambda row, btn: None
-        # "human" 约定：_try_alternate_order 内部已发出人工接管信号，循环不应重复发信号或误报命中
-        monitor._try_alternate_order = lambda row, code, seat: "human"
+        # "human" 约定：候补流程内部已发出人工接管信号，循环不应重复发信号或误报命中
+        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "human"
 
         with patch("gui_12306_0.time.sleep", lambda s: None):
             result = monitor._run_single_loop(1, 1)
@@ -891,14 +907,14 @@ class TicketMonitorLogicTests(unittest.TestCase):
             def execute_script(self, script, *args):
                 return self.value
 
-        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None)._verification_present())
-        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None)._verification_present())
+        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None).verification.verification_present())
+        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None).verification.verification_present())
 
         class BadDriver:
             def execute_script(self, script, *args):
                 raise RuntimeError("boom")
 
-        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None)._verification_present())
+        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None).verification.verification_present())
 
 
 class TicketMonitorDateRangeTests(unittest.TestCase):

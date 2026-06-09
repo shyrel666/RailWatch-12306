@@ -16,4 +16,7 @@ contextBridge.exposeInMainWorld("railwatch", {
   showSaveDialog: (defaultPath?: string) => {
     return ipcRenderer.invoke("railwatch:save-dialog", defaultPath) as Promise<string | null>;
   },
+  stopUrgentAlert: () => {
+    ipcRenderer.send("railwatch:stop-alert");
+  },
 });

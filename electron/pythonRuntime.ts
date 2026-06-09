@@ -23,6 +23,27 @@ export type RuntimeResponse = {
 
 export type RuntimeMessage = RuntimeEvent | RuntimeResponse;
 
+export type RuntimeExitInfo = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+};
+
+export type RequestOptions = {
+  timeoutMs?: number;
+};
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const LONG_RUNNING_COMMANDS = new Set([
+  "checkEnvironment",
+  "openLogin",
+  "checkLogin",
+  "analyzeQuery",
+  "startMonitor",
+  "stopMonitor",
+  "downloadChromeDriver",
+]);
+const LONG_RUNNING_TIMEOUT_MS = 600_000;
+
 export class JsonLineDecoder {
   private buffer = "";
 
@@ -47,14 +68,18 @@ export class JsonLineDecoder {
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
 };
 
 export class PendingRequests {
   private pending = new Map<string, PendingRequest>();
 
-  create(id: string): Promise<unknown> {
+  create(id: string, timeoutMs: number): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        this.reject(id, new Error(`Python runtime request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timeout });
     });
   }
 
@@ -63,6 +88,7 @@ export class PendingRequests {
     if (!request) {
       return;
     }
+    clearTimeout(request.timeout);
     this.pending.delete(response.id);
     if (response.ok) {
       request.resolve(response.result);
@@ -71,11 +97,20 @@ export class PendingRequests {
     request.reject(new Error(response.error?.message || "Python runtime request failed"));
   }
 
-  rejectAll(error: Error): void {
-    for (const request of this.pending.values()) {
-      request.reject(error);
+  reject(id: string, error: Error): void {
+    const request = this.pending.get(id);
+    if (!request) {
+      return;
     }
-    this.pending.clear();
+    clearTimeout(request.timeout);
+    this.pending.delete(id);
+    request.reject(error);
+  }
+
+  rejectAll(error: Error): void {
+    for (const [id] of this.pending.entries()) {
+      this.reject(id, error);
+    }
   }
 }
 
@@ -123,6 +158,8 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
   private readonly decoder: JsonLineDecoder;
   private readonly pending = new PendingRequests();
   private nextId = 1;
+  private intentionalStop = false;
+  private restartTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly command: RuntimeCommand = createPythonRuntimeCommand()) {
     super();
@@ -138,6 +175,7 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
     if (this.child) {
       return;
     }
+    this.intentionalStop = false;
     this.child = spawn(this.command.executable, this.command.args, {
       cwd: this.command.cwd,
       stdio: "pipe",
@@ -159,33 +197,62 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
     });
     this.child.on("error", (error) => {
       this.pending.rejectAll(error);
-      this.emit("error", error);
+      this.emit("runtimeError", error);
     });
     this.child.on("exit", (code, signal) => {
       const error = new Error(`Python runtime exited (${code ?? signal ?? "unknown"})`);
       this.pending.rejectAll(error);
       this.child = null;
-      this.emit("exit", { code, signal });
+      const exitInfo: RuntimeExitInfo = { code, signal };
+      this.emit("exit", exitInfo);
+      if (!this.intentionalStop) {
+        this.scheduleRestart();
+      }
     });
+    this.emit("started");
   }
 
-  async request<T = unknown>(command: string, payload: Record<string, unknown> = {}): Promise<T> {
+  async request<T = unknown>(
+    command: string,
+    payload: Record<string, unknown> = {},
+    options: RequestOptions = {},
+  ): Promise<T> {
     this.start();
     if (!this.child) {
       throw new Error("Python runtime failed to start");
     }
+    const timeoutMs =
+      options.timeoutMs ?? (LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS);
     const id = String(this.nextId++);
-    const promise = this.pending.create(id) as Promise<T>;
+    const promise = this.pending.create(id, timeoutMs) as Promise<T>;
     this.child.stdin.write(JSON.stringify({ id, command, payload }) + "\n");
     return promise;
   }
 
   stop(): void {
+    this.intentionalStop = true;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     if (!this.child) {
       return;
     }
     this.child.kill();
     this.child = null;
+  }
+
+  private scheduleRestart(): void {
+    if (this.restartTimer || this.intentionalStop) {
+      return;
+    }
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (!this.intentionalStop) {
+        this.start();
+        this.emit("restarted");
+      }
+    }, 1000);
   }
 
   private handleMessage(message: RuntimeMessage): void {

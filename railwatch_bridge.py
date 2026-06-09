@@ -11,10 +11,19 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Callable, Dict, List, Optional
 
+from railwatch_config_contract import (
+    AUTOMATION_ROUTE,
+    config_for_persistence,
+    default_config as contract_default_config,
+    merge_notification_settings,
+    validate_config as contract_validate_config,
+)
+from railwatch_notify import NotificationService
 from railwatch_preferences import load_theme_preference, save_theme_preference
 from railwatch_dates import expand_travel_dates
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, RailWatchState, TicketHit
 from railwatch_system import get_app_version, inspect_data_dir, probe_connectivity
+from railwatch_time import ServerTimeSync, get_server_time_sync
 
 try:
     from chromedriver_manager import (
@@ -65,7 +74,11 @@ except ImportError as exc:
 
 
 LOGIN_URL = "https://kyfw.12306.cn/otn/resources/login.html"
+QUERY_URL = "https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc"
 MAX_LOG_ENTRIES = 1000
+MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
+MONITOR_PREWARM_INTERVAL_SECONDS = 30.0
+NOTIFICATION_SETTINGS_FILE = "notification_settings.json"
 
 
 def get_resource_path(relative_path: str) -> str:
@@ -92,94 +105,11 @@ CHROMEDRIVER_PATH = DEFAULT_CHROMEDRIVER_PATH if os.path.exists(DEFAULT_CHROMEDR
 
 
 def default_config(today: Optional[date] = None, now: Optional[datetime] = None) -> dict:
-    selected_today = today or date.today()
-    selected_now = now or datetime.now()
-    target_time = (selected_now + timedelta(seconds=120)).strftime("%H:%M:%S")
-    return {
-        "from_station_cn": "北京",
-        "to_station_cn": "上海",
-        "date": (selected_today + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "train_code": "",
-        "seat_keyword": "",
-        "interval": 5,
-        "query_timeout": 40,
-        "auto_submit": False,
-        "seat_prefer": "无偏好",
-        "passenger_count": 1,
-        "prepare_time": 2,
-        "keep_alive": True,
-        "passengers": "",
-        "auto_alternate": False,
-        "alternate_deadline": "18:00",
-        "date_range": "±1天",
-        "smart_rate": True,
-        "timer_enabled": False,
-        "target_time": target_time,
-    }
-
-
-def _to_bool(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "y"}
-    return bool(value)
-
-
-def _to_int(value: object, fallback: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = fallback
-    if minimum is not None:
-        parsed = max(minimum, parsed)
-    if maximum is not None:
-        parsed = min(maximum, parsed)
-    return parsed
-
-
-def _to_float(value: object, fallback: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = fallback
-    if minimum is not None:
-        parsed = max(minimum, parsed)
-    if maximum is not None:
-        parsed = min(maximum, parsed)
-    return parsed
+    return contract_default_config(today=today, now=now)
 
 
 def validate_config(raw_config: dict) -> dict:
-    config = default_config()
-    config.update(raw_config or {})
-    config["from_station_cn"] = str(config.get("from_station_cn", "")).strip()
-    config["to_station_cn"] = str(config.get("to_station_cn", "")).strip()
-    config["date"] = str(config.get("date", "")).strip()
-    config["train_code"] = str(config.get("train_code", "")).strip().upper()
-    config["seat_keyword"] = str(config.get("seat_keyword", "")).strip()
-    config["seat_prefer"] = str(config.get("seat_prefer", "无偏好")).strip() or "无偏好"
-    config["passengers"] = str(config.get("passengers", "")).strip()
-    config["alternate_deadline"] = str(config.get("alternate_deadline", "18:00")).strip() or "18:00"
-    config["target_time"] = str(config.get("target_time", "00:00:00")).strip() or "00:00:00"
-    config["interval"] = _to_float(config.get("interval"), 5.0, minimum=1.0, maximum=60.0)
-    config["query_timeout"] = _to_int(config.get("query_timeout"), 40, minimum=5, maximum=120)
-    config["passenger_count"] = _to_int(config.get("passenger_count"), 1, minimum=1, maximum=20)
-    config["prepare_time"] = _to_int(config.get("prepare_time"), 2, minimum=0, maximum=30)
-    config["auto_submit"] = _to_bool(config.get("auto_submit"))
-    config["auto_alternate"] = _to_bool(config.get("auto_alternate"))
-    config["keep_alive"] = _to_bool(config.get("keep_alive"))
-    config["date_range"] = str(config.get("date_range", "±1天")).strip() or "±1天"
-    config["smart_rate"] = _to_bool(config.get("smart_rate"))
-    config["timer_enabled"] = _to_bool(config.get("timer_enabled"))
-
-    if not config["from_station_cn"]:
-        raise ValueError("出发站为必填项。")
-    if not config["to_station_cn"]:
-        raise ValueError("到达站为必填项。")
-    if not config["date"]:
-        raise ValueError("出行日期为必填项。")
-    return config
+    return contract_validate_config(raw_config)
 
 
 def state_to_payload(state: RailWatchState) -> dict:
@@ -233,6 +163,10 @@ class RailWatchBridge:
         self.query_results: List[dict] = []
         self.config_manager = ConfigManager(self.data_dir) if CORE_AVAILABLE and ConfigManager else None
         self.chromedriver_path = CHROMEDRIVER_PATH
+        self.server_time_sync: ServerTimeSync = get_server_time_sync(log_callback=self.log)
+        self.notification_service = NotificationService(self._load_notification_settings(), log_callback=self.log)
+        self._monitor_last_tick = 0.0
+        self._monitor_heartbeat_thread: Optional[threading.Thread] = None
 
     def emit(self, name: str, payload: dict) -> None:
         self.event_callback({"event": name, "payload": payload})
@@ -280,7 +214,11 @@ class RailWatchBridge:
             "railway_label": connectivity["railway_label"],
             "proxy_configured": connectivity["proxy_configured"],
             "proxy_label": connectivity["proxy_label"],
-            "proxy_value": connectivity["proxy_value"],
+            "proxy_value": str(connectivity.get("proxy_value", "")),
+            "automation_route": AUTOMATION_ROUTE,
+            "server_time_offset_seconds": round(self.server_time_sync.offset_seconds, 3),
+            "server_time_last_error": self.server_time_sync.last_error,
+            "notification_settings": self.notification_service.settings,
             "state": state_to_payload(self.state),
         }
 
@@ -298,7 +236,7 @@ class RailWatchBridge:
     def save_config(self, raw_config: dict) -> dict:
         config = validate_config(raw_config)
         manager = self._require_config_manager()
-        query_config = self._make_query_config(config)
+        query_config = self._make_query_config(config_for_persistence(config))
         if manager.save(query_config):
             self.log("设置已保存。", "SUCCESS")
             return config
@@ -477,8 +415,9 @@ class RailWatchBridge:
                 "message": "是否关闭受控的 Chrome 会话？",
             }
         try:
-            self.driver.quit()
-            self.driver = None
+            with self._driver_lock:
+                self.driver.quit()
+                self.driver = None
             self.log("浏览器已关闭。", "SUCCESS")
             return {"closed": True}
         except Exception as exc:
@@ -524,22 +463,62 @@ class RailWatchBridge:
         return {"cleared": True}
 
     def load_preferences(self) -> dict:
-        return {"theme": load_theme_preference(self.data_dir)}
+        return {
+            "theme": load_theme_preference(self.data_dir),
+            "notification_settings": self._load_notification_settings(),
+        }
 
-    def save_preferences(self, theme: str) -> dict:
+    def save_preferences(self, theme: str, notification_settings: Optional[dict] = None) -> dict:
         selected = "dark" if str(theme).lower() == "dark" else "light"
         save_theme_preference(self.data_dir, selected)
-        return {"theme": selected}
+        if notification_settings is not None:
+            self._save_notification_settings(notification_settings)
+            self.notification_service.update_settings(notification_settings)
+        return {
+            "theme": selected,
+            "notification_settings": self.notification_service.settings,
+        }
+
+    def sync_server_time(self) -> dict:
+        offset = self.server_time_sync.sync(force=True)
+        return {
+            "offset_seconds": round(offset, 3),
+            "server_time": self.server_time_sync.server_now().isoformat(timespec="seconds"),
+            "last_error": self.server_time_sync.last_error,
+        }
+
+    def _notification_settings_path(self) -> str:
+        return os.path.join(self.data_dir, NOTIFICATION_SETTINGS_FILE)
+
+    def _load_notification_settings(self) -> dict:
+        path = self._notification_settings_path()
+        if not os.path.exists(path):
+            return merge_notification_settings()
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return merge_notification_settings(payload if isinstance(payload, dict) else {})
+        except (OSError, json.JSONDecodeError):
+            return merge_notification_settings()
+
+    def _save_notification_settings(self, settings: dict) -> None:
+        path = self._notification_settings_path()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(merge_notification_settings(settings), handle, ensure_ascii=False, indent=2)
 
     def _monitor_worker(self, config: dict) -> None:
         self._pending_human_action = None
+        self._monitor_last_tick = time.time()
+        self._start_monitor_heartbeat()
         try:
+            self.server_time_sync.sync(force=True)
             if config.get("timer_enabled") and not self._wait_for_target_time(config):
                 return
             if not CORE_AVAILABLE or TicketMonitor is None:
                 raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
             with self._driver_lock:
                 driver = self._ensure_driver()
+                self._prewarm_query_page(driver, config)
                 monitor = TicketMonitor(
                     driver,
                     config,
@@ -549,11 +528,13 @@ class RailWatchBridge:
                     progress_callback=self._handle_progress,
                     on_hit=self._handle_hit,
                     human_action_callback=self._handle_human_action,
+                    server_time_sync=self.server_time_sync,
                 )
                 monitor.run()
         except Exception as exc:
             self.emit_state(self.state.with_error(f"监控失败: {exc}"))
         finally:
+            self._stop_monitor_heartbeat()
             self.is_monitoring = False
             pending_human = self._pending_human_action
             self._pending_human_action = None
@@ -566,16 +547,15 @@ class RailWatchBridge:
     def _wait_for_target_time(self, config: dict) -> bool:
         target_str = str(config.get("target_time", ""))
         try:
-            hour, minute, second = [int(part) for part in target_str.split(":")]
+            target = self.server_time_sync.parse_target_datetime(target_str)
         except ValueError:
             self.log("目标时间无效，立即启动。", "WARN")
             return True
-        now = datetime.now()
-        target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
-        if target <= now:
-            target = target + timedelta(days=1)
-        wait_until = target.timestamp() - int(config.get("prepare_time", 0))
-        self.log(f"定时启动已设定于 {target.strftime('%H:%M:%S')}。")
+        prepare_seconds = int(config.get("prepare_time", 0) or 0)
+        wait_until = target.timestamp() - prepare_seconds
+        self.log(
+            f"定时启动已设定于 {target.strftime('%H:%M:%S')}（服务器时间，偏移 {self.server_time_sync.offset_seconds:+.3f}s）。"
+        )
         if not self._wait_for_target_timestamp(wait_until, config):
             return False
         self.log("预备窗口已到达，启动监控。", "SUCCESS")
@@ -597,15 +577,65 @@ class RailWatchBridge:
 
     def _wait_for_target_timestamp(self, wait_until: float, config: dict) -> bool:
         last_keep_alive = 0.0
-        while time.time() < wait_until:
+        last_prewarm = 0.0
+        prewarm_lead = float(config.get("prewarm_lead_seconds") or 120.0)
+        prewarm_announced = False
+        while True:
+            now_server = self.server_time_sync.server_timestamp()
+            if now_server >= wait_until:
+                break
             if not self.is_monitoring:
                 return False
-            now = time.time()
-            if config.get("keep_alive") and now - last_keep_alive >= 60:
+            # 倒计时同样算作监控存活，避免心跳守护线程在等待目标时间期间误判超时。
+            self._monitor_last_tick = time.time()
+            now_mono = time.monotonic()
+            if config.get("keep_alive") and now_mono - last_keep_alive >= 60:
                 self._send_keep_alive()
-                last_keep_alive = now
-            time.sleep(1)
+                last_keep_alive = now_mono
+            # 仅在临近开抢的预热窗口内、按节流间隔刷新查询页，避免高频刷新触发风控。
+            if (
+                self.driver
+                and (wait_until - now_server) <= prewarm_lead
+                and now_mono - last_prewarm >= MONITOR_PREWARM_INTERVAL_SECONDS
+            ):
+                try:
+                    self.driver.get(QUERY_URL)
+                    if not prewarm_announced:
+                        self.log("已预热查询页，等待服务器时间触发冲刺。")
+                        prewarm_announced = True
+                except Exception:
+                    pass
+                last_prewarm = now_mono
+            time.sleep(0.2)
         return True
+
+    def _prewarm_query_page(self, driver, config: dict) -> None:
+        if not config.get("timer_enabled"):
+            return
+        try:
+            driver.get(QUERY_URL)
+            self.log("已预热查询页，等待服务器时间触发冲刺。")
+        except Exception as exc:
+            self.log(f"查询页预热失败：{exc}", "WARN")
+
+    def _start_monitor_heartbeat(self) -> None:
+        self._stop_monitor_heartbeat()
+
+        def heartbeat() -> None:
+            while self.is_monitoring:
+                if self._monitor_last_tick and (time.time() - self._monitor_last_tick) > MONITOR_HEARTBEAT_TIMEOUT_SECONDS:
+                    self.log("监控心跳超时，自动停止监控。", "ERROR")
+                    self.is_monitoring = False
+                    self.emit_state(self.state.with_error("监控心跳超时，已自动停止。"))
+                    return
+                time.sleep(5)
+
+        self._monitor_heartbeat_thread = threading.Thread(target=heartbeat, name="railwatch-monitor-heartbeat", daemon=True)
+        self._monitor_heartbeat_thread.start()
+
+    def _stop_monitor_heartbeat(self) -> None:
+        self._monitor_last_tick = 0.0
+        self._monitor_heartbeat_thread = None
 
     def _ensure_driver(self, test_only: bool = False):
         if self.driver and not test_only:
@@ -691,6 +721,8 @@ class RailWatchBridge:
                 self.log(f"基础反检测脚本注入失败: {exc}", "WARN")
 
     def _run_worker(self, name: str, target: Callable[[], None]) -> None:
+        self.worker_threads = [thread for thread in self.worker_threads if thread.is_alive()]
+
         def run() -> None:
             try:
                 target()
@@ -703,8 +735,10 @@ class RailWatchBridge:
 
     def _handle_notify(self, title: str, message: str) -> None:
         self.log(f"{title}: {message}", "SUCCESS")
+        self.notification_service.notify(title, message, urgent=True)
 
     def _handle_progress(self, payload: dict) -> None:
+        self._monitor_last_tick = time.time()
         rows = payload.get("rows") or []
         self.query_results = rows
         self.emit(
@@ -723,7 +757,16 @@ class RailWatchBridge:
         )
         title = str(payload.get("title", "发现目标车次/席别可用"))
         message = str(payload.get("message", ""))
-        self.emit("notify", {"title": title, "message": message, "hit": ticket_hit_to_payload(hit)})
+        self.emit(
+            "notify",
+            {
+                "title": title,
+                "message": message,
+                "hit": ticket_hit_to_payload(hit),
+                "priority": "urgent",
+            },
+        )
+        self.notification_service.notify(title, message, urgent=True)
         self.emit_state(self.state.with_hit(hit, title))
 
     def _handle_human_action(self, payload: dict) -> None:
@@ -734,8 +777,14 @@ class RailWatchBridge:
         self.log(f"{title}: {message}", "WARN")
         self.emit(
             "humanAction",
-            {"title": title, "message": message, "train_code": str(payload.get("train_code", ""))},
+            {
+                "title": title,
+                "message": message,
+                "train_code": str(payload.get("train_code", "")),
+                "priority": "urgent",
+            },
         )
+        self.notification_service.notify(title, message, urgent=True)
         # 非错误的警示状态，让界面在停止后仍显示「需要人工核验」，而不是普通的「监控已停止」
         self.emit_state(self.state.with_human_action(status))
 
@@ -781,6 +830,8 @@ class RailWatchBridge:
             smart_rate=config["smart_rate"],
             timer_enabled=config["timer_enabled"],
             target_time=config["target_time"],
+            burst_window_seconds=config.get("burst_window_seconds", 45),
+            prewarm_lead_seconds=config.get("prewarm_lead_seconds", 120),
         )
 
 

@@ -17,6 +17,7 @@ export const RAILWATCH_COMMANDS = [
   "clearLog",
   "loadPreferences",
   "savePreferences",
+  "syncServerTime",
 ] as const;
 
 export type RailWatchCommandName = (typeof RAILWATCH_COMMANDS)[number];

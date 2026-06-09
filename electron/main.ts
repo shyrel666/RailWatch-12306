@@ -11,6 +11,7 @@ import {
   recordExportPathGrant,
   type ConfirmationPrompt,
 } from "./ipcSecurity";
+import { registerAlertIpcHandlers, showUrgentAlert, stopUrgentAlertLoop } from "./alertManager";
 import { RailWatchPythonRuntimeClient, RuntimeEvent } from "./pythonRuntime";
 
 let mainWindow: BrowserWindow | null = null;
@@ -74,6 +75,17 @@ function createWindow(): void {
   });
 
   pythonRuntime.on("event", (event: RuntimeEvent) => {
+    if (event.event === "notify" || event.event === "humanAction") {
+      const payload = (event.payload ?? {}) as { priority?: string; title?: string; message?: string; train_code?: string };
+      if (payload.priority === "urgent") {
+        showUrgentAlert(mainWindow, {
+          title: payload.title || "RailWatch 提醒",
+          message: payload.message || "",
+          train_code: payload.train_code,
+          kind: event.event === "humanAction" ? "humanAction" : "notify",
+        });
+      }
+    }
     mainWindow?.webContents.send("railwatch:event", event);
   });
   pythonRuntime.on("stderr", (chunk: string) => {
@@ -83,9 +95,31 @@ function createWindow(): void {
       payload: { time: new Date().toLocaleTimeString("zh-CN", { hour12: false }), level: "WARN", message: chunk.trim() },
     });
   });
+  pythonRuntime.on("runtimeError", (error: Error) => {
+    mainWindow?.webContents.send("railwatch:event", {
+      type: "event",
+      event: "runtimeError",
+      payload: { message: error.message },
+    });
+  });
+  pythonRuntime.on("exit", () => {
+    mainWindow?.webContents.send("railwatch:event", {
+      type: "event",
+      event: "runtimeExit",
+      payload: { message: "Python runtime exited and will be restarted automatically." },
+    });
+  });
+  pythonRuntime.on("restarted", () => {
+    mainWindow?.webContents.send("railwatch:event", {
+      type: "event",
+      event: "runtimeRestarted",
+      payload: { message: "Python runtime restarted." },
+    });
+  });
 }
 
 app.whenReady().then(() => {
+  registerAlertIpcHandlers();
   createWindow();
 
   app.on("activate", () => {
@@ -96,6 +130,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  stopUrgentAlertLoop();
   pythonRuntime.stop();
   if (process.platform !== "darwin") {
     app.quit();
