@@ -100,7 +100,7 @@ export function SidebarNav({
           <div className="runtime-card-head">
             <span className="runtime-card-eyebrow">
               <Clock3 size={14} />
-              当前时间
+              北京时间
             </span>
             <span className="runtime-clock-date">{clock.date}</span>
           </div>

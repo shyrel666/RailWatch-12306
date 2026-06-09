@@ -75,19 +75,22 @@ export function formatRuntimePhase(statusMessage: string, phase: string) {
 
 export function formatStatusClock(date: Date) {
   const pad = (value: number) => String(value).padStart(2, "0");
-  const year = date.getFullYear();
-  const month = pad(date.getMonth() + 1);
-  const day = pad(date.getDate());
-  const hours = pad(date.getHours());
-  const minutes = pad(date.getMinutes());
-  const seconds = pad(date.getSeconds());
+  // Convert to Beijing time (UTC+8)
+  const utcMs = date.getTime() + date.getTimezoneOffset() * 60_000;
+  const beijing = new Date(utcMs + 8 * 3_600_000);
+  const year = beijing.getFullYear();
+  const month = pad(beijing.getMonth() + 1);
+  const day = pad(beijing.getDate());
+  const hours = pad(beijing.getHours());
+  const minutes = pad(beijing.getMinutes());
+  const seconds = pad(beijing.getSeconds());
   const weekdayLabels = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
   return {
     date: `${year}-${month}-${day}`,
     yearMonth: `${year}-${month}`,
     day,
-    weekday: weekdayLabels[date.getDay()],
+    weekday: weekdayLabels[beijing.getDay()],
     hours,
     minutes,
     seconds,

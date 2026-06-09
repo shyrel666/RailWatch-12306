@@ -26,8 +26,9 @@ describe("formatSystemStatus", () => {
     expect(formatRuntimePhase("", "error")).toBe("需处理");
   });
 
-  test("formats a live clock for the sidebar runtime card", () => {
-    const clock = formatStatusClock(new Date("2026-06-07T19:50:46"));
+  test("formats a live clock for the sidebar runtime card in Beijing time", () => {
+    // Use a UTC timestamp; Beijing is UTC+8 so 11:50:46 UTC → 19:50:46 Beijing
+    const clock = formatStatusClock(new Date("2026-06-07T11:50:46Z"));
 
     expect(clock).toEqual({
       date: "2026-06-07",
