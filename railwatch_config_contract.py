@@ -11,6 +11,29 @@ CONFIG_VERSION = 1
 
 DEFAULT_BURST_WINDOW_SECONDS = 45.0
 DEFAULT_PREWARM_LEAD_SECONDS = 120.0
+TRIP_FIELD_KEYS = (
+    "from_station_cn",
+    "to_station_cn",
+    "date",
+    "train_code",
+    "seat_keyword",
+    "interval",
+    "query_timeout",
+    "auto_submit",
+    "seat_prefer",
+    "passenger_count",
+    "prepare_time",
+    "keep_alive",
+    "passengers",
+    "auto_alternate",
+    "alternate_deadline",
+    "date_range",
+    "smart_rate",
+    "timer_enabled",
+    "target_time",
+    "burst_window_seconds",
+    "prewarm_lead_seconds",
+)
 
 # Route A (default): compliance-first strong alerts; no captcha bypass.
 # Route B (opt-in, not implemented): would require explicit user consent for auto-captcha.
@@ -130,8 +153,16 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
 
 def normalize_query_jobs(raw_config: Mapping[str, Any], defaults: Mapping[str, Any]) -> List[Dict[str, Any]]:
     jobs = raw_config.get("query_jobs")
+    top_level_trip = {key: raw_config[key] for key in TRIP_FIELD_KEYS if key in raw_config}
     if isinstance(jobs, list) and jobs:
-        return [_normalize_trip(job, defaults) for job in jobs if isinstance(job, Mapping)]
+        normalized = []
+        for index, job in enumerate(jobs):
+            if not isinstance(job, Mapping):
+                continue
+            job_payload = {**dict(job), **top_level_trip} if index == 0 else job
+            normalized.append(_normalize_trip(job_payload, defaults))
+        if normalized:
+            return normalized
     return [_normalize_trip(raw_config, defaults)]
 
 

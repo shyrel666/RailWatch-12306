@@ -74,7 +74,7 @@ describe("TripSetupPage", () => {
     expect(screen.getByRole("group", { name: "席别" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "优先级" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "保存配置" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "分析" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查询余票" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "开始监控" })).toBeNull();
     expect(screen.queryByRole("button", { name: /高级选项/ })).toBeNull();
     expect(screen.queryByRole("list", { name: "监控流程" })).toBeNull();

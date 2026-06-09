@@ -33,6 +33,33 @@ class RailWatchConfigContractTests(unittest.TestCase):
         self.assertEqual(config["burst_window_seconds"], 60.0)
         self.assertEqual(config["query_jobs"][0]["train_code"], "G101")
 
+    def test_validate_config_prefers_renderer_trip_fields_over_stale_query_jobs(self):
+        config = validate_config(
+            {
+                "from_station_cn": "广州",
+                "to_station_cn": "成都",
+                "date": "2026-06-19",
+                "train_code": "G1015",
+                "seat_keyword": "二等座",
+                "query_jobs": [
+                    {
+                        "from_station_cn": "北京",
+                        "to_station_cn": "上海",
+                        "date": "2026-06-10",
+                        "train_code": "",
+                        "seat_keyword": "",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(config["from_station_cn"], "广州")
+        self.assertEqual(config["to_station_cn"], "成都")
+        self.assertEqual(config["date"], "2026-06-19")
+        self.assertEqual(config["train_code"], "G1015")
+        self.assertEqual(config["seat_keyword"], "二等座")
+        self.assertEqual(config["query_jobs"][0]["from_station_cn"], "广州")
+
     def test_redact_sensitive_text(self):
         self.assertEqual(redact_sensitive_text("张三丰"), "张三***丰")
         self.assertEqual(redact_sensitive_text("ab"), "**")

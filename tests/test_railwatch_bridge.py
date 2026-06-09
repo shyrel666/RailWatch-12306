@@ -105,6 +105,29 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             self.assertEqual(persisted["target_time"], "08:30:00")
             self.assertFalse(persisted["keep_alive"])
 
+    def test_load_config_returns_saved_trip_when_default_query_jobs_exist(self):
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            bridge.save_config(
+                {
+                    "from_station_cn": "广州",
+                    "to_station_cn": "成都",
+                    "date": "2026-06-19",
+                    "train_code": "G1015",
+                    "seat_keyword": "二等座",
+                }
+            )
+
+            loaded = bridge.load_config()
+
+        self.assertEqual(loaded["from_station_cn"], "广州")
+        self.assertEqual(loaded["to_station_cn"], "成都")
+        self.assertEqual(loaded["date"], "2026-06-19")
+        self.assertEqual(loaded["train_code"], "G1015")
+        self.assertEqual(loaded["seat_keyword"], "二等座")
+
     def test_start_monitor_requires_confirmation_when_dangerous_automation_enabled(self):
         from railwatch_bridge import RailWatchBridge
 

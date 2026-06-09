@@ -561,7 +561,7 @@ export function TripSetupPage({
             保存配置
           </Button>
           <Button icon={<BarChart3 size={15} />} loading={busy === "analyzeQuery"} onClick={() => void runCommand("analyzeQuery", { config })}>
-            分析
+            查询余票
           </Button>
         </footer>
       </section>
