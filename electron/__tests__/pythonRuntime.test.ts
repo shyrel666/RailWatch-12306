@@ -1,9 +1,13 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { JsonLineDecoder, PendingRequests, resolveRailWatchAppVersion } from "../pythonRuntime";
 
 describe("resolveRailWatchAppVersion", () => {
   test("reads the app version from the project package.json", () => {
-    expect(resolveRailWatchAppVersion()).toBe("0.1.0");
+    const packageJson = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")) as { version: string };
+
+    expect(resolveRailWatchAppVersion()).toBe(packageJson.version);
   });
 });
 
