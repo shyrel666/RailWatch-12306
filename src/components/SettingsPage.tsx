@@ -57,7 +57,6 @@ export function SettingsPage({
 
   return (
     <div className="sw-workspace">
-      {/* ── Header ── */}
       <header className="sw-header">
         <div className="sw-header-icon">
           <Cpu size={22} />
@@ -71,7 +70,6 @@ export function SettingsPage({
         </span>
       </header>
 
-      {/* ── System Info Strip ── */}
       <section className="sw-info-strip">
         <div className="sw-info-cell">
           <HardDrive size={14} />
@@ -100,7 +98,6 @@ export function SettingsPage({
         </div>
       </section>
 
-      {/* ── Environment Health Grid ── */}
       <section className="sw-section">
         <div className="sw-section-head">
           <h3>
@@ -122,7 +119,6 @@ export function SettingsPage({
         </div>
       </section>
 
-      {/* ── Maintenance Actions ── */}
       <section className="sw-section">
         <div className="sw-section-head">
           <h3>
@@ -174,7 +170,6 @@ export function SettingsPage({
         </div>
       </section>
 
-      {/* ── Danger Zone ── */}
       <section className="sw-section sw-danger-section">
         <div className="sw-section-head">
           <h3 className="sw-danger-title">

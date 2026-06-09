@@ -37,6 +37,11 @@ class RailWatchConfigContractTests(unittest.TestCase):
         self.assertEqual(redact_sensitive_text("张三丰"), "张三***丰")
         self.assertEqual(redact_sensitive_text("ab"), "**")
 
+    def test_parse_passenger_names_accepts_chinese_delimiters(self):
+        from railwatch_config_contract import parse_passenger_names
+
+        self.assertEqual(parse_passenger_names("张三，李四、王五,赵六"), ["张三", "李四", "王五", "赵六"])
+
     def test_redact_proxy_url_masks_credentials(self):
         redacted = redact_proxy_url("http://user:secret@proxy.local:8080")
         self.assertIn("***", redacted)

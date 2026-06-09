@@ -1,22 +1,37 @@
-import { contextBridge, ipcRenderer } from "electron";
-import { isRailWatchCommand } from "./ipcSecurity";
-
-contextBridge.exposeInMainWorld("railwatch", {
-  command: <T>(command: string, payload: Record<string, unknown> = {}) => {
-    if (!isRailWatchCommand(command)) {
-      return Promise.reject(new Error(`Unsupported RailWatch command: ${command}`));
-    }
-    return ipcRenderer.invoke("railwatch:command", command, payload) as Promise<T>;
-  },
-  onEvent: (callback: (event: unknown) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
-    ipcRenderer.on("railwatch:event", listener);
-    return () => ipcRenderer.removeListener("railwatch:event", listener);
-  },
-  showSaveDialog: (defaultPath?: string) => {
-    return ipcRenderer.invoke("railwatch:save-dialog", defaultPath) as Promise<string | null>;
-  },
-  stopUrgentAlert: () => {
-    ipcRenderer.send("railwatch:stop-alert");
-  },
-});
+import { contextBridge, ipcRenderer } from "electron";
+import { isRailWatchCommand } from "./ipcSecurity";
+
+contextBridge.exposeInMainWorld("railwatch", {
+  command: <T>(command: string, payload: Record<string, unknown> = {}) => {
+    if (!isRailWatchCommand(command)) {
+      return Promise.reject(new Error(`Unsupported RailWatch command: ${command}`));
+    }
+    return ipcRenderer.invoke("railwatch:command", command, payload) as Promise<T>;
+  },
+  onEvent: (callback: (event: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("railwatch:event", listener);
+    return () => ipcRenderer.removeListener("railwatch:event", listener);
+  },
+  showSaveDialog: (defaultPath?: string) => {
+    return ipcRenderer.invoke("railwatch:save-dialog", defaultPath) as Promise<string | null>;
+  },
+  stopUrgentAlert: () => {
+    ipcRenderer.send("railwatch:stop-alert");
+  },
+  checkUpdate: (options: { force?: boolean } = {}) => {
+    return ipcRenderer.invoke("railwatch:check-update", options);
+  },
+  getUpdateState: () => {
+    return ipcRenderer.invoke("railwatch:get-update-state");
+  },
+  installUpdate: () => {
+    return ipcRenderer.invoke("railwatch:install-update");
+  },
+  onUpdateState: (callback: (state: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("railwatch:update-state", listener);
+    return () => ipcRenderer.removeListener("railwatch:update-state", listener);
+  },
+});
+

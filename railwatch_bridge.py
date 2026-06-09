@@ -518,7 +518,8 @@ class RailWatchBridge:
                 raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
             with self._driver_lock:
                 driver = self._ensure_driver()
-                self._prewarm_query_page(driver, config)
+                if not config.get("timer_enabled"):
+                    self._prewarm_query_page(driver, config)
                 monitor = TicketMonitor(
                     driver,
                     config,

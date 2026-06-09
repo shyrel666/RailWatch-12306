@@ -1439,6 +1439,31 @@ select {
   background: rgba(36, 120, 200, 0.12);
 }
 
+.statusbar-icon-button.update-pending {
+  border-color: color-mix(in srgb, var(--amber) 42%, var(--border));
+  color: var(--amber);
+}
+
+.statusbar-icon-button.update-ready {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--border));
+  color: var(--green);
+}
+
+.statusbar-icon-button.update-busy {
+  opacity: 0.72;
+  cursor: wait;
+}
+
+@keyframes statusbar-update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.statusbar-icon-button.update-busy svg {
+  animation: statusbar-update-spin 900ms linear infinite;
+}
+
 .event-panel {
   grid-column: 3;
   grid-row: 1;
@@ -2634,6 +2659,63 @@ select {
 .sw-health-dot.err .sw-dot-core {
   background: var(--red);
   box-shadow: 0 0 6px rgba(255, 93, 87, 0.4);
+}
+
+/* ── App Update Panel ── */
+
+.sw-update-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sw-update-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.sw-update-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sw-update-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: rgba(18, 26, 36, 0.45);
+}
+
+.sw-update-badge.current {
+  color: var(--green);
+  border-color: rgba(89, 214, 176, 0.35);
+}
+
+.sw-update-badge.available {
+  color: var(--blue);
+  border-color: rgba(76, 157, 255, 0.35);
+}
+
+.sw-update-badge.error {
+  color: var(--red);
+  border-color: rgba(255, 93, 87, 0.35);
+}
+
+.sw-update-notes {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.sw-update-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 /* ── Action Grid ── */

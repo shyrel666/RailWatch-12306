@@ -330,6 +330,31 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
         self.assertEqual(bridge.driver.keep_alive_calls, 0)
 
+    def test_monitor_worker_skips_late_prewarm_after_timer_wait(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeMonitor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self):
+                return None
+
+        prewarm_calls = []
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.is_monitoring = True
+        bridge.server_time_sync.sync = lambda force=False: 0
+        bridge._wait_for_target_time = lambda config: True
+        bridge._ensure_driver = lambda: object()
+        bridge._prewarm_query_page = lambda driver, config: prewarm_calls.append((driver, config))
+        bridge._start_monitor_heartbeat = lambda: None
+        bridge._stop_monitor_heartbeat = lambda: None
+
+        with patch("railwatch_bridge.CORE_AVAILABLE", True), patch("railwatch_bridge.TicketMonitor", FakeMonitor):
+            bridge._monitor_worker({"timer_enabled": True})
+
+        self.assertEqual(prewarm_calls, [])
+
     def test_get_runtime_info_includes_live_system_facts(self):
         from railwatch_bridge import RailWatchBridge
 

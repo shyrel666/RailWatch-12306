@@ -21,6 +21,7 @@ import type { LucideIcon } from "lucide-react";
 import appIconUrl from "../../assets/images/icon.png";
 import { formatAppVersion, formatDataDirFreeSpace, formatRuntimePhaseDetail, formatRuntimePhaseLabel, formatStatusClock, getRuntimePhaseTone } from "../lib/formatSystemStatus";
 import type { RailWatchPage, RailWatchStatus, RuntimeInfo } from "../types";
+import { UpdateStatusControl } from "./UpdateStatusControl";
 
 export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
   { name: "仪表盘", icon: Gauge },
@@ -280,6 +281,7 @@ function BottomStatusBar({
         </span>
       </div>
       <div className="statusbar-group right">
+        <UpdateStatusControl appVersion={runtime.app_version} />
         <Tooltip title={darkMode ? "切换到明亮主题" : "切换到暗黑主题"}>
           <button
             aria-label={darkMode ? "切换到明亮主题" : "切换到暗黑主题"}

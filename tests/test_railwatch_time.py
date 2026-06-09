@@ -23,6 +23,13 @@ class ServerTimeSyncTests(unittest.TestCase):
             with patch.object(sync, "server_now", return_value=reference):
                 self.assertTrue(sync.is_in_burst_window("08:30:00", prepare_seconds=2, burst_seconds=30))
 
+    def test_is_in_burst_window_remains_active_after_target_second(self):
+        sync = ServerTimeSync()
+        reference = datetime(2026, 6, 9, 8, 30, 1)
+        with patch.object(sync, "server_timestamp", return_value=reference.timestamp()):
+            with patch.object(sync, "server_now", return_value=reference):
+                self.assertTrue(sync.is_in_burst_window("08:30:00", prepare_seconds=2, burst_seconds=30))
+
     def test_is_prewarm_window_before_burst(self):
         sync = ServerTimeSync()
         reference = datetime(2026, 6, 9, 8, 28, 30)

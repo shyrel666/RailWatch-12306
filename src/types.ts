@@ -147,3 +147,54 @@ export type ConfirmationRequest = {
   title: string;
   message: string;
 };
+
+export type UpdateAsset = {
+  name: string;
+  url: string;
+  size: number;
+  sha256?: string;
+};
+
+export type UpdateCheckSuccess = {
+  ok: true;
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseName: string;
+  releaseNotes: string;
+  publishedAt: string;
+  releaseUrl: string;
+  assets: UpdateAsset[];
+  cached?: boolean;
+  stale?: boolean;
+  warning?: string;
+  source?: "api" | "manifest" | "redirect" | "cache" | "stale-cache" | "updater";
+};
+
+export type UpdateCheckFailure = {
+  ok: false;
+  currentVersion: string;
+  error: string;
+  code: "network" | "parse" | "no-assets" | "rate-limit" | "unknown";
+};
+
+export type UpdateCheckResult = UpdateCheckSuccess | UpdateCheckFailure;
+
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "not-available"
+  | "error";
+
+export type UpdateRuntimeState = {
+  phase: UpdatePhase;
+  currentVersion: string;
+  latestVersion?: string;
+  releaseNotes?: string;
+  downloadPercent?: number;
+  error?: string;
+  result?: UpdateCheckResult;
+};

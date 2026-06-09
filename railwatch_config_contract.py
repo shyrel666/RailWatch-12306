@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -179,6 +180,10 @@ def merge_notification_settings(raw: Optional[Mapping[str, Any]] = None) -> Dict
     merged["email_enabled"] = _to_bool(merged.get("email_enabled"))
     merged["wecom_webhook_enabled"] = _to_bool(merged.get("wecom_webhook_enabled"))
     return merged
+
+
+def parse_passenger_names(value: str) -> List[str]:
+    return [name.strip() for name in re.split(r"[,，、]+", str(value or "")) if name.strip()]
 
 
 def redact_sensitive_text(value: str, keep_start: int = 2, keep_end: int = 1) -> str:

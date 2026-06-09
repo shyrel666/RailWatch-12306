@@ -100,10 +100,15 @@ class ServerTimeSync:
         burst_seconds: float = DEFAULT_BURST_WINDOW_SECONDS,
     ) -> bool:
         try:
-            target = self.parse_target_datetime(target_time)
+            now_ts = self.server_timestamp()
+            reference = datetime.fromtimestamp(now_ts)
+            parts = str(target_time or "00:00:00").strip().split(":")
+            if len(parts) != 3:
+                raise ValueError(f"目标时间格式无效：{target_time}")
+            hour, minute, second = (int(part) for part in parts)
+            target = reference.replace(hour=hour, minute=minute, second=second, microsecond=0)
         except ValueError:
             return False
-        now_ts = self.server_timestamp()
         window_start = target.timestamp() - max(0.0, prepare_seconds)
         window_end = target.timestamp() + max(0.0, burst_seconds)
         return window_start <= now_ts <= window_end

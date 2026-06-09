@@ -743,8 +743,9 @@ class TicketMonitor(BaseHandler):
                 except Exception: pass
 
         # 2) 决定是刷新页面还是直接查询
-        # 爆发期第一轮必刷，之后每 5 轮深度刷新一次
-        should_refresh = (loop_count == 1 or loop_count % 5 == 0)
+        # 定时冲刺已在等待阶段预热页面，第一轮直接查询以避免错过准点。
+        timed_burst = bool(self.cfg.get("timer_enabled") and is_burst_mode)
+        should_refresh = (loop_count % 5 == 0) if timed_burst else (loop_count == 1 or loop_count % 5 == 0)
         
         if should_refresh:
             if is_burst_mode:

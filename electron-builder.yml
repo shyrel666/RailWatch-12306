@@ -1,5 +1,9 @@
 appId: org.railwatch.railwatch12306
 productName: RailWatch 12306
+publish:
+  provider: github
+  owner: railwatch
+  repo: railwatch-12306
 directories:
   output: release
 files:

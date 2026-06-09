@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { railwatchApi } from "../lib/railwatchApi";
 import { defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
 import { SettingsPage } from "./SettingsPage";
 import type { CommandRunner } from "./componentTypes";
@@ -19,7 +21,14 @@ function resetStore() {
 }
 
 describe("SettingsPage", () => {
-  beforeEach(resetStore);
+  beforeEach(() => {
+    resetStore();
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
 
   test("shows local runtime data and separated maintenance actions", () => {
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
@@ -31,6 +40,8 @@ describe("SettingsPage", () => {
     expect(screen.getByText("C:/RailWatch/data")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "启动步骤" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "高风险操作" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "应用更新" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /检查更新/ })).toBeNull();
     expect(screen.getByRole("button", { name: /清除数据/ })).toBeTruthy();
 
     const checkEnvironment = screen.getByRole("button", { name: /检查环境/ });

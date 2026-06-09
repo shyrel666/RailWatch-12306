@@ -15,7 +15,7 @@ from selenium.common.exceptions import (
   TimeoutException,
 )
 
-from railwatch_config_contract import redact_sensitive_text
+from railwatch_config_contract import parse_passenger_names, redact_sensitive_text
 from railwatch_selectors import CONFIRM_PURCHASE_ID, PASSENGER_CHECKBOX_SELECTORS, PASSENGER_LABEL_SELECTORS, SUBMIT_ORDER_ID
 
 
@@ -77,7 +77,7 @@ class SubmitFlow:
       except TimeoutException:
         self.log("⚠️ 等待乘车人页面超时，尝试继续...")
 
-      target_passengers = [p.strip() for p in self.cfg.get("passengers", "").split(",") if p.strip()]
+      target_passengers = parse_passenger_names(self.cfg.get("passengers", ""))
       target_count = self.cfg.get("passenger_count", 1)
       if target_passengers:
         redacted = ", ".join(redact_sensitive_text(name) for name in target_passengers)

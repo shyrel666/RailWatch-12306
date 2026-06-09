@@ -3,6 +3,9 @@ name: Package Windows
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   package:
     name: Build Windows Electron package
@@ -35,6 +38,12 @@ jobs:
       - name: Build Electron installer
         run: npm run package
 
+      - name: Set release version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          "PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
@@ -42,6 +51,28 @@ jobs:
           path: |
             release/*.exe
             release/*.blockmap
+            release/latest.yml
+
+      - name: Publish updater assets to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "v$env:PACKAGE_VERSION"
+          $assets = @()
+          $assets += Get-ChildItem -Path release -Filter "*.exe" -File | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem -Path release -Filter "*.blockmap" -File | ForEach-Object { $_.FullName }
+          $assets += (Resolve-Path "release/latest.yml" -ErrorAction Stop).Path
+
+          if ($assets.Count -eq 0) {
+            throw "No release assets found."
+          }
+
+          if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
+            gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --title "RailWatch 12306 $tag" --notes "Windows installer build for RailWatch 12306 $tag." --latest
+          }
 
       - name: Upload unpacked app
         uses: actions/upload-artifact@v4

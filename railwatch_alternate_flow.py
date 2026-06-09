@@ -15,6 +15,7 @@ from railwatch_selectors import (
   CONFIRM_ALTERNATE_SELECTORS,
   SUBMIT_ALTERNATE_SELECTORS,
 )
+from railwatch_config_contract import parse_passenger_names
 from railwatch_submit_flow import SubmitFlow
 from railwatch_verification import VerificationDetector
 
@@ -104,7 +105,7 @@ class AlternateFlow:
         self._signal_human_action(train_code, "候补需要人工核验（人脸/验证码/滑块），请在浏览器中完成。")
         return "human"
 
-      target_passengers = [p.strip() for p in self.cfg.get("passengers", "").split(",") if p.strip()]
+      target_passengers = parse_passenger_names(self.cfg.get("passengers", ""))
       try:
         target_count = max(1, int(self.cfg.get("passenger_count", 1) or 1))
       except (TypeError, ValueError):

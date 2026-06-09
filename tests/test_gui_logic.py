@@ -301,6 +301,35 @@ class TicketMonitorLogicTests(unittest.TestCase):
 
         self.assertEqual(observed_timeout, [23])
 
+    def test_timed_burst_first_loop_queries_without_refreshing(self):
+        class Driver:
+            def __init__(self):
+                self.refresh_count = 0
+
+            def refresh(self):
+                self.refresh_count += 1
+
+        class ServerTime:
+            def is_in_burst_window(self, target_time, prepare_seconds, burst_seconds):
+                return True
+
+        driver = Driver()
+        monitor = TicketMonitor(
+            driver,
+            {"interval": 1, "query_timeout": 1, "timer_enabled": True, "target_time": "08:30:00"},
+            log_callback=lambda msg: None,
+            server_time_sync=ServerTime(),
+        )
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
+        monitor._find_hit_row = lambda indices: None
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: None):
+            result = monitor._run_single_loop(1, 1)
+
+        self.assertFalse(result)
+        self.assertEqual(driver.refresh_count, 0)
+
     def test_monitor_emits_progress_rows_and_structured_hit(self):
         progress_events = []
         hit_events = []
