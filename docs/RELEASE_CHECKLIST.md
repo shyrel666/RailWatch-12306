@@ -16,10 +16,16 @@ python -m unittest discover -s tests -p "test_*.py"
 python -m py_compile railwatch_state.py gui_12306_0.py anti_detect.py chromedriver_manager.py railwatch_preferences.py railwatch_bridge.py railwatch_runtime.py
 npm run test
 npm run build
-npm run package
+.\package-windows.cmd 0.2.0
 ```
 
-Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
+Use `.\package-windows.cmd 0.2.0 --install-deps` only when Node or Python packaging dependencies need to be reinstalled. Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
+
+Upload only matching assets from the same build to the GitHub Release:
+
+- `release/*.exe`
+- `release/*.blockmap`
+- `release/latest.yml`
 
 ## Packaged App Smoke
 

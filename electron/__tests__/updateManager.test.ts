@@ -112,4 +112,27 @@ describe("updateManager", () => {
       expect(result.error).toContain("开发环境");
     }
   });
+
+  test("returns a concise message when the updater source returns 404", async () => {
+    const updater = createMockUpdater();
+    updater.checkForUpdates = vi.fn(async () => {
+      throw new Error(
+        '404 "method: GET url: https://github.com/railwatch/railwatch-12306/releases.atom\\n\\nPlease double check that your authentication token is correct. Due to security reasons, actual status maybe not reported, but 404."',
+      );
+    });
+    const manager = createUpdateManager({
+      currentVersion: "0.1.0",
+      updater,
+      enabled: true,
+    });
+
+    const result = await manager.checkForUpdates({ force: true });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("无法访问更新源，请确认 GitHub Release 仓库地址和发布资产是否正确。");
+      expect(result.error).not.toContain("releases.atom");
+    }
+    expect(manager.getState().error).toBe("无法访问更新源，请确认 GitHub Release 仓库地址和发布资产是否正确。");
+  });
 });

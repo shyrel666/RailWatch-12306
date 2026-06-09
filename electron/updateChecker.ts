@@ -583,8 +583,8 @@ export async function downloadUpdateAsset(
 }
 
 export function createDefaultUpdateConfig(currentVersion: string, userDataPath: string): UpdateCheckerConfig {
-  const owner = "railwatch";
-  const repo = "railwatch-12306";
+  const owner = "shyrel666";
+  const repo = "RailWatch-12306";
   const githubToken = process.env.RAILWATCH_GITHUB_TOKEN || process.env.GITHUB_TOKEN || undefined;
 
   return {

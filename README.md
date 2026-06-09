@@ -70,15 +70,23 @@ python -m py_compile railwatch_state.py gui_12306_0.py anti_detect.py chromedriv
 ## Packaging
 
 ```bash
-npm run package
+.\package-windows.cmd 0.2.0
 ```
 
-该命令会执行：
+该一键脚本会设置 `package.json` / `package-lock.json` 版本号，复用已安装依赖，清理旧的 `release/` 输出，然后执行底层 `npm run package`。如果需要强制重装 Node 和 Python 打包依赖，使用：
+
+```bash
+.\package-windows.cmd 0.2.0 --install-deps
+```
+
+底层打包链路会执行：
 
 - 构建 Electron main/preload
 - 构建 React/Vite renderer
 - 使用 `RailWatch_runtime.spec` 打包 Python runtime
 - 使用 `electron-builder.yml` 生成 Windows 安装包和 `release/win-unpacked`
+
+发布 GitHub Release 时上传同一次构建生成的 `release/*.exe`、`release/*.blockmap` 和 `release/latest.yml`。
 
 发布前请按 [docs/release-qa.md](docs/release-qa.md) 做手工 QA。
 

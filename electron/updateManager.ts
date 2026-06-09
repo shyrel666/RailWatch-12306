@@ -77,6 +77,17 @@ function buildFailure(currentVersion: string, error: string, code: UpdateCheckFa
   return { ok: false, currentVersion, error, code };
 }
 
+function formatUpdateError(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (!message) {
+    return "检查更新失败。";
+  }
+  if (/404/i.test(message) && /releases\.atom|github\.com/i.test(message)) {
+    return "无法访问更新源，请确认 GitHub Release 仓库地址和发布资产是否正确。";
+  }
+  return message;
+}
+
 export function createUpdateManager(options: UpdateManagerOptions) {
   const { currentVersion, updater, enabled, onStateChange, onUpdateDownloaded } = options;
   let state: UpdateRuntimeState = { phase: "idle", currentVersion };
@@ -141,7 +152,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
   });
 
   updater.on("error", (error: Error) => {
-    const message = error?.message || "检查更新失败。";
+    const message = formatUpdateError(error);
     publish({
       ...state,
       phase: "error",
@@ -168,7 +179,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       } catch (error) {
         const failure = buildFailure(
           currentVersion,
-          error instanceof Error ? error.message : "检查更新失败。",
+          formatUpdateError(error),
           "network",
         );
         publish({ ...state, phase: "error", error: failure.error, result: failure });

@@ -6,6 +6,7 @@ import {
   buildFallbackAssets,
   checkForUpdates,
   compareVersions,
+  createDefaultUpdateConfig,
   downloadUpdateAsset,
   fetchLatestVersionViaRedirect,
   isAllowedDownloadUrl,
@@ -57,6 +58,14 @@ describe("updateChecker", () => {
     expect(compareVersions("1.2.0", "1.1.9")).toBe(1);
     expect(compareVersions("1.0.0-beta", "1.0.0")).toBe(-1);
     expect(compareVersions("v1.0.0", "1.0.0")).toBe(0);
+  });
+
+  test("uses the public GitHub Release repository in default config", () => {
+    const config = createDefaultUpdateConfig("0.1.0", tempDir);
+
+    expect(config.owner).toBe("shyrel666");
+    expect(config.repo).toBe("RailWatch-12306");
+    expect(config.manifestUrl).toContain("shyrel666/RailWatch-12306");
   });
 
   test("parses GitHub release payloads and filters unsafe download URLs", () => {
