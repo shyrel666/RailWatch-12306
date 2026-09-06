@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>RailWatch local query fixture</title>
+<input id="fromStationText"><input id="fromStation" type="hidden">
+<input id="toStationText"><input id="toStation" type="hidden"><input id="train_date">
+<button id="query_ticket">查询</button>
+<table><tbody id="queryLeftTable"><tr id="ticket_G101"><td>G101 二等座 有</td></tr></tbody></table>
+<div id="dialogs"></div>
+<script>
+window.fixture = {
+  mode: 'replace', delay: 50, clicks: 0, confirms: 0,
+  show(text) {
+    document.querySelector('#dialogs').innerHTML = '<div class="modal"><span></span><button>确认</button></div>';
+    document.querySelector('.modal span').textContent = text;
+    document.querySelector('.modal button').onclick = () => { this.confirms++; document.querySelector('#dialogs').innerHTML = ''; };
+  }
+};
+document.querySelector('#query_ticket').onclick = () => {
+  fixture.clicks++;
+  if (fixture.mode === 'unchanged') return;
+  if (fixture.mode === 'dialog') { fixture.show('未到起售时间'); return; }
+  const button = document.querySelector('#query_ticket');
+  button.disabled = true;
+  setTimeout(() => {
+    if (fixture.mode === 'empty') document.querySelector('#queryLeftTable').innerHTML = '<tr><td>没有符合条件的车次</td></tr>';
+    else document.querySelector('#queryLeftTable').innerHTML = '<tr id="ticket_G101"><td>G101 二等座 有</td></tr>';
+    button.disabled = false;
+  }, fixture.delay);
+};
+</script></html>
