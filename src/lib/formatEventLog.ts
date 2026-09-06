@@ -143,6 +143,9 @@ export function countEventsByFilter(logs: LogEntry[], filter: string) {
   return logs.filter((entry) => levels.includes(entry.level)).length;
 }
 
+const entryIds = new WeakMap<object, number>();
+let fallbackEntryId = -1;
+
 export function presentEventLogs(logs: LogEntry[], filter: string): PresentedEvent[] {
   const levels = filterLevels[filter];
   const filtered = levels ? logs.filter((entry) => levels.includes(entry.level)) : logs;
@@ -164,8 +167,10 @@ export function presentEventLogs(logs: LogEntry[], filter: string): PresentedEve
     }
 
     const { title, detail } = splitMessage(entry.message);
+    if (entry.id === undefined && !entryIds.has(entry)) entryIds.set(entry, fallbackEntryId--);
     presented.push({
       ...entry,
+      id: entry.id ?? entryIds.get(entry),
       tone: meta.tone,
       label: meta.label,
       title,

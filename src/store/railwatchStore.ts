@@ -85,6 +85,8 @@ export type RailWatchStore = {
   config: RailWatchConfig;
   logs: LogEntry[];
   pausedLogs: LogEntry[];
+  droppedLogs: number;
+  retiredRuns: string[];
   results: QueryResultRow[];
   monitorLoops: number;
   hits: TicketHit[];
@@ -118,13 +120,18 @@ const logLevelByFilter: Record<string, string | string[]> = {
   成功: "SUCCESS",
 };
 
+export const MAX_LOG_ENTRIES = 1000;
+
 export function createRailWatchStore() {
+  let nextLogId = 0;
   return createStore<RailWatchStore>((set, get) => ({
     runtime: defaultRuntimeInfo,
     status: defaultStatus,
     config: defaultConfig,
     logs: [],
     pausedLogs: [],
+    droppedLogs: 0,
+    retiredRuns: [],
     results: [],
     monitorLoops: 0,
     hits: [],
@@ -144,25 +151,32 @@ export function createRailWatchStore() {
       set({ runtime: { ...get().runtime, ...patch } });
     },
     applyState: (status) => {
-      set({
-        status,
-        hits: status.hits,
+      const incoming = status.task?.run_id;
+      const current = get().status.task?.run_id;
+      if (incoming && get().retiredRuns.includes(incoming)) return;
+      if (incoming && incoming === current && (status.task?.sequence ?? 0) < (get().status.task?.sequence ?? 0)) return;
+      const changed = Boolean(incoming && incoming !== current);
+      set({ status, hits: status.hits,
+        ...(changed ? { monitorLoops: 0, results: [], lastHumanAction: null,
+          retiredRuns: current ? [...get().retiredRuns, current].slice(-1000) : get().retiredRuns } : {}),
       });
     },
     applyLog: (entry) => {
-      if (get().logPaused) {
-        set({ pausedLogs: [...get().pausedLogs, entry] });
-        return;
-      }
-      set({ logs: [...get().logs, entry] });
+      if (entry.run_id && entry.run_id !== get().status.task?.run_id) return;
+      const key = get().logPaused ? "pausedLogs" : "logs";
+      const entries = [...get()[key], { ...entry, id: ++nextLogId }];
+      set({ [key]: entries.slice(-MAX_LOG_ENTRIES), droppedLogs: get().droppedLogs + Math.max(0, entries.length - MAX_LOG_ENTRIES) });
     },
     applyResults: (payload) => {
+      if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
       set({ results: payload.rows, activePage: "购票监控" });
     },
     applyMonitorTick: (payload) => {
+      if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
       set({ results: payload.rows, monitorLoops: payload.loop });
     },
     applyNotify: (payload) => {
+      if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
       const nextHits = payload.hit ? [...get().hits, payload.hit] : get().hits;
       set({
         notifications: [...get().notifications, payload],
@@ -170,6 +184,7 @@ export function createRailWatchStore() {
       });
     },
     applyHumanAction: (payload) => {
+      if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
       set({ lastHumanAction: payload });
     },
     clearHumanAction: () => {
@@ -183,7 +198,8 @@ export function createRailWatchStore() {
     },
     setLogPaused: (paused) => {
       if (!paused && get().pausedLogs.length > 0) {
-        set({ logs: [...get().logs, ...get().pausedLogs], pausedLogs: [], logPaused: false });
+        const combined = [...get().logs, ...get().pausedLogs];
+        set({ logs: combined.slice(-MAX_LOG_ENTRIES), droppedLogs: get().droppedLogs + Math.max(0, combined.length - MAX_LOG_ENTRIES), pausedLogs: [], logPaused: false });
         return;
       }
       set({ logPaused: paused });
@@ -192,7 +208,7 @@ export function createRailWatchStore() {
       set({ eventPanelVisible: visible });
     },
     clearLogs: () => {
-      set({ logs: [], pausedLogs: [] });
+      set({ logs: [], pausedLogs: [], droppedLogs: 0 });
     },
     errorCount: () => get().logs.filter((entry) => entry.level === "ERROR").length,
     filteredLogs: (filter) => {

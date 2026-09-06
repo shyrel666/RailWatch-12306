@@ -58,7 +58,7 @@ describe("railwatchStore", () => {
 
     expect(store.getState().logs).toHaveLength(2);
     expect(store.getState().errorCount()).toBe(1);
-    expect(store.getState().filteredLogs("错误")).toEqual([
+    expect(store.getState().filteredLogs("错误")).toMatchObject([
       { time: "09:01:00", level: "ERROR", message: "登录已过期" },
     ]);
   });

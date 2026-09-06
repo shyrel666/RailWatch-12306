@@ -54,6 +54,8 @@ export type TicketHit = {
 };
 
 export type RailWatchStatus = {
+  task?: { run_id?: string; status?: string; sequence?: number; started_at?: number; target_at?: number | null; next_query_at?: number | null };
+  run_id?: string;
   phase: string;
   environment_ready: boolean;
   login_ready: boolean;
@@ -70,6 +72,7 @@ export type RailWatchStatus = {
 };
 
 export type RuntimeInfo = {
+  date_policy?: { presale_window_days: number; timezone: string };
   app_display_name: string;
   app_version: string;
   app_slug: string;
@@ -98,27 +101,39 @@ export type RuntimeInfo = {
 };
 
 export type LogEntry = {
+  id?: number;
+  run_id?: string;
   time: string;
   level: string;
   message: string;
 };
 
 export type QueryResultRow = {
+  date?: string;
   train: string;
   raw: string;
 };
 
 export type ResultsPayload = {
+  run_id?: string;
+  query_id?: string;
+  fetched_at?: number;
+  conditions?: unknown;
   rows: QueryResultRow[];
 };
 
 export type MonitorTickPayload = {
+  run_id?: string;
+  query_id?: string;
+  fetched_at?: number;
+  conditions?: unknown;
   loop: number;
   date: string;
   rows: QueryResultRow[];
 };
 
 export type NotifyPayload = {
+  run_id?: string;
   title: string;
   message: string;
   hit?: TicketHit;
@@ -126,6 +141,7 @@ export type NotifyPayload = {
 };
 
 export type HumanActionPayload = {
+  run_id?: string;
   title: string;
   message: string;
   train_code?: string;
