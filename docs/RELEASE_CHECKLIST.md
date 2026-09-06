@@ -16,6 +16,7 @@ python -m unittest discover -s tests -p "test_*.py"
 python -m py_compile railwatch_state.py gui_12306_0.py anti_detect.py chromedriver_manager.py railwatch_preferences.py railwatch_bridge.py railwatch_runtime.py
 npm run test
 npm run build
+python -X utf8 tests/browser_smoke.py
 .\package-windows.cmd 0.2.0
 ```
 
@@ -29,6 +30,7 @@ Upload only matching assets from the same build to the GitHub Release:
 
 ## Packaged App Smoke
 
+- Run `python -X utf8 tests/packaged_smoke.py` with matching ChromeDriver installed for the browser fixture suite.
 - Start `release/win-unpacked/RailWatch 12306.exe`.
 - Confirm the Electron window loads `RailWatch 12306`.
 - Confirm the renderer shows the four pages: `Dashboard`, `Trip Setup`, `Monitor`, `Settings`.
