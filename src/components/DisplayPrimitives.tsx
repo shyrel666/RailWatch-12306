@@ -1,12 +1,24 @@
 import type { ReactNode } from "react";
 import { Switch } from "antd";
-import { CheckCircle2, CircleDot, Clock3 } from "lucide-react";
+import { CheckCircle2, CircleDot, Clock3, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 export type Tone = "amber" | "blue" | "green" | "indigo" | "red" | "slate" | "teal";
 
 export function StatusBadge({ children, tone = "slate" }: { children: ReactNode; tone?: Tone }) {
   return <span className={`status-badge ${tone}`}>{children}</span>;
+}
+
+export function TripDateWarning({ message }: { message: string | null }) {
+  if (!message) {
+    return null;
+  }
+  return (
+    <span className="trip-date-warning" role="status" title={message}>
+      <TriangleAlert aria-hidden size={12} />
+      {message}
+    </span>
+  );
 }
 
 export function MetricCard({

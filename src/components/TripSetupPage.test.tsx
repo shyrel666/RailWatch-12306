@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { isoDaysFromToday, todayIso } from "../lib/tripDate";
 import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
 import { TripSetupPage } from "./TripSetupPage";
 import type { CommandRunner, ConfirmDialog } from "./componentTypes";
@@ -112,5 +113,59 @@ describe("TripSetupPage", () => {
     expect(railwatchStore.getState().config.date_range).toBe("±2天");
     expect(railwatchStore.getState().config.query_timeout).toBe(41);
     expect(screen.queryByRole("button", { name: "自定义" })).toBeNull();
+  });
+
+  test("date picker cannot start before today and shows no hint for a valid date", () => {
+    railwatchStore.setState({ config: { ...defaultConfig, date: isoDaysFromToday(3) } });
+
+    render(<TripSetupPage busy={null} confirm={(async () => false) as ConfirmDialog} runCommand={(async () => undefined) as CommandRunner} />);
+
+    expect(screen.getByLabelText("出发日期").getAttribute("min")).toBe(todayIso());
+    expect(screen.queryByText(/出发日期已过去/)).toBeNull();
+    expect(screen.queryByText(/预售期/)).toBeNull();
+  });
+
+  test("saving an expired departure date requires confirmation and respects a decline", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.fn(async () => false) as ConfirmDialog;
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ config: { ...defaultConfig, date: "2020-01-01" } });
+
+    render(<TripSetupPage busy={null} confirm={confirm} runCommand={runCommand} />);
+
+    expect(screen.getByText(/出发日期已过去/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(confirm).toHaveBeenCalledWith("出发日期已过期", expect.stringContaining("2020-01-01"));
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  test("saving an expired departure date proceeds after explicit confirmation", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.fn(async () => true) as ConfirmDialog;
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ config: { ...defaultConfig, date: "2020-01-01" } });
+
+    render(<TripSetupPage busy={null} confirm={confirm} runCommand={runCommand} />);
+
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(runCommand).toHaveBeenCalledWith("saveConfig", { config: expect.objectContaining({ date: "2020-01-01" }) }, "设置已保存");
+  });
+
+  test("saving a valid date does not trigger the expired-date confirmation", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.fn(async () => false) as ConfirmDialog;
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ config: { ...defaultConfig, date: isoDaysFromToday(3) } });
+
+    render(<TripSetupPage busy={null} confirm={confirm} runCommand={runCommand} />);
+
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(runCommand).toHaveBeenCalledWith("saveConfig", { config: expect.anything() }, "设置已保存");
   });
 });

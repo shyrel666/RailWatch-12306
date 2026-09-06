@@ -2917,6 +2917,27 @@ select {
   font-size: 12px;
 }
 
+.trip-date-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 2px 9px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: help;
+  white-space: nowrap;
+}
+
+.trip-date-hint {
+  margin-top: 6px;
+  color: var(--amber);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .metric-card {
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr);

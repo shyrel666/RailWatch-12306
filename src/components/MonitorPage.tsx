@@ -1,5 +1,5 @@
 import { Alert, Button, Switch } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   Bell,
@@ -15,15 +15,10 @@ import {
   TrainFront,
 } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
+import { displayedConfig, taskLabels } from "../lib/taskDisplay";
+import { executionReference, getDateRangeStatus, useBeijingToday } from "../lib/tripDate";
 import type { QueryResultRow, TicketHit } from "../types";
 import type { CommandRunner } from "./componentTypes";
-
-function normalizeStation(station: string, fallback: string) {
-  if (!station) return fallback;
-  if (station === "北京") return "北京南";
-  if (station === "上海") return "上海虹桥";
-  return station;
-}
 
 function formatTripDate(date: string) {
   if (!date) return "—";
@@ -33,48 +28,10 @@ function formatTripDate(date: string) {
   return `${parsed.getMonth() + 1}月${parsed.getDate()}日 ${weekday}`;
 }
 
-function useElapsedTime(monitoring: boolean) {
-  const [elapsed, setElapsed] = useState("00:00:00");
-  const startRef = useRef<number | null>(null);
-  const rafRef = useRef<number>(0);
-
-  useEffect(() => {
-    if (monitoring) {
-      startRef.current = Date.now();
-      const tick = () => {
-        if (startRef.current) {
-          const diff = Math.floor((Date.now() - startRef.current) / 1000);
-          const h = String(Math.floor(diff / 3600)).padStart(2, "0");
-          const m = String(Math.floor((diff % 3600) / 60)).padStart(2, "0");
-          const s = String(diff % 60).padStart(2, "0");
-          setElapsed(`${h}:${m}:${s}`);
-        }
-        rafRef.current = requestAnimationFrame(tick);
-      };
-      rafRef.current = requestAnimationFrame(tick);
-      return () => cancelAnimationFrame(rafRef.current);
-    }
-    setElapsed("00:00:00");
-    startRef.current = null;
-  }, [monitoring]);
-
-  return elapsed;
-}
-
-function useCountdown(interval: number, monitoring: boolean) {
-  const [countdown, setCountdown] = useState(interval);
-  useEffect(() => {
-    if (!monitoring) {
-      setCountdown(interval);
-      return;
-    }
-    setCountdown(interval);
-    const id = setInterval(() => {
-      setCountdown((prev) => (prev <= 1 ? interval : prev - 1));
-    }, 1000);
-    return () => clearInterval(id);
-  }, [interval, monitoring]);
-  return countdown;
+function useClock() {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
+  return now;
 }
 
 function ResultRow({ row, index }: { row: QueryResultRow; index: number }) {
@@ -119,7 +76,7 @@ function HitCard({ hit }: { hit: TicketHit }) {
 }
 
 export function MonitorPage({ busy, runCommand }: { busy: string | null; runCommand: CommandRunner }) {
-  const config = useRailWatchStore((state) => state.config);
+  const draftConfig = useRailWatchStore((state) => state.config);
   const status = useRailWatchStore((state) => state.status);
   const results = useRailWatchStore((state) => state.results);
   const hits = useRailWatchStore((state) => state.hits);
@@ -128,17 +85,23 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
   const lastHumanAction = useRailWatchStore((state) => state.lastHumanAction);
   const clearHumanAction = useRailWatchStore((state) => state.clearHumanAction);
 
-  const elapsed = useElapsedTime(status.monitoring);
-  const countdown = useCountdown(config.interval, status.monitoring);
-  const fromStation = normalizeStation(config.from_station_cn, "北京南");
-  const toStation = normalizeStation(config.to_station_cn, "上海虹桥");
+  const config = displayedConfig(draftConfig, status);
+  const now = useClock();
+  const today = useBeijingToday();
+  const windowDays = useRailWatchStore((state) => state.runtime.date_policy?.presale_window_days);
+  const dateRange = getDateRangeStatus(draftConfig.date, draftConfig.date_range, executionReference(draftConfig, today), windowDays);
+  const seconds = status.task?.started_at ? Math.max(0, Math.floor(now / 1000 - status.task.started_at)) : 0;
+  const elapsed = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map(value => String(value).padStart(2, "0")).join(":");
+  const countdown = status.task?.next_query_at ? `${Math.max(0, Math.ceil(status.task.next_query_at - now / 1000))}s` : (status.task?.status === "querying" ? "查询中" : "—");
+  const fromStation = config.from_station_cn || "未设置";
+  const toStation = config.to_station_cn || "未设置";
   const tripDate = formatTripDate(config.date);
   const trainPref = config.train_code || "不限";
-  const seatPref = config.seat_keyword || config.seat_prefer || "不限";
-  const autoSubmitEnabled = status.auto_submit_enabled || config.auto_submit;
-  const autoAlternateEnabled = status.auto_alternate_enabled || config.auto_alternate;
+  const seatPref = config.seat_keyword || (config.seat_prefer === "无偏好" ? "" : config.seat_prefer) || "不限";
+  const autoSubmitEnabled = config.auto_submit;
+  const autoAlternateEnabled = config.auto_alternate;
 
-  const canStart = status.query_ready && !status.monitoring;
+  const canStart = Boolean(draftConfig.from_station_cn.trim() && draftConfig.to_station_cn.trim() && dateRange.valid.length && !status.monitoring);
   const canStop = status.monitoring;
 
   return (
@@ -152,8 +115,8 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
           {status.monitoring ? <span className="st-pulse-ring" /> : null}
         </div>
         <div className="st-signal-copy">
-          <h2>{status.monitoring ? "监控运行中" : status.query_ready ? "监控就绪" : "等待就绪"}</h2>
-          <p>{status.monitoring ? `正在刷新查询 · 间隔 ${config.interval}s` : status.query_ready ? "行程已配置，可启动监控" : "请先完成行程设置"}</p>
+          <h2>{taskLabels[status.task?.status || ""] || (canStart ? "监控就绪" : "等待就绪")}</h2>
+          <p>{status.monitoring ? status.status_message : canStart ? "行程已配置，可启动监控" : "请配置有效的行程日期"}</p>
         </div>
         <div className="st-command-actions">
           <Button
@@ -161,7 +124,7 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
             disabled={!canStart}
             icon={<Play size={15} />}
             loading={busy === "startMonitor"}
-            onClick={() => void runCommand("startMonitor", { config })}
+            onClick={() => void runCommand("startMonitor", { config: draftConfig })}
             type="primary"
           >
             启动监控
@@ -179,6 +142,7 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
         </div>
       </section>
 
+      {status.monitoring ? <p role="status">运行中使用启动时的行程配置；表单修改将在下次运行生效。</p> : null}
       {/* ── Metrics Signal Strip ── */}
       <section className="st-metrics-strip">
         <div className="st-metric">
@@ -199,7 +163,7 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
         <div className="st-metric">
           <Clock3 size={14} />
           <em>下次刷新</em>
-          <strong className="st-mono">{status.monitoring ? `${countdown}s` : "—"}</strong>
+          <strong className="st-mono">{status.monitoring ? countdown : "—"}</strong>
         </div>
         <div className="st-metric">
           <Activity size={14} />

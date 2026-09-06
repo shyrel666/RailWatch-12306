@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
+import { executionReference, getDateRangeStatus, getTripDateStatus, todayIso, useBeijingToday } from "../lib/tripDate";
 import type { RailWatchConfig } from "../types";
 import type { CommandRunner, ConfirmDialog } from "./componentTypes";
 import { RiskToggle } from "./DisplayPrimitives";
@@ -139,6 +140,11 @@ export function TripSetupPage({
   const [passengerDraft, setPassengerDraft] = useState("");
 
   const update = (patch: Partial<RailWatchConfig>) => setConfig(patch);
+  const today = useBeijingToday();
+  const windowDays = useRailWatchStore((state) => state.runtime.date_policy?.presale_window_days);
+  const monitoring = useRailWatchStore((state) => state.status.monitoring);
+  const tripDateStatus = getTripDateStatus(config.date, today, windowDays);
+  const rangeStatus = getDateRangeStatus(config.date, config.date_range, executionReference(config, today), windowDays);
   const passengerNames = useMemo(() => parsePassengers(config.passengers), [config.passengers]);
   const selectedSeats = useMemo(() => {
     if (!config.seat_keyword.trim()) {
@@ -256,13 +262,26 @@ export function TripSetupPage({
     }
   };
 
+  const saveConfig = async () => {
+    if (tripDateStatus.expired) {
+      const accepted = await confirm(
+        "出发日期已过期",
+        `保存的出发日期（${config.date}）早于今天，执行时将跳过无效日期。是否仍要保存？`,
+      );
+      if (!accepted) {
+        return;
+      }
+    }
+    await runCommand("saveConfig", { config }, "设置已保存");
+  };
+
   return (
     <div className="trip-setup-workspace">
       <section className="trip-setup-card content-band">
         <header className="trip-setup-head">
           <div>
             <h2>行程设置</h2>
-            <p>配置查询条件与监控策略</p>
+            <p>{monitoring ? "运行中的行程保持不变，修改将在下次运行生效" : "配置查询条件与监控策略"}</p>
           </div>
           <Button
             className="trip-load-button"
@@ -316,10 +335,13 @@ export function TripSetupPage({
                   aria-label="出发日期"
                   className="native-input trip-native-input"
                   type="date"
+                  min={todayIso(today)}
                   value={config.date}
                   onChange={(event) => update({ date: event.target.value })}
                 />
               </span>
+              {tripDateStatus.warning ? <small className="trip-date-hint">{tripDateStatus.warning}</small> : null}
+              <small className="trip-date-hint">{rangeStatus.invalid ? "请输入有效日期" : `实际执行日期：${rangeStatus.valid.join("、") || "无"}${rangeStatus.skipped.length ? `；跳过：${rangeStatus.skipped.join("、")}` : ""}`}</small>
             </label>
             <div className="trip-field">
               <span>日期范围</span>
@@ -553,11 +575,7 @@ export function TripSetupPage({
         </div>
 
         <footer className="trip-setup-footer">
-          <Button
-            icon={<Save size={15} />}
-            loading={busy === "saveConfig"}
-            onClick={() => void runCommand("saveConfig", { config }, "设置已保存")}
-          >
+          <Button icon={<Save size={15} />} loading={busy === "saveConfig"} onClick={() => void saveConfig()}>
             保存配置
           </Button>
           <Button icon={<BarChart3 size={15} />} loading={busy === "analyzeQuery"} onClick={() => void runCommand("analyzeQuery", { config })}>

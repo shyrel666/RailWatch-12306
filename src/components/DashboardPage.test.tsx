@@ -2,6 +2,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { isoDaysFromToday } from "../lib/tripDate";
 import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
 import { DashboardPage } from "./DashboardPage";
 
@@ -156,5 +157,27 @@ describe("DashboardPage", () => {
     expect(currentSteps[0].textContent).toContain("命中");
     expect(environmentStep).toBeTruthy();
     expect(environmentStep?.getAttribute("aria-current")).toBeNull();
+  });
+
+  test("warns when the saved departure date has already passed", () => {
+    railwatchStore.setState({
+      config: { ...defaultConfig, date: "2020-01-01" },
+    });
+
+    render(<DashboardPage />);
+
+    expect(screen.getAllByRole("status").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/出发日期已过去/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("does not warn for a date inside the presale window", () => {
+    railwatchStore.setState({
+      config: { ...defaultConfig, date: isoDaysFromToday(3) },
+    });
+
+    render(<DashboardPage />);
+
+    expect(screen.queryByText(/出发日期已过去/)).toBeNull();
+    expect(screen.queryByText(/预售期/)).toBeNull();
   });
 });

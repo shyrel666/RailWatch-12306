@@ -79,6 +79,8 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
   const applyEvent = useCallback(
     (event: BridgeEvent) => {
       const state = railwatchStore.getState();
+      const owner = (event.payload as { run_id?: string })?.run_id;
+      if (event.event !== "state" && owner && owner !== state.status.task?.run_id) return;
       switch (event.event) {
         case "log":
           state.applyLog(event.payload as LogEntry);

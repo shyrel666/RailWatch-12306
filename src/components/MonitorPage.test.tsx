@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
 import { MonitorPage } from "./MonitorPage";
+import { todayIso } from "../lib/tripDate";
 import type { CommandRunner } from "./componentTypes";
 
 function resetStore() {
@@ -38,7 +39,8 @@ describe("MonitorPage", () => {
 
     act(() => {
       railwatchStore.setState({
-        status: { ...defaultStatus, query_ready: true, monitoring: false, summary: "查询已解析" },
+        status: { ...defaultStatus, query_ready: false, monitoring: false, summary: "配置有效" },
+        config: { ...defaultConfig, date: todayIso(), train_code:"G101" },
       });
     });
 

@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Tooltip } from "antd";
 import { Eraser, Pause, Play } from "lucide-react";
 import { countEventsByFilter, presentEventLogs } from "../lib/formatEventLog";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { CommandRunner } from "./componentTypes";
+
+import { VirtualEventList } from "./VirtualEventList";
 
 const filterLabels = ["全部", "信息", "警告", "错误"] as const;
 
@@ -18,7 +20,9 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
     clearLogs();
     await runCommand("clearLog");
   };
-  const visibleLogs = presentEventLogs(logs, filter);
+  const droppedLogs = useRailWatchStore((state) => state.droppedLogs);
+  const visibleLogs = useMemo(() => presentEventLogs(logs, filter), [logs, filter]);
+  const counts = useMemo(() => Object.fromEntries(filterLabels.map(label => [label, countEventsByFilter(logs, label)])), [logs]);
   const listClassName = ["event-list", logPaused ? "paused" : "", visibleLogs.length > 0 ? "has-events" : ""]
     .filter(Boolean)
     .join(" ");
@@ -59,32 +63,12 @@ export function EventPanel({ onClose: _onClose, runCommand }: { onClose: () => v
             type="button"
           >
             {label}
-            <span>{countEventsByFilter(logs, label)}</span>
+            <span>{counts[label]}</span>
           </button>
         ))}
       </div>
-      <div className={listClassName} role="feed" aria-label="事件流">
-        {visibleLogs.length === 0 ? (
-          <div className="event-empty">
-            <strong>暂无事件</strong>
-            <span>运行日志会在这里按时间倒序显示。</span>
-          </div>
-        ) : (
-          visibleLogs.map((entry, index) => (
-            <article className={`event-entry ${entry.tone}`} key={`${entry.time}-${entry.title}-${index}`}>
-              <span aria-hidden="true" className={`event-dot ${entry.tone}`} />
-              <div className="event-body">
-                <div className="event-row">
-                  <time dateTime={entry.time}>{entry.time}</time>
-                  <span className={`event-level ${entry.tone}`}>{entry.label}</span>
-                </div>
-                <strong>{entry.title}</strong>
-                {entry.detail ? <p>{entry.detail}</p> : null}
-              </div>
-            </article>
-          ))
-        )}
-      </div>
+      {droppedLogs > 0 ? <small role="status">仅保留最近 1,000 条日志，已丢弃 {droppedLogs} 条。</small> : null}
+      <VirtualEventList entries={visibleLogs} className={listClassName} />
     </aside>
   );
 }

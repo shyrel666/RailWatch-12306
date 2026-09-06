@@ -14,8 +14,12 @@ import {
   UserRound,
 } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
+import { getTripDateStatus, useBeijingToday } from "../lib/tripDate";
 import type { RailWatchConfig, RailWatchPage, RailWatchStatus } from "../types";
 import type { WorkflowStep } from "./DisplayPrimitives";
+import { TripDateWarning } from "./DisplayPrimitives";
+
+import { displayedConfig } from "../lib/taskDisplay";
 
 type RequestMode = "均衡模式" | "保守模式" | "快速模式";
 
@@ -72,25 +76,9 @@ const workflowShortText: Record<WorkflowStep["state"], string> = {
   pending: "未运行",
 };
 
-function normalizeRouteStation(station: string, fallback: string) {
-  if (!station) {
-    return fallback;
-  }
-
-  if (station === "北京") {
-    return "北京南";
-  }
-
-  if (station === "上海") {
-    return "上海虹桥";
-  }
-
-  return station;
-}
-
 function formatTripDate(date: string) {
   if (!date) {
-    return "6月20日 周五";
+    return "未设置";
   }
 
   const parsed = new Date(`${date}T00:00:00`);
@@ -190,7 +178,10 @@ function getNextAction(status: RailWatchStatus): { description: string; label: s
 
 export function DashboardPage() {
   const status = useRailWatchStore((state) => state.status);
-  const config = useRailWatchStore((state) => state.config);
+  const draftConfig = useRailWatchStore((state) => state.config);
+  const config = displayedConfig(draftConfig, status);
+  const today = useBeijingToday();
+  const windowDays = useRailWatchStore((state) => state.runtime.date_policy?.presale_window_days);
   const hits = useRailWatchStore((state) => state.hits);
   const monitorLoops = useRailWatchStore((state) => state.monitorLoops);
   const setActivePage = useRailWatchStore((state) => state.setActivePage);
@@ -198,13 +189,14 @@ export function DashboardPage() {
   const hasHits = hits.length > 0;
   const workflowSteps = getWorkflowSteps(status, hasHits);
   const nextAction = getNextAction(status);
-  const fromStation = normalizeRouteStation(config.from_station_cn, "北京南");
-  const toStation = normalizeRouteStation(config.to_station_cn, "上海虹桥");
+  const fromStation = config.from_station_cn || "未设置";
+  const toStation = config.to_station_cn || "未设置";
   const tripDate = formatTripDate(config.date);
   const compactTripDate = formatCompactDate(tripDate);
-  const trainPreference = config.train_code || "G1234 等 4 个车次";
-  const trainFamily = config.train_code ? trainPreference.replace(/[,，]/g, "、") : "G/D/C";
-  const seatPreference = config.seat_keyword || (config.seat_prefer === "无偏好" ? "" : config.seat_prefer) || "二等座";
+  const tripDateWarning = getTripDateStatus(config.date, today, windowDays).warning;
+  const trainPreference = config.train_code || "不限";
+  const trainFamily = config.train_code ? trainPreference.replace(/[,，]/g, "、") : "不限";
+  const seatPreference = config.seat_keyword || (config.seat_prefer === "无偏好" ? "" : config.seat_prefer) || "不限";
   const passengerText = config.passenger_count ? `成人 ${config.passenger_count}` : "成人 1";
   const riskTone =
     status.risk_level === "critical" ? "critical" : status.risk_level === "warning" ? "warning" : status.monitoring ? "active" : "safe";
@@ -227,7 +219,7 @@ export function DashboardPage() {
         <div className="journey-route">
           <span>当前行程</span>
           <strong>
-            {fromStation.replace("南", "")} <span>→</span> {toStation.replace("虹桥", "")}
+            {fromStation} <span>→</span> {toStation}
           </strong>
         </div>
         <div className="journey-meta">
@@ -235,6 +227,7 @@ export function DashboardPage() {
             <CalendarDays size={16} />
             <span>出发日期</span>
             <strong>{tripDate}</strong>
+            <TripDateWarning message={tripDateWarning} />
           </article>
           <article>
             <TrainFront size={16} />
@@ -281,7 +274,10 @@ export function DashboardPage() {
             <dt>到达站</dt>
             <dd>{toStation}</dd>
             <dt>出发日期</dt>
-            <dd>{tripDate}</dd>
+            <dd>
+              {tripDate}
+              <TripDateWarning message={tripDateWarning} />
+            </dd>
             <dt>车次偏好</dt>
             <dd>{trainPreference}</dd>
             <dt>席别偏好</dt>
