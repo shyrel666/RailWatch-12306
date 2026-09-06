@@ -6,6 +6,7 @@ import time
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Callable, Optional
+from railwatch_dates import beijing_now
 
 import urllib.error
 import urllib.request
@@ -73,6 +74,7 @@ class ServerTimeSync:
             self._last_error = str(exc)
             if force or not self._last_sync_monotonic:
                 self.log(f"服务器时间校准失败，使用本地时钟：{exc}")
+            self._last_sync_monotonic = now_mono
         return self._offset_seconds
 
     def server_timestamp(self) -> float:
@@ -80,7 +82,7 @@ class ServerTimeSync:
         return time.time() + self._offset_seconds
 
     def server_now(self) -> datetime:
-        return datetime.fromtimestamp(self.server_timestamp())
+        return beijing_now(self.server_timestamp())
 
     def parse_target_datetime(self, target_time: str, reference: Optional[datetime] = None) -> datetime:
         reference = reference or self.server_now()
@@ -89,7 +91,7 @@ class ServerTimeSync:
             raise ValueError(f"目标时间格式无效：{target_time}")
         hour, minute, second = (int(part) for part in parts)
         target = reference.replace(hour=hour, minute=minute, second=second, microsecond=0)
-        if target <= reference:
+        if target < reference:
             target = target + timedelta(days=1)
         return target
 

@@ -19,7 +19,8 @@ class RailWatchDateRangeTests(unittest.TestCase):
         from railwatch_dates import expand_travel_dates
 
         self.assertEqual(expand_travel_dates("2026-06-10", "自定义"), ["2026-06-10"])
-        self.assertEqual(expand_travel_dates("bad-date", "±2天"), ["bad-date"])
+        with self.assertRaises(ValueError):
+            expand_travel_dates("bad-date", "±2天")
 
 
 if __name__ == "__main__":

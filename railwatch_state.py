@@ -53,6 +53,7 @@ class RailWatchState:
     error_message: str = ""
     current_config: Mapping[str, object] = field(default_factory=dict)
     hits: Tuple[TicketHit, ...] = field(default_factory=tuple)
+    task: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "RailWatchState":

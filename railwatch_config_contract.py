@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from railwatch_dates import validate_travel_date, beijing_now
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -44,8 +45,8 @@ def default_config(
     today: Optional[dt.date] = None,
     now: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
-    selected_today = today or dt.date.today()
-    selected_now = now or dt.datetime.now()
+    selected_now = now or beijing_now()
+    selected_today = today or selected_now.date()
     target_time = (selected_now + dt.timedelta(seconds=120)).strftime("%H:%M:%S")
     trip = {
         "from_station_cn": "北京",
@@ -184,6 +185,7 @@ def validate_config(raw_config: Optional[Mapping[str, Any]] = None) -> Dict[str,
         raise ValueError("到达站为必填项。")
     if not base["date"]:
         raise ValueError("出行日期为必填项。")
+    validate_travel_date(base["date"])
     return base
 
 

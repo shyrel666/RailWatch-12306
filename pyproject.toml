@@ -57,5 +57,7 @@ py-modules = [
   "railwatch_submit_flow",
   "railwatch_system",
   "railwatch_time",
+  "railwatch_query",
+  "railwatch_task",
   "railwatch_verification",
 ]

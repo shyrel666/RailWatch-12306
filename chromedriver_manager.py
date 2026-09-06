@@ -113,6 +113,28 @@ def _detect_chrome_windows() -> Optional[str]:
     return None
 
 
+def detect_chromedriver_version(executable_path: str) -> Optional[str]:
+    """Return the full version string reported by a ChromeDriver executable (e.g. '148.0.7778.178')."""
+    if not executable_path or not os.path.isfile(executable_path):
+        return None
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [executable_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        match = re.search(r"(\d+)\.\d+\.\d+\.\d+", result.stdout or "")
+        if match:
+            return match.group(0)
+    except Exception:
+        return None
+    return None
+
+
 def _read_exe_version(path: str) -> Optional[str]:
     """Infer Chrome version from its install directory name.
 

@@ -1,7 +1,7 @@
 import unittest
 import sys
 import types
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 class TimeoutException(Exception):
     pass
@@ -253,29 +253,15 @@ class TicketMonitorLogicTests(unittest.TestCase):
 
     def test_page_analyzer_uses_configured_query_timeout(self):
         analyzer = PageAnalyzer(FakePageDriver(), log_callback=lambda msg: None, base_dir=".")
-        analyzer.resolver = type("Resolver", (), {"get_code": lambda self, name: f"{name}站码"})()
-        analyzer.click_query_button = lambda: True
-        analyzer._parse_rows = lambda: [{"train": "G101", "raw": "G101 二等座 有"}]
-        observed_timeout = []
-
-        def wait_for_rows(timeout=40, stop_check=None):
-            observed_timeout.append(timeout)
-            return True
-
-        analyzer.wait_for_rows = wait_for_rows
-
-        with patch("gui_12306_0.WebDriverWait", SuccessfulWait):
-            rows = analyzer.open_fill_query_and_analyze(
-                {
-                    "from_station_cn": "北京",
-                    "to_station_cn": "上海",
-                    "date": "2026-06-10",
-                    "query_timeout": 25,
-                }
-            )
-
-        self.assertEqual(rows, [{"train": "G101", "raw": "G101 二等座 有"}])
-        self.assertEqual(observed_timeout, [25])
+        analyzer.fill_query_form = Mock(return_value=True)
+        analyzer._parse_rows = lambda: [{"train":"G101", "raw":"G101 二等座 有"}]
+        executor = Mock()
+        executor.execute.return_value = {"status":"ok"}
+        executor.current.return_value = True
+        with patch("gui_12306_0.WebDriverWait", SuccessfulWait), patch("gui_12306_0.QueryExecutor", return_value=executor):
+            rows = analyzer.open_fill_query_and_analyze({"from_station_cn":"北京", "to_station_cn":"上海", "date":"2026-06-10", "query_timeout":25})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(executor.execute.call_args.args[1], 25)
 
     def test_ticket_monitor_uses_configured_query_timeout(self):
         class Driver:
@@ -944,6 +930,164 @@ class TicketMonitorLogicTests(unittest.TestCase):
                 raise RuntimeError("boom")
 
         self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None).verification.verification_present())
+
+    def test_unknown_burst_timeout_preserves_timeout_and_backoff(self):
+        # 定时爆发期：单轮等待压缩到秒级，失败立即关弹窗重试，避免一次空等耗尽爆发窗口
+        dismissed = []
+        sleeps = []
+        observed_timeouts = []
+
+        class ServerTime:
+            def is_in_burst_window(self, target_time, prepare_seconds, burst_seconds):
+                return True
+
+        class Driver:
+            def refresh(self):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 3, "query_timeout": 40, "timer_enabled": True, "target_time": "08:30:00"},
+            log_callback=lambda msg: None,
+            server_time_sync=ServerTime(),
+        )
+        monitor.click_query_button = lambda: True
+        monitor._dismiss_query_blockers = lambda: dismissed.append("x") or ""
+
+        def wait_for_rows(timeout=40, stop_check=None):
+            observed_timeouts.append(timeout)
+            return False
+
+        monitor.wait_for_rows = wait_for_rows
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: sleeps.append(seconds)):
+            monitor._run_single_loop(1, 3)
+
+        self.assertEqual(observed_timeouts, [40])
+        self.assertEqual(sleeps, [3])
+        self.assertEqual(len(dismissed), 0)
+
+    def test_non_burst_monitor_keeps_configured_query_timeout(self):
+        # 非定时监控不得擅自压缩用户配置的 query_timeout
+        observed_timeouts = []
+
+        class Driver:
+            def refresh(self):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"interval": 3, "query_timeout": 23},
+            log_callback=lambda msg: None,
+        )
+        monitor.click_query_button = lambda: True
+        monitor._dismiss_query_blockers = lambda: ""
+
+        def wait_for_rows(timeout=40, stop_check=None):
+            observed_timeouts.append(timeout)
+            return False
+
+        monitor.wait_for_rows = wait_for_rows
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: None):
+            monitor._run_single_loop(1, 3)
+
+        self.assertEqual(observed_timeouts, [23])
+
+    def test_monitor_syncs_query_params_from_config(self):
+        # 监控循环要主动同步出发/到达/日期：普通轮只写一次，深度刷新轮重新同步
+        fills = []
+
+        class Driver:
+            def refresh(self):
+                return None
+
+            def execute_script(self, script, *args):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {
+                "from_station_cn": "北京",
+                "to_station_cn": "上海",
+                "date": "2026-09-20",
+                "query_timeout": 1,
+            },
+            log_callback=lambda msg: None,
+            param_filler=lambda from_cn, to_cn, date: fills.append((from_cn, to_cn, date)) or True,
+        )
+        monitor.query_executor = Mock()
+        monitor.query_executor.snapshot_form.return_value = {"page":"one", "values":["北京","BJP","上海","SHH","2026-09-20"]}
+        monitor.query_executor.execute.return_value = {"status":"ok"}
+        monitor.query_executor.current.return_value = True
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
+        monitor._find_hit_row = lambda indices: None
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: None):
+            monitor._run_single_loop(1, 1)
+            monitor._run_single_loop(2, 1)
+            monitor._run_single_loop(5, 1)
+
+        self.assertEqual(
+            fills,
+            [
+                ("北京", "上海", "2026-09-20"),
+                ("北京", "上海", "2026-09-20"),
+            ],
+        )
+
+    def test_monitor_without_param_filler_skips_param_sync(self):
+        class Driver:
+            def refresh(self):
+                return None
+
+            def execute_script(self, script, *args):
+                return None
+
+        monitor = TicketMonitor(
+            Driver(),
+            {"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-09-20"},
+            log_callback=lambda msg: None,
+        )
+        monitor.click_query_button = lambda: True
+        monitor.wait_for_rows = lambda timeout=40, stop_check=None: False
+
+        with patch("gui_12306_0.time.sleep", lambda seconds: None):
+            monitor._run_single_loop(1, 1)  # 不应抛异常
+
+    def test_dismiss_query_blockers_reports_dialog_text_and_is_safe(self):
+        driver = Mock()
+        driver.execute_script.side_effect = [{"kind":"not_on_sale", "text":"未到起售时间"}, True]
+        monitor = TicketMonitor(driver, {}, log_callback=lambda message: None)
+        self.assertEqual(monitor._dismiss_query_blockers(), "未到起售时间")
+        for kind in ("human_action", "unknown"):
+            driver.reset_mock()
+            driver.execute_script.side_effect = [{"kind":kind, "text":"确认订单"}]
+            monitor.human_action = Mock()
+            self.assertEqual(monitor._dismiss_query_blockers(), "")
+            self.assertEqual(driver.execute_script.call_count, 1)
+            monitor.human_action.assert_called_once()
+
+    def test_page_analyzer_fill_query_form_validates_and_fills(self):
+        analyzer = PageAnalyzer(FakePageDriver(), log_callback=lambda msg: None, base_dir=".")
+        analyzer.driver.execute_script = Mock(return_value=True)
+        analyzer.resolver = type("Resolver", (), {"get_code": lambda self, name: f"{name}站码"})()
+
+        # 缺任一参数不触发页面操作
+        self.assertFalse(analyzer.fill_query_form("", "上海", "2026-06-10"))
+
+        with patch("gui_12306_0.WebDriverWait", SuccessfulWait):
+            self.assertTrue(analyzer.fill_query_form("北京", "上海", "2026-06-10"))
+
+        class MissingInputsDriver:
+            def execute_script(self, script, *args):
+                return False
+
+        analyzer_missing = PageAnalyzer(MissingInputsDriver(), log_callback=lambda msg: None, base_dir=".")
+        analyzer_missing.resolver = type("Resolver", (), {"get_code": lambda self, name: f"{name}站码"})()
+        with patch("gui_12306_0.WebDriverWait", SuccessfulWait):
+            self.assertFalse(analyzer_missing.fill_query_form("北京", "上海", "2026-06-10"))
 
 
 class TicketMonitorDateRangeTests(unittest.TestCase):

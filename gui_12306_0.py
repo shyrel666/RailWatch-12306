@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from railwatch_dates import expand_travel_dates
+from railwatch_query import FillResult, fill_result, QueryExecutor, FILL_QUERY_FORM_JS, DISMISS_DIALOG_JS
 from railwatch_row_parser import RowParser, TRAIN_CODE_PATTERN
 from railwatch_selectors import (
     ALTERNATE_BUTTON_SELECTORS,
@@ -80,6 +81,9 @@ except ImportError:
 STATION_JS_URL = "https://kyfw.12306.cn/otn/resources/js/framework/station_name.js"
 CACHE_FILE = "station_codes_cache.json"
 USER_CONFIG_FILE = "user_config.json"
+
+# 仅明确未起售提示在冲刺期间使用短重试，其他故障遵循正常退避。
+BURST_RETRY_SLEEP_SECONDS = 1.0
 
 def _read_float(value: object, fallback: float) -> float:
     try:
@@ -442,16 +446,14 @@ class StationCodeResolver:
         if cn_name in data:
             return data[cn_name]
         
-        # 模糊匹配：去掉"市/站"等
-        for key, value in data.items():
-            if cn_name in key or key in cn_name:
-                self.log(f"ℹ️ 站名模糊匹配：{cn_name} -> {key}")
-                return value
-        
-        raise ValueError(f"站名未找到：{cn_name}（请确认是 12306 支持的中文站名）")
+        matches = [(key, value) for key, value in data.items() if cn_name in key or key in cn_name]
+        if len(matches) == 1:
+            return matches[0][1]
+        if matches:
+            raise ValueError(f"站名不明确：{cn_name}，请填写完整站名。")
+        raise ValueError(f"未知站名：{cn_name}")
 
 
-# ==================== 页面分析器 ====================
 class PageAnalyzer(BaseHandler):
     """页面分析器"""
     
@@ -460,6 +462,24 @@ class PageAnalyzer(BaseHandler):
         if base_dir is None:
             base_dir = os.path.dirname(os.path.abspath(__file__))
         self.resolver = StationCodeResolver(base_dir, log=self.log)
+
+    def fill_query_form(self, from_cn: str, to_cn: str, date: str, timeout: int = 3) -> FillResult:
+        from_cn, to_cn, date = (str(value or "").strip() for value in (from_cn, to_cn, date))
+        if not (from_cn and to_cn and date):
+            return FillResult("config_error", "出发站、到达站和日期不能为空")
+        try:
+            from_code, to_code = self.resolver.get_code(from_cn), self.resolver.get_code(to_cn)
+        except ValueError as exc:
+            return FillResult("config_error", str(exc))
+        except Exception as exc:
+            return FillResult("retry", f"站码加载失败：{exc}")
+        try:
+            WebDriverWait(self.driver, timeout).until(EC.presence_of_element_located((By.ID, "fromStationText")))
+            if self.driver.execute_script(FILL_QUERY_FORM_JS, from_cn, from_code, to_cn, to_code, date) is not True:
+                return FillResult("retry", "查询字段缺失或回读不一致")
+        except Exception as exc:
+            return FillResult("retry", f"查询页未就绪：{exc}")
+        return FillResult("success")
 
     def open_fill_query_and_analyze(self, cfg: dict) -> Optional[List[dict]]:
         """
@@ -484,78 +504,23 @@ class PageAnalyzer(BaseHandler):
             self.log("❌ 页面加载超时，请检查网络连接")
             return None
 
-        # 站码
+        # 站码 + 一次性写入（包含隐藏字段），复用 fill_query_form
         from_cn = cfg["from_station_cn"]
         to_cn = cfg["to_station_cn"]
         date = cfg["date"]
 
-        self.log(f"🧾 自动填参：{from_cn} → {to_cn}，日期 {date}")
-        
-        try:
-            from_code = self.resolver.get_code(from_cn)
-            to_code = self.resolver.get_code(to_cn)
-        except ValueError as e:
-            self.log(f"❌ {e}")
-            return None
+        filled = fill_result(self.fill_query_form(from_cn, to_cn, date))
+        if not filled:
+            raise ValueError(filled.reason) if filled.status == "config_error" else RuntimeError(filled.reason)
 
-        # 用 JS 一次性写入（包含隐藏字段）
-        js = """
-        const fromText = arguments[0];
-        const fromCode = arguments[1];
-        const toText = arguments[2];
-        const toCode = arguments[3];
-        const date = arguments[4];
-
-        // 可见输入框
-        document.querySelector('#fromStationText').value = fromText;
-        document.querySelector('#toStationText').value = toText;
-
-        // 隐藏字段（核心）
-        const f = document.querySelector('#fromStation');
-        const t = document.querySelector('#toStation');
-        if (f) f.value = fromCode;
-        if (t) t.value = toCode;
-
-        // 日期框通常可直接赋值
-        const d = document.querySelector('#train_date');
-        if (d){
-            d.removeAttribute('readonly');
-            d.value = date;
-        }
-
-        // 触发 change/input
-        const evt1 = new Event('input', {bubbles:true});
-        const evt2 = new Event('change', {bubbles:true});
-        document.querySelector('#fromStationText').dispatchEvent(evt1);
-        document.querySelector('#fromStationText').dispatchEvent(evt2);
-        document.querySelector('#toStationText').dispatchEvent(evt1);
-        document.querySelector('#toStationText').dispatchEvent(evt2);
-        if (d){ d.dispatchEvent(evt1); d.dispatchEvent(evt2); }
-        """
-        self.driver.execute_script(js, from_cn, from_code, to_cn, to_code, date)
-
-        # 点击[查询]
-        self.log("🔎 自动点击【查询】按钮...")
-        if not self.click_query_button():
-            self.log("❌ 点击查询按钮失败")
-            return None
-
-        # 等待结果行出现
-        self.log("⏳ 等待查询结果加载...")
-        query_timeout = int(cfg.get("query_timeout", 60))
-        if not self.wait_for_rows(timeout=query_timeout):
-            self.log("❌ 超时：没有加载出任何车次行（可能无车次/日期不对/被风控/页面结构变化）")
-            return None
-
-        rows = self._parse_rows()
-        if not rows:
-            self.log("⚠️ 表格出现但未解析到车次（可能页面结构变化）")
-            return None
-
-        self.log(f"✅ 解析到 {len(rows)} 条车次结果（展示前 10 条）：")
-        for row in rows[:10]:
-            self.log(self._format_row(row))
-
+        executor = QueryExecutor(self.driver)
+        result = executor.execute(self.click_query_button, int(cfg.get("query_timeout", 40)))
+        if result["status"] not in ("ok", "empty"):
+            raise RuntimeError(result.get("reason") or "本轮查询未完成")
+        rows = [] if result["status"] == "empty" else self._parse_rows()
+        if not executor.current():
+            raise RuntimeError("查询结果已失效，请重新查询")
+        self.last_query = result
         return rows
 
     @staticmethod
@@ -588,10 +553,23 @@ class TicketMonitor(BaseHandler):
         on_hit: Optional[Callable[[dict], None]] = None,
         human_action_callback: Optional[Callable[[dict], None]] = None,
         server_time_sync: Optional[ServerTimeSync] = None,
+        param_filler: Optional[Callable[[str, str, str], bool]] = None,
+        wait_callback=None,
+        tick_callback=None,
+        session_check=None,
+        date_provider=None,
     ):
         super().__init__(driver, log_callback)
-        self.cfg = cfg
+        self.cfg = dict(cfg)
         self.should_stop = stop_check or (lambda: False)
+        self._wait_callback = wait_callback
+        self.tick = tick_callback or (lambda **kwargs: None)
+        self.session_check = session_check or (lambda: True)
+        self.date_provider = date_provider
+        self._fill_failures = 0
+        self._needs_navigation = False
+        self.last_query = {}
+        self.query_executor = QueryExecutor(driver, self.should_stop, self._poll_wait, lambda: self.tick()) if param_filler else None
         self.notify = notify_callback or (lambda title, msg: print(title, msg, flush=True) if title.isascii() and msg.isascii() else _safe_print(title, msg))
         self.progress = progress_callback
         self.on_hit = on_hit
@@ -614,6 +592,10 @@ class TicketMonitor(BaseHandler):
         travel_date = str(cfg.get("date", "")).strip()
         self.travel_dates = expand_travel_dates(travel_date, str(cfg.get("date_range", "单日"))) if travel_date else []
         self.current_loop_date = ""
+        # 参数同步：定时/爆发路径不依赖浏览器残留的上次查询条件
+        self.param_filler = param_filler
+        self.params_filled = False
+        self._form_snapshot = None
         self.row_parser = RowParser(self.driver, SeatType.get_prefix)
         self.verification = VerificationDetector(self.driver, log_callback=self.log)
         self.submit_flow = SubmitFlow(
@@ -651,6 +633,10 @@ class TicketMonitor(BaseHandler):
         return [s.strip() for s in seats if s.strip()]
 
     def _apply_loop_date(self, loop_count: int, force: bool = False) -> None:
+        if self.date_provider:
+            self.travel_dates = self.date_provider()
+            if not self.travel_dates:
+                raise ValueError("所有出行日期均已失效，请修改行程")
         if not self.travel_dates:
             return
         travel_date = self.travel_dates[(loop_count - 1) % len(self.travel_dates)]
@@ -673,6 +659,54 @@ class TicketMonitor(BaseHandler):
         self.cfg["date"] = travel_date
         if len(self.travel_dates) > 1:
             self.log(f"📅 本轮监控日期：{travel_date}")
+
+    def _human_delay(self, low, high):
+        self._sleep(random.uniform(low, high))
+
+    def _poll_wait(self, seconds):
+        if self._wait_callback:
+            self._wait_callback(seconds)
+        else:
+            time.sleep(seconds)
+
+    def _sleep(self, seconds):
+        self.tick(status="backoff", next_query_at=time.time() + seconds)
+        self._poll_wait(seconds)
+
+    def _fill_query_params(self, force: bool = False) -> bool:
+        if not self.param_filler:
+            return True
+        expected = (str(self.cfg.get("from_station_cn", "")), str(self.cfg.get("to_station_cn", "")),
+                    self.current_loop_date or str(self.cfg.get("date", "")))
+        if force:
+            self.params_filled = False
+            self._form_snapshot = None
+        if self.params_filled and self.query_executor.snapshot_form() == self._form_snapshot:
+            values = self._form_snapshot.get("values", []) if isinstance(self._form_snapshot, dict) else []
+            if len(values) == 5 and (values[0], values[2], values[4]) == expected:
+                return True
+        result = fill_result(self.param_filler(*expected))
+        self.params_filled = bool(result)
+        if result:
+            self._fill_failures = 0
+            self._form_snapshot = self.query_executor.snapshot_form()
+            return True
+        self._fill_failures += 1
+        self.log(f"查询参数同步失败：{result.reason}")
+        if result.status == "config_error" or self._fill_failures >= 3:
+            raise ValueError(result.reason or "连续三次无法同步查询参数")
+        return False
+
+    def _dismiss_query_blockers(self) -> str:
+        executor = self.query_executor or QueryExecutor(self.driver)
+        dialog = executor.inspect_dialog()
+        if dialog["kind"] == "not_on_sale":
+            if self.driver.execute_script(DISMISS_DIALOG_JS, dialog["text"]) is True:
+                self.log(f"已关闭未起售提示：{dialog['text']}")
+                return dialog["text"]
+        elif dialog["kind"] != "none":
+            self._signal_human_action("", dialog["text"] or "需要检查浏览器弹窗")
+        return ""
 
     def run(self):
         """主监控循环（风控优化增强版）"""
@@ -705,15 +739,21 @@ class TicketMonitor(BaseHandler):
                 # 如果命中了，退出循环（只通知一次）
                 if self._run_single_loop(loop_count, actual_interval):
                     break
+            except ValueError:
+                raise
             except Exception as e:
                 self.log(f"⚠️ 监控异常：{e}")
                 if self.rate_limiter:
                     self.rate_limiter.on_error(str(e))
-                time.sleep(get_random_interval(base_interval))
+                self._sleep(get_random_interval(base_interval))
 
         self.log("⏹ 监控结束/停止")
     
     def _is_burst_mode(self, loop_count: int) -> bool:
+        target = self.cfg.get("_target_timestamp")
+        if target is not None:
+            now = self.server_time_sync.server_timestamp()
+            return target - float(self.cfg.get("prepare_time", 2)) <= now <= target + float(self.cfg.get("burst_window_seconds", 45))
         if self.cfg.get("timer_enabled"):
             prepare_seconds = _read_float(self.cfg.get("prepare_time", 2), 2.0)
             burst_seconds = _read_float(self.cfg.get("burst_window_seconds", 45), 45.0)
@@ -728,17 +768,20 @@ class TicketMonitor(BaseHandler):
 
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:
         """单次监控循环，返回是否命中（风控优化版）"""
+        if self.should_stop() or not self.session_check():
+            return True
+        self.tick(status="querying", next_query_at=None)
         is_burst_mode = self._is_burst_mode(loop_count)
 
         if not is_burst_mode:
             # 1) 刷新前的随机延迟（模拟人类行为，仅在稳定监控期开启）
-            human_delay(0.2, 0.8)
+            self._human_delay(0.2, 0.8)
             
             # 针对长时间监控增加随机行为（如滚动阅读）
             if random.random() < 0.2:
                 try:
                     self.driver.execute_script(f"window.scrollBy(0, {random.randint(100, 400)});")
-                    time.sleep(random.uniform(0.3, 1.0))
+                    self._sleep(random.uniform(0.3, 1.0))
                     self.driver.execute_script(f"window.scrollBy(0, -{random.randint(100, 400)});")
                 except Exception: pass
 
@@ -747,6 +790,10 @@ class TicketMonitor(BaseHandler):
         timed_burst = bool(self.cfg.get("timer_enabled") and is_burst_mode)
         should_refresh = (loop_count % 5 == 0) if timed_burst else (loop_count == 1 or loop_count % 5 == 0)
         
+        if self._needs_navigation:
+            self.driver.get("https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc")
+            self._needs_navigation = False
+            should_refresh = True
         if should_refresh:
             if is_burst_mode:
                 self.log(f"🚀 服务器时间冲刺 (第 {loop_count} 轮)：正在进行极速查询...")
@@ -754,56 +801,60 @@ class TicketMonitor(BaseHandler):
                 self.log(f"🔄 第 {loop_count} 次：深度刷新页面... (间隔: {interval:.1f}s)")
             self.driver.refresh()
             # 爆发期不等待刷新后的模拟延迟
-            if not is_burst_mode: human_delay(1.0, 2.0)
+            if not is_burst_mode: self._human_delay(1.0, 2.0)
         else:
             self.log(f"🔎 第 {loop_count} 次：{'极速查询' if is_burst_mode else '快速直接查询'}... (间隔: {interval:.1f}s)")
 
         self._apply_loop_date(loop_count, force=should_refresh)
-        
+        if not self._fill_query_params(force=should_refresh):
+            self._sleep(interval)
+            return False
+        if self.should_stop():
+            return True
+
         # 3) 刷新后的随机延迟
-        if not is_burst_mode: human_delay(0.5, 1.2)
+        if not is_burst_mode: self._human_delay(0.5, 1.2)
 
-        # 4) 自动点击"查询"
-        if is_burst_mode:
-            # 爆发期：直接使用底层脚本点击，越过所有模拟逻辑，毫秒级响应
-            query_success = self.click_query_button()
+        if self.query_executor:
+            self.tick(status="querying", next_query_at=None)
+            result = self.query_executor.execute(self.click_query_button, int(self.cfg.get("query_timeout", 40)))
+            self.last_query = result
+            status = result["status"]
+            if status == "cancelled":
+                return True
+            if status in ("human_action", "unknown"):
+                self._signal_human_action("", result.get("reason", "请检查浏览器页面"))
+                return True
+            if status == "not_on_sale":
+                if not self._dismiss_query_blockers():
+                    self._signal_human_action("", "未起售提示无法关闭，请检查浏览器")
+                    return True
+                self._needs_navigation = True
+                self._sleep(min(interval, BURST_RETRY_SLEEP_SECONDS) if is_burst_mode else interval)
+                return False
+            if status not in ("ok", "empty"):
+                self.log(f"本轮查询未完成：{result.get('reason', status)}")
+                self._needs_navigation = True
+                if self.rate_limiter:
+                    self.rate_limiter.on_timeout()
+                self._sleep(max(interval, self.rate_limiter.get_interval() if self.rate_limiter else interval))
+                return False
+            if not self.query_executor.current():
+                self._needs_navigation = True
+                return False
         else:
-            # 稳定监控期：开启行为模拟，保护账号
-            query_success = False
-            try:
-                btn = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.ID, "query_ticket"))
-                )
-                from selenium.webdriver.common.action_chains import ActionChains
-                actions = ActionChains(self.driver)
-                actions.move_to_element_with_offset(btn, random.randint(-5, 5), random.randint(-2, 2))
-                actions.pause(random.uniform(0.1, 0.3))
-                actions.click().perform()
-                query_success = True
-            except Exception:
-                query_success = self.click_query_button()
-
-        if not query_success:
-            self.log("⚠️ 无法触发查询，重试中...")
-            if self.rate_limiter:
-                self.rate_limiter.on_error("query_failed")
-            time.sleep(interval)
-            return False
-
-        # 5) 等结果加载
-        query_timeout = int(self.cfg.get("query_timeout", 40))
-        if not self.wait_for_rows(timeout=query_timeout, stop_check=self.should_stop):
-            self.log("⚠️ 本轮未加载出车次结果，继续下一轮。")
-            if self.rate_limiter:
-                self.rate_limiter.on_timeout()
-            time.sleep(interval)
-            return False
+            # Compatibility for standalone core callers without a form adapter.
+            if not self.click_query_button() or not self.wait_for_rows(timeout=int(self.cfg.get("query_timeout", 40)), stop_check=self.should_stop):
+                if self.rate_limiter:
+                    self.rate_limiter.on_timeout()
+                self._sleep(interval)
+                return False
         if self.rate_limiter:
             self.rate_limiter.on_success()
 
         if self.progress:
             try:
-                self.progress({"loop": loop_count, "date": self.current_loop_date or str(self.cfg.get("date", "")), "rows": self._parse_rows()})
+                self.progress({**self.last_query, "loop": loop_count, "date": self.current_loop_date or str(self.cfg.get("date", "")), "rows": [] if self.last_query.get("status") == "empty" else self._parse_rows()})
             except Exception:
                 pass
 
@@ -815,7 +866,10 @@ class TicketMonitor(BaseHandler):
                 seat_col_indices[seat] = idx
 
         # 7) 判断是否命中
-        hit = self._find_hit_row(seat_col_indices)
+        if self.query_executor and not self.query_executor.current():
+            self._needs_navigation = True
+            return False
+        hit = None if self.last_query.get("status") == "empty" else self._find_hit_row(seat_col_indices)
         if hit:
             train_code, seat_name, seat_value, row_el, action_btn, action_type = hit
             self.log(f"🎯 命中：{train_code} | {seat_name}={seat_value}")
@@ -823,6 +877,8 @@ class TicketMonitor(BaseHandler):
             # 命中：定位 + 高亮
             self._focus_and_highlight(row_el, action_btn)
 
+            if self.should_stop() or (self.query_executor and not self.query_executor.current()):
+                return False
             if action_type == "alternate":
                 result = self.alternate_flow.try_alternate_order(row_el, train_code, seat_name)
                 if result == "success":
@@ -849,7 +905,7 @@ class TicketMonitor(BaseHandler):
                 if result == "retry":
                     # 尚未进入候补流程（候补按钮暂不可点）：继续监控，不打扰用户
                     self.log("↻ 候补暂不可用，继续监控...")
-                    time.sleep(interval)
+                    self._sleep(interval)
                     return False
                 # 已进入候补流程：失败或需要人工核验都停止刷新，避免停留在候补页空转。
                 if result == "failed":
@@ -883,7 +939,7 @@ class TicketMonitor(BaseHandler):
             return True
 
         self.log("❌ 未命中目标票，继续监控...")
-        time.sleep(interval)
+        self._sleep(interval)
         return False
 
     def _get_seat_col_index(self, seat_keyword: str) -> Optional[int]:
@@ -960,7 +1016,7 @@ class TicketMonitor(BaseHandler):
                 "arguments[0].scrollIntoView({behavior:'instant', block:'center'});",
                 row_el
             )
-            time.sleep(0.2)
+            self._sleep(0.2)
 
             # 行高亮
             self.driver.execute_script(
@@ -1026,7 +1082,7 @@ class TicketMonitor(BaseHandler):
             if result == 'student_cancel':
                 self.log("✅ 已点击【取消】，选择购买成人票")
                 popup_handled = True
-                time.sleep(0.5)
+                self._sleep(0.5)
                 return popup_handled
         except Exception:
             pass
@@ -1060,7 +1116,7 @@ class TicketMonitor(BaseHandler):
                             btn.click()
                             self.log(f"✅ 已自动处理弹窗：{name} ({btn_text})")
                             popup_handled = True
-                            time.sleep(0.5)
+                            self._sleep(0.5)
                             return popup_handled
             except (NoSuchElementException, StaleElementReferenceException):
                 continue
@@ -1102,7 +1158,7 @@ class TicketMonitor(BaseHandler):
                     self.log("✅ 已通过JS自动处理弹窗")
                     popup_handled = True
                 if popup_handled:
-                    time.sleep(0.5)
+                    self._sleep(0.5)
             except Exception:
                 pass
         

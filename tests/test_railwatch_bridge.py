@@ -216,16 +216,12 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
     def test_analyze_query_refuses_while_monitoring(self):
         from railwatch_bridge import RailWatchBridge
-
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
-        bridge.is_monitoring = True
-
-        state = bridge.analyze_query(
-            {"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-06-10"}
-        )
-
-        self.assertEqual(state["phase"], "error")
-        self.assertIn("监控运行中", state["error_message"])
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = RailWatchBridge(tmp)
+            bridge.is_monitoring = True
+            with self.assertRaisesRegex(RuntimeError, "监控运行中"):
+                bridge.analyze_query({"from_station_cn":"北京", "to_station_cn":"上海", "date":"2026-06-10"})
+            self.assertTrue(bridge.is_monitoring)
 
     def test_analyze_query_expands_date_range_and_tags_rows(self):
         from railwatch_bridge import RailWatchBridge
@@ -245,7 +241,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             bridge = RailWatchBridge(data_dir=temp_dir, event_callback=emitted_events.append)
             bridge._ensure_driver = lambda: object()
 
-            with patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer), patch("railwatch_bridge.CORE_AVAILABLE", True):
+            with patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer), patch("railwatch_bridge.CORE_AVAILABLE", True), patch("railwatch_bridge.beijing_now", return_value=dt.datetime(2026,6,9)):
                 result = bridge.analyze_query(
                     {
                         "from_station_cn": "北京",
@@ -311,26 +307,18 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
     def test_wait_for_target_time_sends_keep_alive_when_enabled(self):
         from railwatch_bridge import RailWatchBridge
-
-        class FakeDriver:
-            def __init__(self):
-                self.keep_alive_calls = 0
-
-            def execute_script(self, script):
-                if "checkUser" in script:
-                    self.keep_alive_calls += 1
-                return None
-
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
-        bridge.driver = FakeDriver()
-        bridge.is_monitoring = True
-
-        with patch.object(bridge.server_time_sync, "server_timestamp", side_effect=[0, 61, 62]), patch(
-            "railwatch_bridge.time.monotonic", side_effect=[0, 61, 62]
-        ), patch("railwatch_bridge.time.sleep", lambda seconds: None):
-            bridge._wait_for_target_timestamp(62, {"keep_alive": True})
-
-        self.assertEqual(bridge.driver.keep_alive_calls, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = RailWatchBridge(tmp)
+            bridge.driver = Mock()
+            bridge.driver.execute_async_script.return_value = "ok"
+            bridge.is_monitoring = True
+            clock = [1000.0]
+            bridge.server_time_sync = Mock()
+            bridge.server_time_sync.server_timestamp = lambda: clock[0]
+            bridge._prewarm_query_page = Mock(return_value=True)
+            with patch("railwatch_bridge.time.monotonic", lambda: clock[0]), patch("railwatch_bridge.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                bridge._wait_for_target_timestamp(1062, {"keep_alive":True})
+            self.assertEqual(bridge.driver.execute_async_script.call_count, 1)
 
     def test_wait_for_target_time_skips_keep_alive_when_disabled(self):
         from railwatch_bridge import RailWatchBridge
@@ -356,27 +344,144 @@ class RailWatchBridgeContractTests(unittest.TestCase):
     def test_monitor_worker_skips_late_prewarm_after_timer_wait(self):
         from railwatch_bridge import RailWatchBridge
 
+        created_kwargs = []
+
         class FakeMonitor:
             def __init__(self, *args, **kwargs):
-                pass
+                created_kwargs.append(kwargs)
 
             def run(self):
                 return None
+
+        class FakeResolver:
+            def load(self):
+                return {}
+
+        class FakeAnalyzer:
+            def __init__(self, driver, log_callback=None, base_dir=None):
+                self.resolver = FakeResolver()
+
+            def fill_query_form(self, from_cn, to_cn, date, timeout=10):
+                return True
 
         prewarm_calls = []
         bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
         bridge.is_monitoring = True
         bridge.server_time_sync.sync = lambda force=False: 0
         bridge._wait_for_target_time = lambda config: True
-        bridge._ensure_driver = lambda: object()
+        bridge._ensure_driver = lambda: Mock()
         bridge._prewarm_query_page = lambda driver, config: prewarm_calls.append((driver, config))
+        bridge._valid_dates = lambda *args, **kwargs: ["2026-06-10"]
+        bridge._prepare_query_page = lambda *args: True
         bridge._start_monitor_heartbeat = lambda: None
         bridge._stop_monitor_heartbeat = lambda: None
 
-        with patch("railwatch_bridge.CORE_AVAILABLE", True), patch("railwatch_bridge.TicketMonitor", FakeMonitor):
-            bridge._monitor_worker({"timer_enabled": True})
+        with patch("railwatch_bridge.CORE_AVAILABLE", True), patch(
+            "railwatch_bridge.TicketMonitor", FakeMonitor
+        ), patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer):
+            bridge._monitor_worker({"timer_enabled": True, "target_time":"08:30:00"})
 
         self.assertEqual(prewarm_calls, [])
+        # 定时路径必须把填参回调传给监控核心（开抢前预热时同步查询参数）
+        self.assertIsNotNone(created_kwargs[0].get("param_filler"))
+
+    def test_monitor_worker_ensures_driver_before_timer_wait(self):
+        # 定时模式要先创建浏览器再等待，否则等待期无法保活/预热，开抢瞬间是冷启动
+        from railwatch_bridge import RailWatchBridge
+
+        order = []
+
+        class FakeMonitor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self):
+                order.append("monitor")
+
+        class FakeResolver:
+            def load(self):
+                return {}
+
+        class FakeAnalyzer:
+            def __init__(self, driver, log_callback=None, base_dir=None):
+                self.resolver = FakeResolver()
+
+            def fill_query_form(self, from_cn, to_cn, date, timeout=10):
+                return True
+
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge.is_monitoring = True
+        bridge.server_time_sync.sync = lambda force=False: 0
+        bridge._wait_for_target_time = lambda config: order.append("wait") or True
+        bridge._ensure_driver = lambda: order.append("driver") or Mock()
+        bridge._valid_dates = lambda *args, **kwargs: ["2026-06-10"]
+        bridge._prepare_query_page = lambda *args: True
+        bridge._start_monitor_heartbeat = lambda: None
+        bridge._stop_monitor_heartbeat = lambda: None
+
+        with patch("railwatch_bridge.CORE_AVAILABLE", True), patch(
+            "railwatch_bridge.TicketMonitor", FakeMonitor
+        ), patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer):
+            bridge._monitor_worker({"timer_enabled": True, "target_time":"08:30:00"})
+
+        self.assertEqual(order, ["driver", "wait", "monitor"])
+
+    def test_prewarm_query_page_navigates_and_syncs_params(self):
+        from railwatch_bridge import QUERY_URL, RailWatchBridge
+
+        class Driver:
+            def __init__(self):
+                self.opened = []
+
+            def get(self, url):
+                self.opened.append(url)
+
+        fills = []
+        driver = Driver()
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge._param_filler = lambda from_cn, to_cn, date: fills.append((from_cn, to_cn, date)) or True
+
+        bridge._prewarm_query_page(
+            driver,
+            {"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-06-10"},
+        )
+
+        self.assertEqual(driver.opened, [QUERY_URL])
+        self.assertEqual(fills, [("北京", "上海", "2026-06-10")])
+
+    def test_fill_query_page_from_config_skips_incomplete_config(self):
+        from railwatch_bridge import RailWatchBridge
+
+        fills = []
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge._param_filler = lambda from_cn, to_cn, date: fills.append((from_cn, to_cn, date)) or True
+
+        bridge._fill_query_page_from_config({"date": "2026-06-10"})
+        bridge._fill_query_page_from_config({"from_station_cn": "北京", "to_station_cn": "上海"})
+
+        self.assertEqual(fills, [])
+
+    def test_keep_alive_warns_once_when_login_expired(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def set_script_timeout(self, value): pass
+            def execute_async_script(self, script): return "expired"
+
+        events = []
+        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+        bridge.driver = FakeDriver()
+        bridge.notification_service = Mock()
+
+        bridge._send_keep_alive()
+        bridge._send_keep_alive()
+
+        warns = [
+            event
+            for event in events
+            if event["event"] == "log" and event["payload"]["level"] == "WARN" and "登录" in event["payload"]["message"]
+        ]
+        self.assertEqual(len(warns), 1)
 
     def test_get_runtime_info_includes_live_system_facts(self):
         from railwatch_bridge import RailWatchBridge
@@ -493,8 +598,8 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         class FakeDriver:
-            def execute_script(self, script):
-                return None
+            def set_script_timeout(self, value): pass
+            def execute_async_script(self, script): return "ok"
 
         class FakeDeviceIdTracker:
             def __init__(self):
@@ -567,6 +672,93 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertNotEqual(state["payload"]["phase"], "error")
         self.assertEqual(state["payload"]["risk_level"], "warning")
         self.assertIn("核验", state["payload"]["status_message"])
+
+    def test_check_environment_repairs_mismatched_chromedriver(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def quit(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            stale_path = os.path.join(temp_dir, "stale", "chromedriver.exe")
+            os.makedirs(os.path.dirname(stale_path))
+            with open(stale_path, "wb") as handle:
+                handle.write(b"stub")
+            bridge.chromedriver_path = stale_path
+            captured = {}
+
+            def fake_install(target_dir, major_version, log_callback):
+                captured["target_dir"] = target_dir
+                captured["major_version"] = major_version
+                return os.path.join(target_dir, "chromedriver.exe")
+
+            bridge._ensure_driver = lambda test_only=False: FakeDriver()
+
+            with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", True), \
+                patch("railwatch_bridge.SELENIUM_AVAILABLE", True), \
+                patch("railwatch_bridge.detect_chrome_version", lambda: "152"), \
+                patch("railwatch_bridge.detect_chromedriver_version", lambda path: "148.0.7778.178"), \
+                patch("railwatch_bridge.download_and_install_chromedriver", fake_install):
+                payload = bridge.check_environment()
+
+            self.assertEqual(captured["major_version"], "152")
+            self.assertEqual(captured["target_dir"], temp_dir)
+            self.assertEqual(bridge.chromedriver_path, os.path.join(temp_dir, "chromedriver.exe"))
+            self.assertTrue(payload["environment_ready"])
+
+    def test_check_environment_skips_repair_when_chromedriver_matches(self):
+        from railwatch_bridge import RailWatchBridge
+
+        class FakeDriver:
+            def quit(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            driver_path = os.path.join(temp_dir, "chromedriver.exe")
+            with open(driver_path, "wb") as handle:
+                handle.write(b"stub")
+            bridge.chromedriver_path = driver_path
+            install_called = []
+
+            bridge._ensure_driver = lambda test_only=False: FakeDriver()
+
+            with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", True), \
+                patch("railwatch_bridge.SELENIUM_AVAILABLE", True), \
+                patch("railwatch_bridge.detect_chrome_version", lambda: "152"), \
+                patch("railwatch_bridge.detect_chromedriver_version", lambda path: "152.0.7977.65"), \
+                patch("railwatch_bridge.download_and_install_chromedriver", lambda **kwargs: install_called.append(kwargs)):
+                payload = bridge.check_environment()
+
+            self.assertEqual(install_called, [])
+            self.assertEqual(bridge.chromedriver_path, driver_path)
+            self.assertTrue(payload["environment_ready"])
+
+    def test_chromedriver_repair_failure_is_retried_only_when_forced(self):
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            calls = []
+
+            def fake_install(target_dir, major_version, log_callback):
+                calls.append(major_version)
+                raise RuntimeError("network down")
+
+            with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", True), \
+                patch("railwatch_bridge.detect_chrome_version", lambda: "152"), \
+                patch("railwatch_bridge.detect_chromedriver_version", lambda path: None), \
+                patch("railwatch_bridge.download_and_install_chromedriver", fake_install):
+                bridge._ensure_matching_chromedriver()
+                bridge._ensure_matching_chromedriver()
+
+                self.assertEqual(len(calls), 1)
+
+                bridge._ensure_matching_chromedriver(force=True)
+
+                self.assertEqual(len(calls), 2)
 
     def test_download_chromedriver_targets_writable_data_dir(self):
         from railwatch_bridge import RailWatchBridge
