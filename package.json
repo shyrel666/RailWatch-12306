@@ -22,7 +22,7 @@
     "build:renderer": "vite build",
     "build:runtime": "pyinstaller RailWatch_runtime.spec --distpath dist-runtime --workpath build/runtime -y",
     "build": "npm run clean && npm run typecheck && npm run build:electron && npm run build:renderer",
-    "package": "npm run build && npm run build:runtime && electron-builder",
+    "package": "npm run build && npm run build:runtime && electron-builder --publish never",
     "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "test": "npm run test:electron && npm run test:renderer",
     "test:electron": "vitest run --config electron/vitest.config.ts",
