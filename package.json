@@ -5,13 +5,13 @@
   "license": "MIT",
   "author": "RailWatch 12306 contributors",
   "description": "Electron + React shell for RailWatch 12306.",
-  "homepage": "https://github.com/railwatch/railwatch-12306#readme",
+  "homepage": "https://github.com/shyrel666/RailWatch-12306#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/railwatch/railwatch-12306.git"
+    "url": "https://github.com/shyrel666/RailWatch-12306.git"
   },
   "bugs": {
-    "url": "https://github.com/railwatch/railwatch-12306/issues"
+    "url": "https://github.com/shyrel666/RailWatch-12306/issues"
   },
   "main": "dist-electron/main.js",
   "scripts": {
