@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>RailWatch 12306</title>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="#0B1016"/>
+  <path d="M287 813 L287 165 A300 180 0 0 1 287 525 L703 813" fill="none" stroke="#EDF5F7" stroke-width="112" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="703" cy="813" r="90" fill="#0B1016"/>
+  <circle cx="703" cy="813" r="64" fill="#2FBF83"/>
+</svg>
