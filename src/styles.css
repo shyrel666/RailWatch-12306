@@ -135,26 +135,16 @@ select {
   object-fit: contain;
 }
 
-.brand strong,
-.brand span {
+.brand-wordmark {
   display: block;
-}
-
-.brand strong {
+  height: 14px;
+  width: auto;
   color: var(--text);
-  font-size: 14px;
-  font-weight: 650;
 }
 
-.brand span {
-  width: max-content;
-  margin-top: 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 8px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.04);
-  font-size: 12px;
+.brand-wordmark-name,
+.brand-wordmark-digits {
+  fill: currentColor;
 }
 
 .nav {
@@ -1367,6 +1357,14 @@ select {
   color: var(--green);
   background: var(--green-soft);
   padding: 2px 7px;
+}
+
+.statusbar-version {
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 .statusbar-chip.warning strong {

@@ -18,7 +18,6 @@ describe("SidebarNav", () => {
       <SidebarNav
         activePage="仪表盘"
         appName="RailWatch 12306"
-        appVersion="0.1.0"
         dataDir="D:/RailWatch/data"
         dataDirWritable
         dataDirFreeBytes={128_600_000_000}
@@ -26,9 +25,8 @@ describe("SidebarNav", () => {
       />,
     );
 
-    expect(screen.getByText("RailWatch 12306")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "RailWatch 12306" })).toBeTruthy();
     expect(screen.getByText("D:/RailWatch/data")).toBeTruthy();
-    expect(screen.getByText("v0.1.0")).toBeTruthy();
     expect(screen.getByText("119.8 GB")).toBeTruthy();
     expect(screen.getByLabelText("系统时钟")).toBeTruthy();
 
@@ -80,6 +78,7 @@ describe("ShellLayout", () => {
     expect(screen.queryByRole("heading", { name: "购票监控", level: 1 })).toBeNull();
     expect(screen.getByText("运行")).toBeTruthy();
     expect(screen.getByText("查询就绪")).toBeTruthy();
+    expect(screen.getByText("v0.1.0")).toBeTruthy();
     expect(screen.getByText("监控内容")).toBeTruthy();
     expect(screen.getByText("事件面板")).toBeTruthy();
     expect(screen.getByRole("button", { name: "切换到明亮主题" })).toBeTruthy();

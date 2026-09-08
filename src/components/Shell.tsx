@@ -21,6 +21,7 @@ import type { LucideIcon } from "lucide-react";
 import appIconUrl from "../../assets/images/icon.png";
 import { formatAppVersion, formatDataDirFreeSpace, formatRuntimePhaseDetail, formatRuntimePhaseLabel, formatStatusClock, getRuntimePhaseTone } from "../lib/formatSystemStatus";
 import type { RailWatchPage, RailWatchStatus, RuntimeInfo } from "../types";
+import { BrandWordmark } from "./BrandWordmark";
 import { UpdateStatusControl } from "./UpdateStatusControl";
 
 export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
@@ -33,7 +34,6 @@ export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
 export function SidebarNav({
   activePage,
   appName,
-  appVersion,
   dataDir,
   dataDirWritable,
   dataDirFreeBytes,
@@ -41,7 +41,6 @@ export function SidebarNav({
 }: {
   activePage: RailWatchPage;
   appName: string;
-  appVersion: string;
   dataDir: string;
   dataDirWritable: boolean;
   dataDirFreeBytes: number;
@@ -59,12 +58,9 @@ export function SidebarNav({
     <aside className="sidebar">
       <div className="brand">
         <div className="brand-mark">
-          <img alt="RailWatch 12306 logo" src={appIconUrl} />
+          <img alt="" src={appIconUrl} />
         </div>
-        <div>
-          <strong>{appName}</strong>
-          <span>{formatAppVersion(appVersion)}</span>
-        </div>
+        <BrandWordmark label={appName} />
       </div>
       <nav className="nav">
         {RAILWATCH_PAGES.map((page) => {
@@ -164,7 +160,6 @@ export function ShellLayout({
       <SidebarNav
         activePage={activePage}
         appName={runtime.app_display_name}
-        appVersion={runtime.app_version}
         dataDir={runtime.data_dir}
         dataDirWritable={runtime.data_dir_writable}
         dataDirFreeBytes={runtime.data_dir_free_bytes}
@@ -281,6 +276,7 @@ function BottomStatusBar({
         </span>
       </div>
       <div className="statusbar-group right">
+        <span className="statusbar-version">{formatAppVersion(runtime.app_version)}</span>
         <UpdateStatusControl appVersion={runtime.app_version} />
         <Tooltip title={darkMode ? "切换到明亮主题" : "切换到暗黑主题"}>
           <button
