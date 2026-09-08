@@ -1,4 +1,13 @@
-export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "系统设置";
+export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "系统设置" | "关于";
+
+export type AppInfo = {
+  appVersion: string;
+  electronVersion: string;
+  chromeVersion: string;
+  nodeVersion: string;
+  platform: string;
+  arch: string;
+};
 
 export type RiskLevel = "notice" | "warning" | "active" | "success" | "critical" | string;
 

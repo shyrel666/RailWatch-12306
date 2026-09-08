@@ -1,10 +1,11 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain, powerMonitor, powerSaveBlocker } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, powerMonitor, powerSaveBlocker, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   consumeExportPathGrant,
   getCommandConfirmation,
+  isAllowedExternalUrl,
   isExportPathAllowed,
   isRailWatchCommand,
   isRecord,
@@ -288,5 +289,26 @@ ipcMain.handle("railwatch:save-dialog", async (event, defaultPath?: string) => {
   }
   recordExportPathGrant(result.filePath, grantedExportPaths);
   return result.filePath;
+});
+
+ipcMain.handle("railwatch:open-external", async (event, url: unknown) => {
+  assertTrustedSender(event.senderFrame?.url);
+  if (!isAllowedExternalUrl(url)) {
+    return { ok: false, error: "External URL is not allowed." };
+  }
+  await shell.openExternal(url);
+  return { ok: true };
+});
+
+ipcMain.handle("railwatch:app-info", async (event) => {
+  assertTrustedSender(event.senderFrame?.url);
+  return {
+    appVersion: app.getVersion(),
+    electronVersion: process.versions.electron,
+    chromeVersion: process.versions.chrome,
+    nodeVersion: process.versions.node,
+    platform: process.platform,
+    arch: process.arch,
+  };
 });
 

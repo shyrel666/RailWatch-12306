@@ -2877,6 +2877,120 @@ select {
   color: color-mix(in srgb, var(--red) 50%, var(--dim));
 }
 
+/* ── About Page ── */
+
+.about-workspace {
+  align-items: center;
+}
+
+.about-panel {
+  display: grid;
+  justify-items: center;
+  gap: 16px;
+  width: min(100%, 560px);
+  margin: auto;
+  padding: 28px 0 36px;
+  text-align: center;
+}
+
+.about-identity {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+}
+
+.about-icon {
+  display: block;
+  width: 76px;
+  height: 76px;
+  border-radius: 20px;
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.24);
+}
+
+.about-wordmark {
+  height: 24px;
+}
+
+.about-version {
+  margin: 0;
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.about-tagline {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.about-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.about-update-note {
+  margin: -6px 0 0;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.about-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background 0.18s ease;
+}
+
+.about-link:hover {
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+  color: var(--blue);
+}
+
+.about-link svg {
+  opacity: 0.65;
+}
+
+.about-footnote {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  border-top: 1px solid var(--border);
+  padding-top: 18px;
+}
+
+.about-footnote p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.about-env {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.82;
+}
+
 /* ── Responsive ── */
 
 @media (max-width: 1100px) {

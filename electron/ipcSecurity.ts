@@ -51,6 +51,20 @@ export function isTrustedRailWatchUrl(frameUrl: string, allowedRendererUrl: stri
   }
 }
 
+const ALLOWED_EXTERNAL_HOSTS = new Set(["github.com"]);
+
+export function isAllowedExternalUrl(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && ALLOWED_EXTERNAL_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export function getCommandConfirmation(command: RailWatchCommandName, payload: Record<string, unknown>): ConfirmationPrompt | null {
   if (command === "clearLocalData") {
     return {

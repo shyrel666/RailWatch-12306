@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { App as AntApp, ConfigProvider, theme } from "antd";
+import { AboutPage } from "./components/AboutPage";
 import { DashboardPage } from "./components/DashboardPage";
 import { EventPanel } from "./components/EventPanel";
 import { MonitorPage } from "./components/MonitorPage";
@@ -273,6 +274,9 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
     }
     if (activePage === "系统设置") {
       return <SettingsPage busy={busy} runCommand={runCommand} />;
+    }
+    if (activePage === "关于") {
+      return <AboutPage />;
     }
     return <DashboardPage />;
   }, [activePage, busy, confirm, runCommand]);

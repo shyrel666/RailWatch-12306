@@ -12,7 +12,7 @@ describe("SidebarNav", () => {
     const user = userEvent.setup();
     const onPageChange = vi.fn();
 
-    expect(RAILWATCH_PAGES.map((page) => page.name)).toEqual(["仪表盘", "行程设置", "购票监控", "系统设置"]);
+    expect(RAILWATCH_PAGES.map((page) => page.name)).toEqual(["仪表盘", "行程设置", "购票监控", "系统设置", "关于"]);
 
     render(
       <SidebarNav
@@ -117,5 +117,28 @@ describe("ShellLayout", () => {
     expect(screen.queryByRole("heading", { name: "行程设置", level: 1 })).toBeNull();
     expect(screen.queryByRole("toolbar", { name: "顶部操作" })).toBeNull();
     expect(screen.getByText("行程设置内容")).toBeTruthy();
+  });
+
+  test("hides the topbar on the about page", () => {
+    render(
+      <ShellLayout
+        activePage="关于"
+        darkMode
+        eventPanel={null}
+        eventPanelVisible
+        runtime={{ ...defaultRuntimeInfo, app_display_name: "RailWatch 12306", data_dir: "D:/RailWatch/data" }}
+        status={{ ...defaultStatus, summary: "就绪" }}
+        onPageChange={vi.fn()}
+        onExportLog={vi.fn()}
+        onThemeChange={vi.fn()}
+        onToggleEventPanel={vi.fn()}
+      >
+        <div>关于内容</div>
+      </ShellLayout>,
+    );
+
+    expect(screen.queryByRole("toolbar", { name: "顶部操作" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "关于", level: 1 })).toBeNull();
+    expect(screen.getByText("关于内容")).toBeTruthy();
   });
 });

@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   consumeExportPathGrant,
   getCommandConfirmation,
+  isAllowedExternalUrl,
   isExportPathAllowed,
   isRailWatchCommand,
   isTrustedRailWatchUrl,
@@ -22,6 +23,17 @@ describe("ipcSecurity", () => {
     expect(isTrustedRailWatchUrl("http://localhost:5173/settings", "http://127.0.0.1:5173")).toBe(false);
     expect(isTrustedRailWatchUrl("file:///app/dist/index.html", "file:///app/dist/index.html")).toBe(true);
     expect(isTrustedRailWatchUrl("file:///app/dist/other.html", "file:///app/dist/index.html")).toBe(false);
+  });
+
+  test("opens only https GitHub links externally", () => {
+    expect(isAllowedExternalUrl("https://github.com/shyrel666/RailWatch-12306")).toBe(true);
+    expect(isAllowedExternalUrl("https://github.com/shyrel666/RailWatch-12306/releases")).toBe(true);
+    expect(isAllowedExternalUrl("http://github.com/shyrel666/RailWatch-12306")).toBe(false);
+    expect(isAllowedExternalUrl("https://gist.github.com/example")).toBe(false);
+    expect(isAllowedExternalUrl("https://github.com.evil.example/")).toBe(false);
+    expect(isAllowedExternalUrl("file:///C:/Windows/System32/calc.exe")).toBe(false);
+    expect(isAllowedExternalUrl("javascript:alert(1)")).toBe(false);
+    expect(isAllowedExternalUrl(42)).toBe(false);
   });
 
   test("requires main-process confirmation for destructive or automated commands", () => {

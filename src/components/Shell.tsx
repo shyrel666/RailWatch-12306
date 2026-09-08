@@ -9,6 +9,7 @@ import {
   EyeOff,
   FileDown,
   Gauge,
+  Info,
   MonitorPlay,
   Moon,
   ScrollText,
@@ -29,6 +30,7 @@ export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
   { name: "行程设置", icon: TrainFront },
   { name: "购票监控", icon: MonitorPlay },
   { name: "系统设置", icon: Settings },
+  { name: "关于", icon: Info },
 ];
 
 export function SidebarNav({
@@ -144,7 +146,8 @@ export function ShellLayout({
     .filter(Boolean)
     .join(" ");
   const isDashboard = activePage === "仪表盘";
-  const hideTopbar = isDashboard || activePage === "行程设置" || activePage === "购票监控" || activePage === "系统设置";
+  const hideTopbar =
+    isDashboard || activePage === "行程设置" || activePage === "购票监控" || activePage === "系统设置" || activePage === "关于";
   const workspaceClassName = [
     "workspace",
     isDashboard ? "dashboard-workspace" : "",
