@@ -31,7 +31,7 @@ function isStatusPayload(value: unknown): value is RailWatchStatus {
 }
 
 export function RailWatchApp() {
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(false);
   const runtimeTheme = useMemo(
     () => ({
       algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
