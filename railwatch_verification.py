@@ -26,31 +26,9 @@ try {
 } catch (e) { return false; }
 """
 
-ALTERNATE_SUCCESS_DETECT_JS = r"""
-try {
-    function visible(el) { return !!(el && el.offsetParent !== null); }
-    if (visible(document.querySelector(
-        '#houbu_success_id, .candidate-success, .houbu-success, .order-success, .success-tip'
-    ))) return true;
-    var href = location.href || '';
-    if (href.indexOf('candidateQueue') !== -1 || href.indexOf('queryMyOrderNoComplete') !== -1
-        || href.indexOf('candidate_view') !== -1) return true;
-    var boxes = document.querySelectorAll(
-        '.dhtmlx_window_active, .layui-layer, .modal, [role="dialog"], .ant-message-notice, .toast'
-    );
-    for (var i = 0; i < boxes.length; i++) {
-        var b = boxes[i];
-        if (!visible(b)) continue;
-        var t = b.innerText || '';
-        if (t.indexOf('确认候补') !== -1 || t.indexOf('提交候补') !== -1) continue;
-        if (t.indexOf('候补订单提交成功') !== -1) return true;
-        if (t.indexOf('已加入候补') !== -1) return true;
-        if (t.indexOf('候补成功') !== -1) return true;
-        if (t.indexOf('提交成功') !== -1) return true;
-    }
-    return false;
-} catch (e) { return false; }
-"""
+# Legacy callers must not infer a transaction from generic success text or URL.
+ALTERNATE_SUCCESS_DETECT_JS = "return false;"
+
 
 
 class VerificationDetector:
@@ -65,7 +43,4 @@ class VerificationDetector:
       return False
 
   def alternate_success_present(self) -> bool:
-    try:
-      return bool(self.driver.execute_script(ALTERNATE_SUCCESS_DETECT_JS))
-    except Exception:
-      return False
+    return False  # Use OrderPage.result with an OrderIntent and order identity.

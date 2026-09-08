@@ -28,7 +28,9 @@ from railwatch_preferences import load_theme_preference, save_theme_preference
 from railwatch_dates import expand_travel_dates, eligible_travel_dates, beijing_now, PRESALE_WINDOW_DAYS
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, AppPhase, RailWatchState, TicketHit
 from railwatch_system import get_app_version, inspect_data_dir, probe_connectivity
-from railwatch_time import ServerTimeSync, get_server_time_sync
+from railwatch_time import ServerTimeSync, get_server_time_sync, resolve_sale_timestamp
+from railwatch_orders import OrderJournal, OrderIntent, OrderResult, STAGES
+from railwatch_order_page import OrderPage
 
 try:
     from chromedriver_manager import (
@@ -137,6 +139,7 @@ def state_to_payload(state: RailWatchState) -> dict:
         "hits": [ticket_hit_to_payload(hit) for hit in state.hits],
         "summary": state.summary(),
         "task": dict(state.task),
+        "order": dict(state.order),
     }
 
 
@@ -193,6 +196,12 @@ class RailWatchBridge:
         self._chromedriver_repair_failed = False
         self.server_time_sync: ServerTimeSync = get_server_time_sync(log_callback=self.log)
         self.notification_service = NotificationService(self._load_notification_settings(), log_callback=self.log)
+        self.order_journal = OrderJournal(os.path.join(data_dir, "orders.sqlite3"))
+        pending = self.order_journal.pending()
+        if pending:
+            stage = "alternate_pending_payment" if pending["result"]["status"] == "pending_payment" and pending["intent"]["kind"] == "alternate" else pending["result"]["status"]
+            self.state = replace(self.state, order={**pending["result"], "stage": stage, "label": STAGES[stage], "intent": pending["intent"], "recovery_required": True},
+                                 status_message="发现未完成订单，请继续处理并核对官方订单", risk_level="warning")
         self._monitor_last_tick = 0.0
         self._monitor_heartbeat_thread: Optional[threading.Thread] = None
         self._param_filler: Optional[Callable[[str, str, str], bool]] = None
@@ -534,17 +543,26 @@ class RailWatchBridge:
     def start_monitor(self, raw_config: dict, confirmed: bool = False) -> dict:
         requested_at = time.time()
         config = validate_config(raw_config)
+        if self.order_journal.pending():
+            raise RuntimeError("存在待支付或待核对订单，请点击继续处理，不能重复启动提交。")
+        if config.get("auto_submit") or config.get("auto_alternate"):
+            from railwatch_config_contract import parse_passenger_names
+            names = parse_passenger_names(config.get("passengers", ""))
+            if not names or len(names) != len(set(names)) or not config.get("seat_keyword", "").strip() or not config.get("train_code", "").strip():
+                raise ValueError("自动提交需要明确的目标车次、可接受席别及不重复的乘车人姓名。")
+            if config.get("auto_alternate") and len(names) > 19:
+                raise ValueError("候补单最多支持19名乘车人。")
         confirmation = self._automation_confirmation(config)
         if confirmation and not confirmed:
             return confirmation
         with self._task_lock:
             if self.is_monitoring or self._browser_busy:
                 raise RuntimeError("监控运行中或正在停止，请等待当前任务退出。")
-            reference = beijing_now(requested_at + self.server_time_sync.offset_seconds)
-            target = self.server_time_sync.parse_target_datetime(config["target_time"], reference).timestamp() if config.get("timer_enabled") else None
+            target = resolve_sale_timestamp(config) if config.get("timer_enabled") else None
             self._valid_dates(config, max(requested_at, target or requested_at), announce=True)
             task = MonitorTask(config, target, started_at=requested_at)
             self._task = task
+            self.order_journal.mark(task.run_id, "target_sale", detail={"target_at": target})
             self.state = self.state.with_safety(config["auto_submit"], config["auto_alternate"]).with_monitoring(True)
             self._transition(task, "preparing")
             task.thread = threading.Thread(target=lambda: self._monitor_worker(deepcopy(config), task), name=f"railwatch-monitor-{task.run_id[:8]}", daemon=True)
@@ -553,13 +571,105 @@ class RailWatchBridge:
             threading.Thread(target=lambda: self._finish_task(task), name="railwatch-task-finalizer", daemon=True).start()
             return state_to_payload(self.state)
 
+    def continue_order(self) -> dict:
+        """Resume only the saved intent; never replay an uncertain submission."""
+        with self._task_lock:
+            if self.is_monitoring or self._browser_busy:
+                raise RuntimeError("请等待当前浏览器任务退出后再继续处理")
+            pending = self.order_journal.pending()
+            if not pending:
+                raise ValueError("没有待处理订单")
+            task = MonitorTask(pending["config"])
+            self._task = task
+            self._transition(task, "reconciling", message="正在核对原订单")
+            task.thread = threading.Thread(target=lambda: self._resume_order_worker(task, pending), daemon=True)
+            task.thread.start()
+            threading.Thread(target=lambda: self._finish_task(task), daemon=True).start()
+            return state_to_payload(self.state)
+
+    def _resume_order_worker(self, task, pending):
+        self._event_context.run_id = task.run_id
+        self._start_monitor_heartbeat()
+        intent = OrderIntent.from_dict(pending["intent"])
+        try:
+            with self._driver_lock:
+                driver = self._ensure_driver()
+                driver.set_page_load_timeout(15)
+                driver.set_script_timeout(3)
+                with guard_browser(driver, task, lambda: self._transition(task)):
+                    page = OrderPage(driver, task.cancel.is_set, lambda seconds: self._task_wait(task, seconds),
+                                     lambda stage, detail=None: self.order_journal.mark(task.run_id, stage, intent.intent_id, detail))
+                    known_id = pending["result"].get("order_id", "")
+                    result = page.result(intent, submitted=True, known_id=known_id)
+                    if result.status == "unknown" and page.snapshot().get("formReady") and self.order_journal.claim_resume(task.run_id, intent.intent_id):
+                        result = page.alternate(None, intent) if intent.kind == "alternate" else page.regular(None, intent)
+                        self.order_journal.release_resume(task.run_id, intent.intent_id)
+                    elif result.status in ("unknown", "verification"):
+                        result = page.reconcile(intent, known_id=known_id, navigate=True,
+                                                allow_empty=not self.order_journal.submission_started(intent.intent_id))
+                    result = self.order_journal.record(intent, result)
+                    self._handle_order(intent, result)
+                    if result.status in ("pending_payment", "active"):
+                        self._observe_order(task, driver, intent, result)
+                    elif result.status in ("unknown", "verification"):
+                        self._handle_human_action({"message": result.reason})
+        except TaskCancelled:
+            pass
+        except Exception:
+            self._handle_human_action({"message": "无法恢复浏览器订单，请在官方订单页面核对后继续处理。"})
+        finally:
+            self._event_context.run_id = None
+
+    def _handle_order(self, intent, result):
+        stage = "alternate_pending_payment" if result.status == "pending_payment" and intent.kind == "alternate" else result.status
+        payload = {**result.payload(), "stage": stage, "label": STAGES[stage],
+                   "intent": {"intent_id": intent.intent_id, "kind": intent.kind, "train_code": intent.train_code,
+                              "date": intent.date, "seat": intent.seat}, "updated_at": time.time(), "recovery_required": result.status in ("unknown", "verification")}
+        self.state = replace(self.state, order=payload, status_message=STAGES[stage])
+        self.emit("orderStage", payload)
+        if self._task:
+            self._transition(self._task, stage, message=STAGES[stage])
+        else:
+            self.emit_state()
+        if result.status in ("pending_payment", "active", "fulfilled"):
+            message = "请在官方页面立即完成预付款；支付后候补才生效。" if stage == "alternate_pending_payment" else "请在官方页面完成支付。" if stage == "pending_payment" else "已根据匹配的官方订单确认状态。"
+            self.emit("notify", {"title": STAGES[stage], "message": message, "priority": "urgent"})
+            self._notify_async(STAGES[stage], message)
+
+    def _notify_async(self, title, message):
+        threading.Thread(target=lambda: self.notification_service.notify(title, message, urgent=True),
+                         name="railwatch-notify", daemon=True).start()
+
+    def _observe_order(self, task, driver, intent, previous):
+        # Read the page only; never refresh or leave an interactive payment page.
+        page = OrderPage(driver, task.cancel.is_set, lambda seconds: self._task_wait(task, seconds))
+        unknown_since = None
+        while not task.cancel.is_set():
+            self._task_wait(task, 1)
+            if task.cancel.is_set(): break
+            result = page.result(intent, submitted=True, known_id=previous.order_id)
+            if result.status == "unknown":
+                unknown_since = unknown_since or time.monotonic()
+                if time.monotonic() - unknown_since > 30:
+                    self._handle_human_action({"message": "请完成支付后打开官方订单详情，再点击继续处理核对生效状态。"})
+                    break
+                continue
+            unknown_since = None
+            if result.status != previous.status:
+                result = self.order_journal.record(intent, result)
+                self.order_journal.mark(task.run_id, result.status, intent.intent_id)
+                self._handle_order(intent, result)
+            previous = result
+            if result.status not in ("pending_payment",):
+                break  # Official queue continues after the local observer stops.
+
     def _finish_task(self, task):
         if task.thread:
             task.thread.join()
         with self._task_lock:
             task.done.set()
             if task is self._task:
-                terminal = task.status if task.status in ("human_action", "error", "hit") else "stopped"
+                terminal = task.status if task.status in ("human_action", "error", "hit", *STAGES.keys()) else "stopped"
                 self._transition(task, terminal)
 
     def stop_monitor(self) -> dict:
@@ -568,6 +678,11 @@ class RailWatchBridge:
                 self._task.cancel.set()
                 self._transition(self._task, "stopping")
             return self.emit_state()
+
+    def system_resumed(self) -> dict:
+        if self.is_monitoring:
+            self._handle_human_action({"message": "电脑已从休眠恢复，请核对时间、登录及订单状态后继续。"})
+        return self.emit_state()
 
     @idle_browser_command
     def close_browser(self, confirmed: bool = False) -> dict:
@@ -601,6 +716,8 @@ class RailWatchBridge:
             }
         if self.is_monitoring:
             raise RuntimeError("监控运行中，请先停止监控后再清除本地数据。")
+        if self.order_journal.pending():
+            raise RuntimeError("仍有未完成订单，请先核对官方订单状态，避免清除记录后重复提交。")
         target = os.path.abspath(self.data_dir)
         if os.path.basename(target) != APP_SLUG:
             self.log(f"拒绝清除意外的数据目录: {target}", "ERROR")
@@ -613,6 +730,8 @@ class RailWatchBridge:
         if os.path.exists(target):
             shutil.rmtree(target)
         os.makedirs(target, exist_ok=True)
+        self.order_journal = OrderJournal(os.path.join(target, "orders.sqlite3"))
+        self.state = replace(self.state, order={})
         self.log("本地 RailWatch 数据已清除。", "SUCCESS")
         return {"cleared": True, "data_dir": target}
 
@@ -653,6 +772,8 @@ class RailWatchBridge:
             "offset_seconds": round(offset, 3),
             "server_time": self.server_time_sync.server_now().isoformat(timespec="seconds"),
             "last_error": self.server_time_sync.last_error,
+            "clock_source": "system",
+            "http_uncertainty_seconds": self.server_time_sync.uncertainty_seconds,
         }
 
     def _notification_settings_path(self) -> str:
@@ -690,8 +811,7 @@ class RailWatchBridge:
         try:
             # Freeze the date before every potentially blocking initialization step.
             if config.get("timer_enabled") and task.target_timestamp is None:
-                task.target_timestamp = self.server_time_sync.parse_target_datetime(config["target_time"], beijing_now(task.started_at + self.server_time_sync.offset_seconds)).timestamp()
-            self.server_time_sync.sync(force=True)
+                task.target_timestamp = resolve_sale_timestamp(config)
             if task.cancel.is_set():
                 return
             if not CORE_AVAILABLE or TicketMonitor is None:
@@ -707,6 +827,20 @@ class RailWatchBridge:
                     self._param_filler = self._make_param_filler(driver)
                     if task.cancel.is_set():
                         return
+                    if not self._prepare_query_page(driver, config, task):
+                        return
+                    if config.get("auto_submit") or config.get("auto_alternate"):
+                        self._send_keep_alive()
+                        task.last_login_check = time.monotonic()
+                        if not self.state.login_ready:
+                            self._handle_human_action({"message": "自动提交前未能确认登录有效，请在官方页面完成登录并重新检查。"})
+                            return
+                    if not self._check_session_for_task(task):
+                        return
+                    prepared_at = time.time()
+                    self.order_journal.mark(task.run_id, "prepared", detail={"prepared_at": prepared_at, "target_at": task.target_timestamp})
+                    if task.target_timestamp and prepared_at > task.target_timestamp - 10:
+                        self.log("准备完成时已进入最后10秒或超过起售点；本次继续执行，但不能计作准点准备完成。", "WARN")
                     if config.get("timer_enabled"):
                         config["_target_timestamp"] = task.target_timestamp
                         if not self._wait_for_target_time(config):
@@ -714,8 +848,6 @@ class RailWatchBridge:
                     if task.cancel.is_set():
                         return
                     self._valid_dates(task.config, announce=True)
-                    if not self._prepare_query_page(driver, config, task):
-                        return
                     monitor = TicketMonitor(
                         driver, config, log_callback=self.log, stop_check=task.cancel.is_set,
                         notify_callback=self._handle_notify, progress_callback=self._handle_progress,
@@ -725,8 +857,12 @@ class RailWatchBridge:
                         tick_callback=lambda **kwargs: self._transition(task, **kwargs),
                         session_check=lambda: self._check_session_for_task(task),
                         date_provider=lambda: self._valid_dates(task.config),
+                        order_journal=self.order_journal, on_order=self._handle_order, run_id=task.run_id,
                     )
                     monitor.run()
+                    pending = self.order_journal.pending()
+                    if pending and not task.cancel.is_set() and pending["result"]["status"] == "pending_payment":
+                        self._observe_order(task, driver, OrderIntent.from_dict(pending["intent"]), OrderResult(**pending["result"]))
         except TaskCancelled:
             pass
         except Exception as exc:
@@ -757,7 +893,7 @@ class RailWatchBridge:
         if task.cancel.is_set():
             return False
         if task.config.get("keep_alive") and time.monotonic() - task.last_login_check >= 60:
-            if task.target_timestamp is not None and task.target_timestamp - 3 <= self.server_time_sync.server_timestamp() <= task.target_timestamp:
+            if task.target_timestamp is not None and task.target_timestamp - 10 <= time.time() <= task.target_timestamp + 5:
                 return True
             self._send_keep_alive()
             task.last_login_check = time.monotonic()
@@ -766,8 +902,8 @@ class RailWatchBridge:
     def _wait_for_target_time(self, config: dict) -> bool:
         target = config.get("_target_timestamp")
         if target is None:
-            target = self.server_time_sync.parse_target_datetime(config["target_time"]).timestamp()
-        wait_until = target - int(config.get("prepare_time", 0))
+            target = resolve_sale_timestamp(config)
+        wait_until = target
         self.log(f"定时启动：{beijing_now(target).isoformat(timespec='seconds')}")
         if self._task:
             self._transition(self._task, "waiting", next_query_at=wait_until)
@@ -809,35 +945,31 @@ class RailWatchBridge:
             self.log("暂时无法确认登录状态，将在下次保活时重试。", "WARN")
 
     def _wait_for_target_timestamp(self, wait_until: float, config: dict) -> bool:
-        last_keep_alive, last_prewarm = 0.0, 0.0
-        while True:
-            if self._task and self._task.cancel.is_set():
+        wall, mono = time.time(), time.monotonic()
+        deadline = mono + max(0, wait_until - wall)
+        last_check, last_tick = mono, mono
+        while self.is_monitoring:
+            task = self._task
+            if task.cancel.is_set():
                 return False
-            now_server = self.server_time_sync.server_timestamp()
-            if now_server >= wait_until:
+            current_mono, current_wall = time.monotonic(), time.time()
+            drift = (current_wall - wall) - (current_mono - mono)
+            if abs(drift) > 1 or current_mono - last_tick > 5:
+                self._handle_human_action({"message": "系统时间发生跳变或电脑刚从休眠恢复，请重新检查起售时间、登录和订单后启动。"})
+                return False
+            last_tick = current_mono
+            remaining = deadline - current_mono
+            if remaining <= 0:
+                self.order_journal.mark(task.run_id, "scheduler_wake", detail={"target_at": wait_until, "late_ms": max(0, -remaining * 1000)})
                 return True
-            if not self.is_monitoring:
-                return False
-            self._monitor_last_tick = time.time()
-            now_mono = time.monotonic()
-            if self._task:
-                self._transition(self._task)
-            if config.get("keep_alive") and now_mono-last_keep_alive >= 60 and wait_until-now_server >= 3:
+            self._transition(task)
+            # No navigation, HTTP calibration or login probes in the final ten seconds.
+            if remaining > 10 and config.get("keep_alive") and current_mono - last_check >= 60:
                 self._send_keep_alive()
-                last_keep_alive = now_mono
-                if self._task:
-                    self._task.last_login_check = now_mono
-                    if self._task.cancel.is_set():
-                        return False
-            if self.driver and (wait_until-now_server >= 3 or not last_prewarm) and wait_until-now_server <= float(config.get("prewarm_lead_seconds",120)) and now_mono-last_prewarm >= MONITOR_PREWARM_INTERVAL_SECONDS:
-                result = self._prewarm_query_page(self.driver, config)
-                if isinstance(result, FillResult) and result.status == "config_error":
-                    raise ValueError(result.reason)
-                last_prewarm = now_mono
-            if self._task and self._task.thread:
-                self._task_wait(self._task, 0.2)
-            else:
-                time.sleep(0.2)
+                last_check = time.monotonic()
+                task.last_login_check = last_check
+            task.cancel.wait(min(0.02 if remaining <= 10 else 0.2, remaining))
+        return False
 
     def _make_param_filler(self, driver) -> Optional[Callable[[str, str, str], bool]]:
         """构造"在查询页上同步填参"的回调；站点编码在此预热缓存，避免开抢瞬间再联网下载。"""
@@ -902,80 +1034,24 @@ class RailWatchBridge:
 
         profile_dir = os.path.join(self.data_dir, "chrome_profile_12306")
         os.makedirs(profile_dir, exist_ok=True)
-        if ANTI_DETECT_AVAILABLE and AntiDetect is not None:
-            try:
-                self.log("已启用反检测浏览器配置。")
-                anti_detect = AntiDetect(self.data_dir, log_callback=self.log, driver_path=self.chromedriver_path)
-                driver = anti_detect.create_driver(profile_dir)
-                if not test_only:
-                    self.driver = driver
-                    if BehaviorSimulator is not None:
-                        self.behavior_simulator = BehaviorSimulator(driver, self.log)
-                    if RailDeviceIdProtector is not None:
-                        self.device_id_protector = RailDeviceIdProtector(driver, self.log)
-                return driver
-            except Exception as exc:
-                self.log(f"反检测启动失败，回退到标准 Selenium: {exc}", "WARN")
-
         options = webdriver.ChromeOptions()
         options.add_argument(f"--user-data-dir={profile_dir}")
         options.add_argument("--profile-directory=Default")
-        options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--start-maximized")
         options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-        options.add_experimental_option("useAutomationExtension", False)
-        # 反检测首选项
+        # Use the same ordinary Chrome profile; do not modify browser fingerprints.
         options.add_experimental_option("prefs", {
             "credentials_enable_service": False,
             "profile.password_manager_enabled": False,
-            "webrtc.ip_handling_policy": "disable_non_proxied_udp",
-            "webrtc.multiple_routes_enabled": False,
-            "webrtc.nonproxied_udp_enabled": False,
         })
         service = Service(executable_path=self.chromedriver_path) if Service and os.path.exists(self.chromedriver_path) else None
         driver = webdriver.Chrome(options=options, service=service) if service else webdriver.Chrome(options=options)
-        # 注入基础反检测脚本（即使 AntiDetect 模块不可用）
-        self._inject_basic_anti_detect(driver)
+        # Bound a disconnected driver's transport as well as page/script waits.
+        driver.command_executor.client_config.timeout = 35
         if not test_only:
             self.driver = driver
         return driver
-
-    def _inject_basic_anti_detect(self, driver) -> None:
-        """Inject minimal anti-detect JS when AntiDetect module is unavailable."""
-        basic_js = '''
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined, configurable: true});
-        delete navigator.__proto__.webdriver;
-        window.chrome = window.chrome || {};
-        window.chrome.runtime = window.chrome.runtime || {};
-        delete window.__puppeteer_evaluation_script__;
-        delete window.__playwright_evaluation_script__;
-        delete window.__selenium_unwrapped;
-        delete window.__webdriver_evaluate;
-        delete window.__driver_evaluate;
-        delete window.__webdriver_unwrapped;
-        delete window.__driver_unwrapped;
-        Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN','zh','en-US','en']});
-        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-        const originalQuery = navigator.permissions && navigator.permissions.query;
-        const origToString = Function.prototype.toString;
-        Function.prototype.toString = function() {
-            if (originalQuery && this === originalQuery) return 'function query() { [native code] }';
-            return origToString.apply(this, arguments);
-        };
-        console.log('[RailWatch] 基础浏览器环境脚本已注入');
-        '''
-        try:
-            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": basic_js})
-            self.log("基础反检测脚本注入成功（回退模式）。", "SUCCESS")
-        except Exception:
-            try:
-                driver.execute_script(basic_js)
-                self.log("基础反检测脚本注入成功（直接执行）。")
-            except Exception as exc:
-                self.log(f"基础反检测脚本注入失败: {exc}", "WARN")
 
     def _run_worker(self, name: str, target: Callable[[], None]) -> None:
         self.worker_threads = [thread for thread in self.worker_threads if thread.is_alive()]
@@ -998,7 +1074,7 @@ class RailWatchBridge:
         if not self._owns_context():
             return
         self.log(f"{title}: {message}", "SUCCESS")
-        self.notification_service.notify(title, message, urgent=True)
+        self._notify_async(title, message)
 
     def _handle_progress(self, payload: dict) -> None:
         if not self._owns_context():
@@ -1033,7 +1109,7 @@ class RailWatchBridge:
                 "priority": "urgent",
             },
         )
-        self.notification_service.notify(title, message, urgent=True)
+        self._notify_async(title, message)
         self.emit_state(self.state.with_hit(hit, title))
         if self._task:
             self._transition(self._task, "hit", message=title)
@@ -1058,7 +1134,7 @@ class RailWatchBridge:
                 "priority": "urgent",
             },
         )
-        self.notification_service.notify(title, message, urgent=True)
+        self._notify_async(title, message)
         # 非错误的警示状态，让界面在停止后仍显示「需要人工核验」，而不是普通的「监控已停止」
         self.emit_state(replace(self.state.with_human_action(status), monitoring=self.is_monitoring))
 
@@ -1104,6 +1180,9 @@ class RailWatchBridge:
             smart_rate=config["smart_rate"],
             timer_enabled=config["timer_enabled"],
             target_time=config["target_time"],
+            sale_at=config.get("sale_at", ""),
+            sale_time_source=config.get("sale_time_source", "manual"),
+            sale_time_checked_at=config.get("sale_time_checked_at", ""),
             burst_window_seconds=config.get("burst_window_seconds", 45),
             prewarm_lead_seconds=config.get("prewarm_lead_seconds", 120),
         )

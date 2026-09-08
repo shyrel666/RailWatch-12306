@@ -1,9 +1,9 @@
-"""12306 server time calibration for punctual ticket monitoring."""
+"""System-clock scheduling and optional HTTP time diagnostics."""
 
 from __future__ import annotations
 
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Optional
 from railwatch_dates import beijing_now
@@ -17,7 +17,7 @@ DEFAULT_BURST_WINDOW_SECONDS = 45.0
 
 
 class ServerTimeSync:
-    """Track offset between local clock and 12306 server clock (via HTTP Date header)."""
+    """Legacy name retained; HTTP Date is diagnostic, never the sale scheduler clock."""
 
     def __init__(
         self,
@@ -31,6 +31,8 @@ class ServerTimeSync:
         self._offset_seconds: float = 0.0
         self._last_sync_monotonic: float = 0.0
         self._last_error: str = ""
+        self.uncertainty_seconds = None
+        self.rtt_seconds = None
 
     @property
     def offset_seconds(self) -> float:
@@ -55,31 +57,32 @@ class ServerTimeSync:
                 method="HEAD",
                 headers={"User-Agent": "RailWatch/1.0"},
             )
+            started_wall, started_mono = time.time(), time.monotonic()
             with urllib.request.urlopen(request, timeout=5) as response:
                 date_header = response.headers.get("Date")
                 if not date_header:
                     raise RuntimeError("12306 响应缺少 Date 头")
                 server_dt = parsedate_to_datetime(date_header)
                 server_ts = server_dt.timestamp()
-                local_ts = time.time()
-                self._offset_seconds = server_ts - local_ts
+                self.rtt_seconds = max(0.0, time.monotonic() - started_mono)
+                self.uncertainty_seconds = 0.5 + self.rtt_seconds / 2
+                if float(response.headers.get("Age", "0")) > 0:
+                    raise RuntimeError("HTTP响应来自缓存，不能用于时间检查")
+                self._offset_seconds = server_ts + 0.5 - (started_wall + self.rtt_seconds / 2)
                 self._last_sync_monotonic = now_mono
                 self._last_error = ""
-                self.log(
-                    f"服务器时间已校准，偏移 {self._offset_seconds:+.3f}s"
-                    if abs(self._offset_seconds) >= 0.05
-                    else "服务器时间与本地时钟一致"
-                )
+                self.log(f"HTTP时间辅助检查：偏差 {self._offset_seconds:+.3f}s，估计不确定度 ±{self.uncertainty_seconds:.3f}s；定时使用系统时钟")
         except (urllib.error.URLError, OSError, RuntimeError, ValueError) as exc:
             self._last_error = str(exc)
+            self.uncertainty_seconds = None
             if force or not self._last_sync_monotonic:
                 self.log(f"服务器时间校准失败，使用本地时钟：{exc}")
             self._last_sync_monotonic = now_mono
         return self._offset_seconds
 
     def server_timestamp(self) -> float:
-        self.sync()
-        return time.time() + self._offset_seconds
+        # Hot-path clock access must never perform network I/O. HTTP Date is diagnostic only.
+        return time.time()
 
     def server_now(self) -> datetime:
         return beijing_now(self.server_timestamp())
@@ -91,8 +94,6 @@ class ServerTimeSync:
             raise ValueError(f"目标时间格式无效：{target_time}")
         hour, minute, second = (int(part) for part in parts)
         target = reference.replace(hour=hour, minute=minute, second=second, microsecond=0)
-        if target < reference:
-            target = target + timedelta(days=1)
         return target
 
     def is_in_burst_window(
@@ -103,7 +104,7 @@ class ServerTimeSync:
     ) -> bool:
         try:
             now_ts = self.server_timestamp()
-            reference = datetime.fromtimestamp(now_ts)
+            reference = self.server_now()
             parts = str(target_time or "00:00:00").strip().split(":")
             if len(parts) != 3:
                 raise ValueError(f"目标时间格式无效：{target_time}")
@@ -147,3 +148,16 @@ def get_server_time_sync(log_callback: Optional[Callable[[str], None]] = None) -
 def reset_server_time_sync() -> None:
     global _GLOBAL_SYNC
     _GLOBAL_SYNC = None
+
+
+def resolve_sale_timestamp(config):
+    value = str(config.get("sale_at", "")).strip()
+    if not value:
+        raise ValueError("请核对并填写完整起售日期时间（北京时间），旧版时分秒不会自动顺延至次日。")
+    try:
+        target = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("起售时刻格式无效") from exc
+    if target.utcoffset() != timedelta(hours=8):
+        raise ValueError("起售时刻必须包含北京时间时区 +08:00")
+    return target.timestamp()

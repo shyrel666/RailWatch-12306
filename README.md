@@ -6,7 +6,7 @@ RailWatch 12306 是一个开源 Electron 桌面应用，用 React/Vite 提供本
 
 ## Current Status
 
-- 0.1.0 仍是 alpha 版本。
+- 当前版本为 v0.3.0，交易自动化仍为实验性功能，需真实账号人工验收。
 - 当前主界面为 Electron + React/Vite。
 - Python 只保留 runtime 与 Selenium 核心，桌面界面统一由 Electron 提供。
 - Windows 打包链路已接入 electron-builder + PyInstaller runtime。
@@ -19,8 +19,9 @@ RailWatch 12306 是一个开源 Electron 桌面应用，用 React/Vite 提供本
 - 官方页面登录：打开 12306 登录页，由用户手动完成验证码和登录。
 - 查询分析：打开查询页并解析页面结果。
 - 监控提醒：目标车次/席别命中后写入事件日志并弹出提醒。
-- 定时抢票：按 12306 服务器时间定时起跑，开抢前预热查询页并自动填入出发/到达/日期；识别到未起售提示后短间隔重试，其他查询失败按退避间隔重试；等待期当次检查登录态，失效后停止并提示手动重启。
-- 自动候补：无票且可候补时自动提交候补订单，遇到人脸/滑块核验自动转人工。
+- 定时查询：设置完整北京时间起售时刻，提前准备页面，用系统校时及单调时钟等待；HTTP时间只作辅助检查。旧版时分秒不会自动顺延到次日。
+- 实验性交易辅助：先检查全部目标车次的现票，均无票后提交首选候补；明确售罄才自动回退，结果未知则保留订单意图并转人工核对。
+- 订单跟踪：SQLite保存提交意图和匹配订单证据，区分预订待支付、候补待支付、生效及兑现；重启后可继续核对，禁止盲目重放。核验及支付由用户完成，真实账号流程尚待验收。
 - 安全护栏：自动提交、自动候补、关闭浏览器、清理本地数据等危险操作需要确认。
 - 隐私优先：配置、日志、Chrome profile 和 cookie 默认仅保存在本机用户数据目录。
 
@@ -28,7 +29,7 @@ RailWatch 12306 是一个开源 Electron 桌面应用，用 React/Vite 提供本
 
 - Windows 10/11, macOS 或 Linux 桌面环境
 - Node.js 20+
-- Python 3.10+ 推荐，3.8+ 仍可运行 Python core
+- Python 3.10+（与已固定的Selenium／requests版本一致）
 - Chrome 浏览器
 - ChromeDriver，版本需与 Chrome 匹配
 
@@ -106,7 +107,9 @@ React renderer
 Python runtime
   ├─ railwatch_runtime.py: JSON Lines command loop
   ├─ railwatch_bridge.py: frontend-neutral command facade
-  └─ gui_12306_0.py / anti_detect.py: Selenium query and monitor core
+  ├─ gui_12306_0.py: Selenium query and monitor core
+  ├─ railwatch_order_page.py: verified page transactions and reconciliation
+  └─ railwatch_orders.py: durable intent, order evidence and stage timestamps
 ```
 
 ## Project Structure
@@ -139,13 +142,13 @@ Runtime data is stored outside the source directory. On Windows the default path
 %LOCALAPPDATA%\railwatch-12306
 ```
 
-Typical local files include `user_config.json`, `railwatch.log`, `ui_preferences.json`, `chrome_profile_12306/`, `device_profile.json` and `station_codes_cache.json`. Do not commit these files or screenshots containing personal ticket/order/account information.
+Typical local files include `user_config.json`, `railwatch.log`, `ui_preferences.json`, `chrome_profile_12306/`, `orders.sqlite3` and `station_codes_cache.json`. The order journal contains passenger names and trip snapshots. Do not commit these files or screenshots containing personal ticket/order/account information.
 
 ## Safety Notes
 
 - Automatic submit and automatic alternate are disabled by default.
 - Browser environment helpers keep local Chrome profile and page-visible values stable for low-frequency monitoring.
-- RailWatch does not bypass login, captcha, order confirmation, payment, website rules or service rate limits.
+- RailWatch does not bypass login, captcha, payment, website rules or service rate limits. Opt-in automatic submission may click the official order confirmation after verifying the configured trip.
 - New automation behavior must be opt-in and guarded by explicit confirmation.
 - Stop monitoring if 12306 shows verification, risk prompts or unusual page states.
 
@@ -170,6 +173,10 @@ MIT License. See [LICENSE](LICENSE).
 
 ```bash
 python -X utf8 tests/browser_smoke.py
+python -X utf8 tests/order_browser_smoke.py
+python -X utf8 tests/timing_smoke.py --samples 1000
 ```
 
 需先安装匹配的 ChromeDriver。Windows 打包后可运行 `python -X utf8 tests/packaged_smoke.py`，使用临时用户数据验证 Electron、preload 和内置 runtime；截图保存在 `build/qa/`。
+
+本轮交易状态、恢复规则、定时实测和仍需真实账号验证的项目见 [交易可靠性实现与验收记录](docs/transaction-reliability.md)。真实验证前不宣称可靠自动候补或保证抢到票。

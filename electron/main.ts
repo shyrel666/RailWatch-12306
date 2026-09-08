@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, powerMonitor, powerSaveBlocker } from "electron";
 import { autoUpdater } from "electron-updater";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -26,6 +26,19 @@ let updateManager: UpdateManager | null = null;
 const pythonRuntime = new RailWatchPythonRuntimeClient();
 const grantedExportPaths = new Set<string>();
 let allowedRendererUrl = "";
+let wakeLock: number | null = null;
+const ownsInstance = app.requestSingleInstanceLock();
+if (!ownsInstance) app.quit();
+app.on("second-instance", () => {
+  if (mainWindow?.isMinimized()) mainWindow.restore();
+  mainWindow?.show();
+  mainWindow?.focus();
+});
+
+function keepAwake(active: boolean) {
+  if (active && wakeLock === null) wakeLock = powerSaveBlocker.start("prevent-app-suspension");
+  if (!active && wakeLock !== null) { powerSaveBlocker.stop(wakeLock); wakeLock = null; }
+}
 
 async function requestMainConfirmation(prompt: ConfirmationPrompt): Promise<boolean> {
   const options = {
@@ -139,6 +152,7 @@ function createWindow(): void {
   });
 
   pythonRuntime.on("event", (event: RuntimeEvent) => {
+    if (event.event === "state") keepAwake(Boolean((event.payload as { monitoring?: boolean })?.monitoring));
     if (event.event === "notify" || event.event === "humanAction") {
       const payload = (event.payload ?? {}) as { priority?: string; title?: string; message?: string; train_code?: string };
       if (payload.priority === "urgent") {
@@ -167,6 +181,7 @@ function createWindow(): void {
     });
   });
   pythonRuntime.on("exit", () => {
+    keepAwake(false);
     sendToRenderer("railwatch:event", {
       type: "event",
       event: "runtimeExit",
@@ -183,6 +198,8 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  if (!ownsInstance) return;
+  powerMonitor.on("resume", () => { void pythonRuntime.request("systemResumed").catch(() => undefined); });
   registerAlertIpcHandlers();
   createWindow();
   initializeAutoUpdater();
@@ -195,6 +212,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  keepAwake(false);
   stopUrgentAlertLoop();
   pythonRuntime.stop();
   if (process.platform !== "darwin") {
@@ -271,4 +289,4 @@ ipcMain.handle("railwatch:save-dialog", async (event, defaultPath?: string) => {
   recordExportPathGrant(result.filePath, grantedExportPaths);
   return result.filePath;
 });
-
+

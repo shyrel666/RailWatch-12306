@@ -9,11 +9,11 @@ class ServerTimeSyncTests(unittest.TestCase):
     def setUp(self):
         reset_server_time_sync()
 
-    def test_parse_target_datetime_rolls_to_next_day_when_past(self):
+    def test_parse_target_datetime_does_not_silently_roll_to_next_day(self):
         sync = ServerTimeSync()
         reference = datetime(2026, 6, 9, 15, 0, 0)
         target = sync.parse_target_datetime("08:30:00", reference=reference)
-        self.assertEqual(target.date().isoformat(), "2026-06-10")
+        self.assertEqual(target.date().isoformat(), "2026-06-09")
         self.assertEqual(target.strftime("%H:%M:%S"), "08:30:00")
 
     def test_is_in_burst_window_uses_server_offset(self):

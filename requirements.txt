@@ -1,13 +1,10 @@
 # RailWatch 12306 dependencies
 
 # Core automation
-selenium>=4.0.0
+selenium==4.44.0
 
 # ChromeDriver auto-download
-requests>=2.28.0
-
-# Browser profile and anti-detection support
-undetected-chromedriver>=3.5.0
+requests==2.33.1
 
 # Voice notification (optional, cross-platform)
 pyttsx3>=2.90

@@ -1,0 +1,53 @@
+<!doctype html><meta charset="utf-8"><title>Offline order regression fixture</title>
+<style>.hidden{display:none} label,button,a,select{display:inline-block}td{padding:3px}</style>
+<button id="book">预订</button><button id="candidate">候补</button>
+<div id="regular" class="hidden">
+  <div id="ticket_info">G101 2026年9月10日 北京 → 上海</div>
+  <div id="normal_passenger_id"><label title="张三"><input type="checkbox">张三</label><label title="李四"><input type="checkbox">李四</label></div>
+  <div id="normal-selected"></div><button id="submitOrder_id">提交订单</button>
+</div>
+<div id="candidate-form" class="hidden">
+  <div id="ticket_card_list"><div class="ticket-card">
+    <div class="ticket-date">2026年9月10日</div><div class="ticket-number">G101</div>
+    <div class="ticket-station-start"><div class="ticket-station-name" title="北京">北京</div></div>
+    <div class="ticket-station-end"><div class="ticket-station-name" title="上海">上海</div></div>
+    <div class="ticket-info-txt"><span>二等座</span></div>
+  </div></div>
+  <div id="passenge_list"><label title="张三"><input class="chose-pass-dom" type="checkbox">张三</label><label title="李四"><input class="chose-pass-dom" type="checkbox">李四</label></div>
+  <div id="candidate-selected"></div>
+  <div id="dafaultTime">2026年9月10日 18:00</div>
+  <ul id="date_box" class="hidden"><li>2026年9月10日 18:00</li><li>2026年9月9日 18:00</li></ul>
+  <div id="is_open">已关闭</div><input id="addTrainInput" type="checkbox"><div id="planList"></div>
+  <a id="toPayBtn" href="#">提交订单</a>
+</div>
+<div class="modal hidden" id="dialog"></div><div id="records"></div>
+<script>
+const fixture={mode:'normal',kind:'regular',regularClicks:0,alternateClicks:0,confirmClicks:0};
+const el=id=>document.getElementById(id);
+const show=id=>el(id).classList.remove('hidden');
+function people(area,target,regular){
+ const names=[...el(area).querySelectorAll('input:checked')].map(e=>e.parentElement.title);
+ el(target).innerHTML=names.map((name,i)=>`<input ${regular?`id="passenger_name_${i}"`:'class="name-input"'} readonly value="${name}">`+
+   (regular?`<select id="seatType_${i}"><option>一等座</option><option>二等座</option></select>`:'')).join('');
+}
+for(const input of el('normal_passenger_id').querySelectorAll('input'))input.onchange=()=>people('normal_passenger_id','normal-selected',true);
+for(const input of el('passenge_list').querySelectorAll('input'))input.onchange=()=>people('passenge_list','candidate-selected',false);
+el('book').onclick=()=>{show('regular');if(fixture.mode==='sold_out'){el('dialog').innerText='余票不足';show('dialog');}};
+el('candidate').onclick=()=>{fixture.kind='alternate';show('candidate-form');};
+el('dafaultTime').onclick=()=>show('date_box');
+for(const item of el('date_box').children)item.onclick=()=>{el('dafaultTime').innerText=item.innerText;el('date_box').classList.add('hidden');};
+function record(state='待支付'){
+ el('regular').classList.add('hidden');el('candidate-form').classList.add('hidden');el('dialog').classList.add('hidden');
+ el('records').innerHTML=`<div class="order-item"><div class="order-item-hd">${fixture.kind==='alternate'?'候补单号':'订单号'}：E123456 <span class="order-status">${state}</span></div>
+ <p>G101 2026年9月10日 北京 上海 二等座</p><div class="passenger-name"><strong title="张三">张三</strong></div></div>`;
+}
+fixture.record=record;
+el('submitOrder_id').onclick=()=>{
+ fixture.regularClicks++;
+ if(fixture.mode==='timeout')return;
+ if(fixture.mode==='verification'){el('dialog').innerText='请完成人脸核验';show('dialog');return;}
+ el('dialog').innerHTML='<button id="qr_submit_id">确认购买</button>';show('dialog');
+ el('qr_submit_id').onclick=()=>{fixture.confirmClicks++;record();};
+};
+el('toPayBtn').onclick=e=>{e.preventDefault();fixture.alternateClicks++;if(fixture.mode==='timeout')return;record();};
+</script>

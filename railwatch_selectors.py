@@ -15,21 +15,8 @@ ALTERNATE_BUTTON_SELECTORS = (
     "a.btn72.btn-houbu",
 )
 
-CONFIRM_ALTERNATE_SELECTORS = (
-    "#confirmHB_id",
-    "#houbu_qr_id",
-    "#sureClick_id",
-    "a.btn-confirm-houbu",
-    ".//a[contains(text(),'确认')]",
-    ".//a[contains(text(),'确定')]",
-)
-
-SUBMIT_ALTERNATE_SELECTORS = (
-    "#submitHoubu_id",
-    "a.btn-submit-houbu",
-    ".//a[contains(text(),'提交候补')]",
-    "#submit_candidate_id",
-)
+CONFIRM_ALTERNATE_SELECTORS = ()
+SUBMIT_ALTERNATE_SELECTORS = ("#toPayBtn",)
 
 PASSENGER_LABEL_SELECTORS = (
     "#normal_passenger_id label",

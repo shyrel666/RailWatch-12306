@@ -127,6 +127,7 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
         }
         case "runtimeError":
         case "runtimeExit":
+          state.applyState({ ...state.status, monitoring: false, task: undefined, phase: "error", status_message: "运行时中断，请核对原订单", error_message: "运行时中断" });
           notification.error({
             message: "Python 运行时异常",
             description: (event.payload as { message?: string }).message || "请稍后重试。",
@@ -135,6 +136,7 @@ function RailWatchAppContent({ darkMode, setDarkMode }: RailWatchAppContentProps
           });
           break;
         case "runtimeRestarted":
+          void railwatchApi.command<RuntimeInfo>("getRuntimeInfo").then(info => railwatchStore.getState().applyRuntimeInfo(info)).catch(() => undefined);
           notification.info({
             message: "Python 运行时已恢复",
             description: (event.payload as { message?: string }).message || "",

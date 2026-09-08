@@ -8,7 +8,7 @@ from railwatch_dates import validate_travel_date, beijing_now
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 
 DEFAULT_BURST_WINDOW_SECONDS = 45.0
 DEFAULT_PREWARM_LEAD_SECONDS = 120.0
@@ -32,6 +32,9 @@ TRIP_FIELD_KEYS = (
     "smart_rate",
     "timer_enabled",
     "target_time",
+    "sale_at",
+    "sale_time_source",
+    "sale_time_checked_at",
     "burst_window_seconds",
     "prewarm_lead_seconds",
 )
@@ -63,11 +66,14 @@ def default_config(
         "keep_alive": True,
         "passengers": "",
         "auto_alternate": False,
-        "alternate_deadline": "18:00",
+        "alternate_deadline": "开车前60分钟",
         "date_range": "±1天",
         "smart_rate": True,
         "timer_enabled": False,
         "target_time": target_time,
+        "sale_at": "",
+        "sale_time_source": "manual",
+        "sale_time_checked_at": "",
         "burst_window_seconds": DEFAULT_BURST_WINDOW_SECONDS,
         "prewarm_lead_seconds": DEFAULT_PREWARM_LEAD_SECONDS,
     }
@@ -125,8 +131,13 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     trip["seat_keyword"] = str(trip.get("seat_keyword", "")).strip()
     trip["seat_prefer"] = str(trip.get("seat_prefer", "无偏好")).strip() or "无偏好"
     trip["passengers"] = str(trip.get("passengers", "")).strip()
-    trip["alternate_deadline"] = str(trip.get("alternate_deadline", "18:00")).strip() or "18:00"
+    trip["alternate_deadline"] = str(trip.get("alternate_deadline", "开车前60分钟")).strip() or "开车前60分钟"
     trip["target_time"] = str(trip.get("target_time", "00:00:00")).strip() or "00:00:00"
+    for key in ("sale_at", "sale_time_source", "sale_time_checked_at"):
+        trip[key] = str(trip.get(key, "")).strip()
+    if trip["sale_at"]:
+        from railwatch_time import resolve_sale_timestamp
+        resolve_sale_timestamp(trip)
     trip["date_range"] = str(trip.get("date_range", "±1天")).strip() or "±1天"
     trip["interval"] = _to_float(trip.get("interval"), 5.0, minimum=1.0, maximum=60.0)
     trip["query_timeout"] = _to_int(trip.get("query_timeout"), 40, minimum=5, maximum=120)

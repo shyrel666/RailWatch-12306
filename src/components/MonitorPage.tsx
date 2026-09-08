@@ -101,7 +101,10 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
   const autoSubmitEnabled = config.auto_submit;
   const autoAlternateEnabled = config.auto_alternate;
 
-  const canStart = Boolean(draftConfig.from_station_cn.trim() && draftConfig.to_station_cn.trim() && dateRange.valid.length && !status.monitoring);
+  const order = status.order;
+  const unresolvedOrder = Boolean(order?.status && (order.recovery_required ||
+    (["not_submitted", "sold_out"].includes(order.status) ? !order.no_order : !["fulfilled", "cancelled", "expired", "failed"].includes(order.status))));
+  const canStart = Boolean(draftConfig.from_station_cn.trim() && draftConfig.to_station_cn.trim() && dateRange.valid.length && !status.monitoring && !unresolvedOrder && (!draftConfig.timer_enabled || draftConfig.sale_at));
   const canStop = status.monitoring;
 
   return (
@@ -141,6 +144,19 @@ export function MonitorPage({ busy, runCommand }: { busy: string | null; runComm
           </Button>
         </div>
       </section>
+
+      {order?.status ? <Alert
+        type={order.status === "fulfilled" || order.status === "active" ? "success" : "warning"}
+        showIcon
+        message={order.label || taskLabels[order.stage || order.status] || "订单待核对"}
+        description={<div>
+          <p>{order.intent?.train_code} · {order.intent?.date} · {order.intent?.seat}{order.order_id ? ` · 订单 ${order.order_id}` : ""}</p>
+          <p>{order.reason || (order.status === "pending_payment" ? "请在官方页面完成支付；候补预付款支付后才生效。" : "状态以匹配的官方订单证据为准。")}</p>
+          {unresolvedOrder ? <Button disabled={status.monitoring} loading={busy === "continueOrder"}
+            onClick={() => void runCommand("continueOrder")}>继续处理／核对订单</Button> : null}
+        </div>}
+      /> : null}
+      <p>实验性购票辅助：核验与支付需人工完成，发现现票不代表订单已创建。</p>
 
       {status.monitoring ? <p role="status">运行中使用启动时的行程配置；表单修改将在下次运行生效。</p> : null}
       {/* ── Metrics Signal Strip ── */}

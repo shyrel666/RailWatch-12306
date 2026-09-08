@@ -84,6 +84,8 @@ class RailWatchRuntime:
                 payload.get("config") or payload,
                 confirmed=bool(payload.get("confirmed", False)),
             ),
+            "continueOrder": lambda: self.bridge.continue_order(),
+            "systemResumed": lambda: self.bridge.system_resumed(),
             "stopMonitor": lambda: self.bridge.stop_monitor(),
             "closeBrowser": lambda: self.bridge.close_browser(confirmed=bool(payload.get("confirmed", False))),
             "clearLocalData": lambda: self.bridge.clear_local_data(confirmed=bool(payload.get("confirmed", False))),

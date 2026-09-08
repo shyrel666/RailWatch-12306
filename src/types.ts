@@ -22,6 +22,9 @@ export type RailWatchConfig = {
   smart_rate: boolean;
   timer_enabled: boolean;
   target_time: string;
+  sale_at?: string;
+  sale_time_source?: string;
+  sale_time_checked_at?: string;
   burst_window_seconds?: number;
   prewarm_lead_seconds?: number;
   config_version?: number;
@@ -54,6 +57,7 @@ export type TicketHit = {
 };
 
 export type RailWatchStatus = {
+  order?: OrderStage;
   task?: { run_id?: string; status?: string; sequence?: number; started_at?: number; target_at?: number | null; next_query_at?: number | null };
   run_id?: string;
   phase: string;
@@ -69,6 +73,18 @@ export type RailWatchStatus = {
   current_config: Record<string, unknown>;
   hits: TicketHit[];
   summary: string;
+};
+
+export type OrderStage = {
+  status: string;
+  stage?: string;
+  label?: string;
+  reason?: string;
+  order_id?: string;
+  updated_at?: number;
+  recovery_required?: boolean;
+  no_order?: boolean;
+  intent?: { intent_id: string; kind: string; train_code: string; date: string; seat: string };
 };
 
 export type RuntimeInfo = {

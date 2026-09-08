@@ -10,7 +10,7 @@ GUI 专用：12306 查询页分析 + 余票监控（合规版）- 风控优化�
 7) [优化] 改进异常处理和日志记录
 8) [优化] 添加配置持久化
 9) [风控优化] 随机刷新间隔（±30% 浮动）
-10) [风控优化] 人类行为模拟延迟
+10) 受控查询与错误退避
 """
 
 import time
@@ -36,6 +36,9 @@ from railwatch_selectors import (
 )
 from railwatch_submit_flow import SubmitFlow
 from railwatch_alternate_flow import AlternateFlow
+from railwatch_orders import OrderIntent, OrderResult
+from railwatch_config_contract import parse_passenger_names
+from railwatch_order_page import OrderPage
 from railwatch_time import ServerTimeSync, get_server_time_sync
 from railwatch_verification import VerificationDetector
 
@@ -162,6 +165,9 @@ class QueryConfig:
     smart_rate: bool = True
     timer_enabled: bool = False
     target_time: str = "00:00:00"
+    sale_at: str = ""
+    sale_time_source: str = "manual"
+    sale_time_checked_at: str = ""
     burst_window_seconds: float = 45.0
     prewarm_lead_seconds: float = 120.0
     
@@ -190,6 +196,9 @@ class QueryConfig:
             "smart_rate": self.smart_rate,
             "timer_enabled": self.timer_enabled,
             "target_time": self.target_time,
+            "sale_at": self.sale_at,
+            "sale_time_source": self.sale_time_source,
+            "sale_time_checked_at": self.sale_time_checked_at,
             "burst_window_seconds": self.burst_window_seconds,
             "prewarm_lead_seconds": self.prewarm_lead_seconds,
         }
@@ -217,6 +226,9 @@ class QueryConfig:
             smart_rate=data.get("smart_rate", True),
             timer_enabled=data.get("timer_enabled", False),
             target_time=data.get("target_time", "00:00:00"),
+            sale_at=data.get("sale_at", ""),
+            sale_time_source=data.get("sale_time_source", "manual"),
+            sale_time_checked_at=data.get("sale_time_checked_at", ""),
             burst_window_seconds=_read_float(data.get("burst_window_seconds", 45), 45.0),
             prewarm_lead_seconds=_read_float(data.get("prewarm_lead_seconds", 120), 120.0),
         )
@@ -558,6 +570,9 @@ class TicketMonitor(BaseHandler):
         tick_callback=None,
         session_check=None,
         date_provider=None,
+        order_journal=None,
+        on_order=None,
+        run_id="",
     ):
         super().__init__(driver, log_callback)
         self.cfg = dict(cfg)
@@ -569,6 +584,9 @@ class TicketMonitor(BaseHandler):
         self._fill_failures = 0
         self._needs_navigation = False
         self.last_query = {}
+        self.order_journal, self.on_order, self.run_id = order_journal, on_order, run_id
+        self._prefer_alternate = False
+        self._fallback_date = ""
         self.query_executor = QueryExecutor(driver, self.should_stop, self._poll_wait, lambda: self.tick()) if param_filler else None
         self.notify = notify_callback or (lambda title, msg: print(title, msg, flush=True) if title.isascii() and msg.isascii() else _safe_print(title, msg))
         self.progress = progress_callback
@@ -613,6 +631,55 @@ class TicketMonitor(BaseHandler):
             human_action_callback=self.human_action,
             find_alternate_button=self._find_alternate_button,
         )
+        self.order_page = OrderPage(driver, self.should_stop, self._poll_wait, self._mark)
+        self.submit_flow.order_page = self.order_page
+        self.alternate_flow.order_page = self.order_page
+
+    def _mark(self, stage, detail=None):
+        if self.order_journal:
+            self.order_journal.mark(self.run_id, stage, getattr(self, "_intent_id", ""), detail)
+
+    def _execute_order(self, hit):
+        train, seat, _, row, button, action = hit
+        if not self.order_journal:
+            self._signal_human_action(train, "订单持久化不可用，已停止自动提交")
+            return True
+        intent = OrderIntent.from_config(self.cfg, train, seat, "alternate" if action == "alternate" else "regular")
+        self._intent_id = intent.intent_id
+        try:
+            self.order_journal.begin(self.run_id, intent, self.cfg)
+        except Exception:
+            self._signal_human_action(train, "无法取得订单提交权限，请先核对未完成订单和本地存储")
+            return True
+        if self.on_order:
+            self.on_order(intent, OrderResult("submitting"))
+        self._mark("no_inventory" if action == "alternate" else "inventory_found")
+        result = (self.alternate_flow.try_alternate_order(row, train, seat, intent=intent)
+                  if action == "alternate" else self.submit_flow.try_auto_submit(button, seat, intent=intent))
+        if not isinstance(result, OrderResult):
+            result = OrderResult("unknown", "提交适配器未返回可验证的订单结果")
+        if action == "book" and result.status == "unknown" and result.reason == "官方提示余票不足":
+            reconciled = self.order_page.reconcile(intent, navigate=True, allow_empty=True)
+            if reconciled.status == "not_submitted" and reconciled.no_order:
+                result = OrderResult("sold_out", "售罄且官方待支付订单已确认为空", no_order=True)
+            else:
+                result = reconciled
+        try:
+            result = self.order_journal.record(intent, result)
+            self._mark("confirmed_failure" if result.can_fallback else result.status)
+        except Exception:
+            self._signal_human_action(train, "订单结果无法保存，请保留当前页面并核对订单，禁止重新提交")
+            return True
+        if self.on_order:
+            self.on_order(intent, result)
+        if result.can_fallback and self.auto_alternate:
+            self._prefer_alternate = True
+            self._fallback_date = intent.date
+            self._needs_navigation = True
+            return False  # Immediate next query, no normal backoff or burst-window delay.
+        if result.status in ("unknown", "verification", "not_submitted", "sold_out"):
+            self._signal_human_action(train, result.reason or "请检查官方订单状态")
+        return True
     
     def _parse_train_targets(self) -> List[str]:
         """解析目标车次列表"""
@@ -639,7 +706,9 @@ class TicketMonitor(BaseHandler):
                 raise ValueError("所有出行日期均已失效，请修改行程")
         if not self.travel_dates:
             return
-        travel_date = self.travel_dates[(loop_count - 1) % len(self.travel_dates)]
+        if self._prefer_alternate and self._fallback_date not in self.travel_dates:
+            raise ValueError("原预订日期已失效，已停止候补回退，请核对行程")
+        travel_date = self._fallback_date if self._prefer_alternate else self.travel_dates[(loop_count - 1) % len(self.travel_dates)]
         if travel_date == self.current_loop_date and not force:
             return
         self.driver.execute_script(
@@ -717,8 +786,8 @@ class TicketMonitor(BaseHandler):
         self.log(f"💺 目标席别：{', '.join(self.target_seats) if self.target_seats else '不限定'}")
         self.log(f"📝 自动提交：{'开启' if self.auto_submit else '关闭'}")
         self.log(f"🔄 自动候补：{'开启' if self.auto_alternate else '关闭'}")
-        self.log("📌 监控逻辑：刷新页面 → 自动点【查询】→ 等待结果 → 判断是否命中")
-        self.log("🛡️ 风控优化：已启用随机间隔 + 人类行为模拟")
+        self.log("监控流程：查询 → 校验结果 → 预订或首选候补 → 核对订单证据")
+        self.log("受控查询；遇到核验或未知订单结果时暂停处理。")
 
         # 确保在查询页
         try:
@@ -773,52 +842,27 @@ class TicketMonitor(BaseHandler):
         self.tick(status="querying", next_query_at=None)
         is_burst_mode = self._is_burst_mode(loop_count)
 
-        if not is_burst_mode:
-            # 1) 刷新前的随机延迟（模拟人类行为，仅在稳定监控期开启）
-            self._human_delay(0.2, 0.8)
-            
-            # 针对长时间监控增加随机行为（如滚动阅读）
-            if random.random() < 0.2:
-                try:
-                    self.driver.execute_script(f"window.scrollBy(0, {random.randint(100, 400)});")
-                    self._sleep(random.uniform(0.3, 1.0))
-                    self.driver.execute_script(f"window.scrollBy(0, -{random.randint(100, 400)});")
-                except Exception: pass
-
-        # 2) 决定是刷新页面还是直接查询
-        # 定时冲刺已在等待阶段预热页面，第一轮直接查询以避免错过准点。
-        timed_burst = bool(self.cfg.get("timer_enabled") and is_burst_mode)
-        should_refresh = (loop_count % 5 == 0) if timed_burst else (loop_count == 1 or loop_count % 5 == 0)
-        
+        # Recreate a document only when the previous query was invalidated.
+        navigated = False
         if self._needs_navigation:
             self.driver.get("https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc")
             self._needs_navigation = False
-            should_refresh = True
-        if should_refresh:
-            if is_burst_mode:
-                self.log(f"🚀 服务器时间冲刺 (第 {loop_count} 轮)：正在进行极速查询...")
-            else:
-                self.log(f"🔄 第 {loop_count} 次：深度刷新页面... (间隔: {interval:.1f}s)")
-            self.driver.refresh()
-            # 爆发期不等待刷新后的模拟延迟
-            if not is_burst_mode: self._human_delay(1.0, 2.0)
-        else:
-            self.log(f"🔎 第 {loop_count} 次：{'极速查询' if is_burst_mode else '快速直接查询'}... (间隔: {interval:.1f}s)")
+            self.params_filled = False
+            navigated = True
+        self.log(f"🔎 第 {loop_count} 次查询 (间隔: {interval:.1f}s)")
 
-        self._apply_loop_date(loop_count, force=should_refresh)
-        if not self._fill_query_params(force=should_refresh):
+        self._apply_loop_date(loop_count, force=navigated)
+        if not self._fill_query_params(force=navigated):
             self._sleep(interval)
             return False
         if self.should_stop():
             return True
 
-        # 3) 刷新后的随机延迟
-        if not is_burst_mode: self._human_delay(0.5, 1.2)
-
         if self.query_executor:
             self.tick(status="querying", next_query_at=None)
-            result = self.query_executor.execute(self.click_query_button, int(self.cfg.get("query_timeout", 40)))
+            result = self.query_executor.execute(self._timed_query_click, int(self.cfg.get("query_timeout", 40)))
             self.last_query = result
+            if result.get("status") in ("ok", "empty"): self._mark("query_result")
             status = result["status"]
             if status == "cancelled":
                 return True
@@ -829,7 +873,6 @@ class TicketMonitor(BaseHandler):
                 if not self._dismiss_query_blockers():
                     self._signal_human_action("", "未起售提示无法关闭，请检查浏览器")
                     return True
-                self._needs_navigation = True
                 self._sleep(min(interval, BURST_RETRY_SLEEP_SECONDS) if is_burst_mode else interval)
                 return False
             if status not in ("ok", "empty"):
@@ -874,48 +917,11 @@ class TicketMonitor(BaseHandler):
             train_code, seat_name, seat_value, row_el, action_btn, action_type = hit
             self.log(f"🎯 命中：{train_code} | {seat_name}={seat_value}")
 
-            # 命中：定位 + 高亮
-            self._focus_and_highlight(row_el, action_btn)
-
             if self.should_stop() or (self.query_executor and not self.query_executor.current()):
                 return False
-            if action_type == "alternate":
-                result = self.alternate_flow.try_alternate_order(row_el, train_code, seat_name)
-                if result == "success":
-                    title = "🎉 候补已提交"
-                    message = (
-                        f"命中：{train_code}\n{seat_name}：候补已提交\n\n"
-                        f"请切回浏览器确认候补订单状态（如需支付定金请尽快完成）。"
-                    )
-                    if self.on_hit:
-                        self.on_hit(
-                            {
-                                "train_code": train_code,
-                                "seat_type": seat_name,
-                                "status": "候补已提交",
-                                "source": "alternate",
-                                "title": title,
-                                "message": message,
-                            }
-                        )
-                    else:
-                        self.notify(title, message)
-                    self.log("⏸ 候补已提交，暂停自动刷新。如需继续监控，请点击【停止】再重新开始。")
-                    return True
-                if result == "retry":
-                    # 尚未进入候补流程（候补按钮暂不可点）：继续监控，不打扰用户
-                    self.log("↻ 候补暂不可用，继续监控...")
-                    self._sleep(interval)
-                    return False
-                # 已进入候补流程：失败或需要人工核验都停止刷新，避免停留在候补页空转。
-                if result == "failed":
-                    self._signal_human_action(train_code, "候补未能自动完成，请在浏览器中手动检查并提交。")
-                self.log("⏸ 候补流程已暂停，请在浏览器中处理后再决定是否重新监控。")
-                return True
-
-            # 有票路径
-            if self.auto_submit and action_btn:
-                self.submit_flow.try_auto_submit(action_btn, seat_name)
+            if action_type == "alternate" or (self.auto_submit and action_btn):
+                return self._execute_order(hit)
+            self._focus_and_highlight(row_el, action_btn)
             title = "🎉 发现目标车次/席别可用"
             message = (
                 f"命中：{train_code}\n{seat_name}：{seat_value}\n\n"
@@ -942,60 +948,50 @@ class TicketMonitor(BaseHandler):
         self._sleep(interval)
         return False
 
+    def _timed_query_click(self):
+        self._mark("query_click")
+        return self.click_query_button()
+
     def _get_seat_col_index(self, seat_keyword: str) -> Optional[int]:
         """获取席别在表头的列索引"""
         return self.row_parser.get_seat_col_index(seat_keyword)
 
-    def _find_hit_row(self, seat_col_indices: Dict[str, int]) -> Optional[Tuple[str, str, str, Any, Any, str]]:
-        """
-        查找命中的车次行。
-        返回 6 元组：(车次号, 席别名, 席别值, 行元素, 操作按钮, 动作类型) 或 None。
-        动作类型为 "book"（有票预订）或 "alternate"（候补）。
-        """
+    def _find_hit_row(self, seat_col_indices):
+        """Inspect every target for cash inventory before considering one waitlist seat."""
         try:
-            table = self.driver.find_element(By.ID, "queryLeftTable")
-            rows = table.find_elements(By.CSS_SELECTOR, "tr[id^='ticket_']")
-
+            rows = self.driver.find_element(By.ID, "queryLeftTable").find_elements(By.CSS_SELECTOR, "tr[id^='ticket_']")
+            ranked = []
             for row in rows:
                 try:
-                    text = row.text.strip()
-                    if not text:
+                    train = self.extract_train_code(row.text.strip())
+                    if not train or (self.target_trains and train not in self.target_trains):
                         continue
-
-                    train_code = self.extract_train_code(text)
-                    if not train_code:
-                        continue
-
-                    # 检查车次是否匹配
-                    if self.target_trains and train_code not in self.target_trains:
-                        continue
-
-                    # 检查席别/候补：候补依据「行内候补按钮」是否存在，而不是席别格文字
-                    book_btn = self._find_book_button(row)
-                    alternate_btn = self._find_alternate_button(row) if self.auto_alternate else None
-
-                    if self.target_seats:
-                        # 指定席别：目标席别有票则预订；否则若该车次可候补则候补
-                        for seat in self.target_seats:
-                            seat_value = self._get_seat_value(row, seat, seat_col_indices.get(seat))
-                            if self.is_seat_available(seat_value):
-                                return (train_code, seat, seat_value, row, book_btn, "book")
-                        if alternate_btn is not None:
-                            return (train_code, "，".join(self.target_seats), "候补", row, alternate_btn, "alternate")
-                    else:
-                        # 不限席别：有预订按钮则预订；否则若可候补则候补
-                        if book_btn is not None:
-                            return (train_code, "未指定席别", "有票", row, book_btn, "book")
-                        if alternate_btn is not None:
-                            return (train_code, "未指定席别", "候补", row, alternate_btn, "alternate")
-
+                    ranked.append((self.target_trains.index(train) if self.target_trains else len(ranked), train, row))
                 except StaleElementReferenceException:
                     continue
-
+            ranked.sort(key=lambda item: item[0])
+            if not self._prefer_alternate:
+                for _, train, row in ranked:
+                    book = self._find_book_button(row)
+                    if book is None:
+                        continue
+                    for seat in self.target_seats:
+                        value = self._get_seat_value(row, seat, seat_col_indices.get(seat))
+                        count = len(parse_passenger_names(self.cfg.get("passengers", ""))) or int(self.cfg.get("passenger_count", 1))
+                        if self.is_seat_available(value) and (not str(value).isdigit() or int(value) >= count):
+                            return train, seat, value, row, book, "book"
+                    if not self.target_seats and not self.auto_submit:
+                        return train, "未指定席别", "有票", row, book, "book"
+            if self.auto_alternate:
+                for _, train, row in ranked:
+                    for seat in self.target_seats:
+                        button = self._find_alternate_button(row, seat)
+                        if button is not None:
+                            return train, seat, "候补", row, button, "alternate"
             return None
         except (NoSuchElementException, StaleElementReferenceException):
             return None
-    
+
     def _get_seat_value(self, row, seat_keyword: str, col_index: Optional[int]) -> Optional[str]:
         """获取席别值"""
         return self.row_parser.get_seat_value(row, seat_keyword, col_index)
@@ -1004,9 +1000,21 @@ class TicketMonitor(BaseHandler):
         """查找预订按钮（动态定位，不硬编码）"""
         return self.row_parser.find_button(row, BOOK_BUTTON_SELECTORS)
 
-    def _find_alternate_button(self, row) -> Optional[Any]:
-        """查找候补按钮"""
-        return self.row_parser.find_button(row, ALTERNATE_BUTTON_SELECTORS)
+    def _find_alternate_button(self, row, seat_name=None):
+        # Waitlist is a per-seat action. A different seat's button is not a match.
+        seat_name = seat_name or (self.target_seats[0] if self.target_seats else "")
+        prefix = SeatType.get_prefix(seat_name)
+        if not prefix:
+            return None
+        try:
+            cell = row.find_element(By.CSS_SELECTOR, f"td[id^='{prefix}_']")
+            for button in cell.find_elements(By.CSS_SELECTOR, "a,button,div"):
+                if (button.text.strip() == "候补" and button.is_displayed() and button.is_enabled()
+                        and button.get_attribute("aria-disabled") != "true"):
+                    return button
+        except (NoSuchElementException, StaleElementReferenceException):
+            pass
+        return None
 
     def _focus_and_highlight(self, row_el, action_btn):
         """定位并高亮命中行与操作按钮（预订/候补）"""

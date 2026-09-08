@@ -54,6 +54,7 @@ class RailWatchState:
     current_config: Mapping[str, object] = field(default_factory=dict)
     hits: Tuple[TicketHit, ...] = field(default_factory=tuple)
     task: Mapping[str, object] = field(default_factory=dict)
+    order: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "RailWatchState":

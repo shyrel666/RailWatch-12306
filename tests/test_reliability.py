@@ -64,6 +64,7 @@ class ReliabilityTests(unittest.TestCase):
                     clock[0] = datetime.fromisoformat(initialized_time).timestamp()
                     return Mock()
                 bridge._ensure_driver = ensure_driver
+                bridge._check_session_for_task = lambda task: True
                 bridge._make_param_filler = lambda driver: lambda *args: FillResult("success")
                 bridge._valid_dates = lambda *args, **kwargs: ["2026-09-10"]
                 captured = []
@@ -71,7 +72,7 @@ class ReliabilityTests(unittest.TestCase):
                     def __init__(self, driver, config, **kwargs): captured.append(config["_target_timestamp"])
                     def run(self): pass
                 with patch("railwatch_bridge.time.time", lambda: clock[0]), patch("railwatch_bridge.TicketMonitor", Monitor), patch("railwatch_bridge.CORE_AVAILABLE", True):
-                    bridge.start_monitor({"from_station_cn":"北京", "to_station_cn":"上海", "date":"2026-09-10", "timer_enabled":True, "target_time":"08:30:00"})
+                    bridge.start_monitor({"from_station_cn":"北京", "to_station_cn":"上海", "date":"2026-09-10", "timer_enabled":True, "target_time":"08:30:00", "sale_at":"2026-09-06T08:30:00+08:00"})
                     bridge._task.thread.join(2)
                 self.assertEqual(captured, [datetime.fromisoformat("2026-09-06T08:30:00+08:00").timestamp()])
                 if "08:31" in initialized_time:
@@ -148,7 +149,7 @@ class ReliabilityTests(unittest.TestCase):
             self.assertIn("无法确认", bridge.state.status_message)
             bridge.notification_service.notify.assert_called_once()
 
-    def test_refresh_every_30_seconds_does_not_lose_login_result(self):
+    def test_wait_checks_login_without_repeated_navigation(self):
         with tempfile.TemporaryDirectory() as tmp:
             bridge = RailWatchBridge(tmp)
             bridge._task = MonitorTask({})
@@ -159,10 +160,11 @@ class ReliabilityTests(unittest.TestCase):
             bridge.server_time_sync = Mock()
             clock = [1000.0]
             bridge.server_time_sync.server_timestamp = lambda: clock[0]
-            with patch("railwatch_bridge.time.monotonic", lambda: clock[0]), patch("railwatch_bridge.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
-                self.assertFalse(bridge._wait_for_target_timestamp(1120, {"keep_alive":True}))
+            bridge._task.cancel.wait = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+            with patch("railwatch_bridge.time.monotonic", lambda: clock[0]), patch("railwatch_bridge.time.time", lambda: clock[0]):
+                self.assertFalse(bridge._wait_for_target_timestamp(1180, {"keep_alive":True}))
             self.assertEqual(bridge.driver.execute_async_script.call_count, 2)
-            self.assertGreaterEqual(bridge._prewarm_query_page.call_count, 2)
+            bridge._prewarm_query_page.assert_not_called()
             self.assertIn("失效", bridge.state.status_message)
 
     def test_date_validation_filters_ranges_in_beijing_time(self):

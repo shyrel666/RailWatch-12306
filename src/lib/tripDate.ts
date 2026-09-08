@@ -61,10 +61,8 @@ export function useBeijingToday() {
   return now;
 }
 
-export function executionReference(config: { timer_enabled: boolean; target_time: string }, now: Date) {
-  if (!config.timer_enabled || !/^\d{2}:\d{2}:\d{2}$/.test(config.target_time)) return now;
-  let target = Date.parse(`${todayIso(now)}T${config.target_time}+08:00`);
-  if (!Number.isFinite(target)) return now;
-  if (target < now.getTime()) target += DAY;
-  return new Date(target);
+export function executionReference(config: { timer_enabled: boolean; target_time: string; sale_at?: string }, now: Date) {
+  if (!config.timer_enabled || !config.sale_at) return now;
+  const target = Date.parse(config.sale_at);
+  return Number.isFinite(target) ? new Date(Math.max(target, now.getTime())) : now;
 }

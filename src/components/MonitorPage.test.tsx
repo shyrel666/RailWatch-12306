@@ -100,4 +100,22 @@ describe("MonitorPage", () => {
     expect(screen.getByText("12")).toBeTruthy();
     expect(screen.getByText("G55")).toBeTruthy();
   });
+
+  test("pending order blocks new submission and continues only the saved intent", async () => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ config: { ...defaultConfig, date: todayIso() }, status: {
+      ...defaultStatus, order: { status: "pending_payment", stage: "alternate_pending_payment", label: "候补待支付", order_id: "E123456" },
+    } });
+    render(<MonitorPage busy={null} runCommand={runCommand} />);
+    expect(screen.getByText("候补待支付")).toBeTruthy();
+    expect((screen.getByRole("button", { name: /启动监控/ }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.setup().click(screen.getByRole("button", { name: "继续处理／核对订单" }));
+    expect(runCommand).toHaveBeenCalledWith("continueOrder");
+  });
+
+  test("legacy time without a full sale date cannot silently start tomorrow", () => {
+    railwatchStore.setState({ config: { ...defaultConfig, date: todayIso(), timer_enabled: true, target_time: "08:00:00", sale_at: "" } });
+    render(<MonitorPage busy={null} runCommand={(async () => undefined) as CommandRunner} />);
+    expect((screen.getByRole("button", { name: /启动监控/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });

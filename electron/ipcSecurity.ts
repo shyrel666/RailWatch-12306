@@ -11,6 +11,7 @@ export const RAILWATCH_COMMANDS = [
   "analyzeQuery",
   "startMonitor",
   "stopMonitor",
+  "continueOrder",
   "closeBrowser",
   "clearLocalData",
   "exportLog",

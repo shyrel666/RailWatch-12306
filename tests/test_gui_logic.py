@@ -411,46 +411,30 @@ class TicketMonitorLogicTests(unittest.TestCase):
         self.assertEqual(observed_intervals, [3.5])
 
     def test_auto_submit_aborts_when_no_passenger_selected(self):
-        driver = FakeDriver()
-        monitor = TicketMonitor(
-            driver,
-            {"auto_submit": True, "passenger_count": 1, "passengers": ""},
-            log_callback=lambda msg: None,
-        )
-
-        with patch("railwatch_submit_flow.WebDriverWait", FakeWait), patch("railwatch_submit_flow.time.sleep", lambda seconds: None):
-            monitor.submit_flow.try_auto_submit(FakeButton(), "一等座")
-
-        self.assertTrue(driver.selection_attempted)
-        self.assertFalse(driver.submit_button.clicked)
+        from railwatch_order_page import OrderPage
+        from test_orders import intent
+        page = OrderPage(Mock())
+        page.snapshot = lambda: {"formReady": True}
+        page.result = lambda *a, **k: __import__('railwatch_orders').OrderResult("unknown")
+        page.prepare_people = lambda _: False
+        result = page.regular(Mock(), intent())
+        self.assertEqual(result.status, "verification")
+        page.driver.find_elements.assert_not_called()
 
     def test_alternate_submit_aborts_when_no_passenger_selected(self):
-        driver = FakeAlternateDriver()
-        monitor = TicketMonitor(
-            driver,
-            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
-            log_callback=lambda msg: None,
-        )
+        from railwatch_order_page import OrderPage
+        page = OrderPage(Mock())
+        page.driver.execute_script.return_value = False
+        from test_orders import intent
+        self.assertFalse(page.prepare_people(intent("alternate")))
 
-        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
-            result = monitor.alternate_flow.try_alternate_order(FakeAlternateRow(), "G101", "二等座")
-
-        self.assertEqual(result, "failed")
-        self.assertTrue(driver.selection_attempted)
-        self.assertFalse(driver.submit_button.clicked)
-
-    def test_alternate_passenger_selection_counts_already_checked_passengers(self):
-        class Driver:
-            def execute_script(self, script, *args):
-                return "else if (shouldSelect && checkbox.checked)" in script
-
-        monitor = TicketMonitor(
-            Driver(),
-            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
-            log_callback=lambda m: None,
-        )
-
-        self.assertEqual(monitor.alternate_flow._select_candidate_passengers([], 1), 1)
+    def test_alternate_selection_uses_exact_names(self):
+        from railwatch_order_page import OrderPage, SELECT_PASSENGERS_JS
+        from test_orders import intent
+        driver = Mock()
+        driver.execute_script.return_value = True
+        self.assertTrue(OrderPage(driver).prepare_people(intent("alternate")))
+        driver.execute_script.assert_called_once_with(SELECT_PASSENGERS_JS, ["张三"])
 
     def test_find_hit_row_uses_houbu_button_not_seat_text(self):
         class Row:
@@ -474,7 +458,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         )
         monitor._get_seat_value = lambda row, seat, idx: "无"
         monitor._find_book_button = lambda row: None
-        monitor._find_alternate_button = lambda row: object()
+        monitor._find_alternate_button = lambda row, seat=None: object()
 
         hit = monitor._find_hit_row({})
 
@@ -505,41 +489,17 @@ class TicketMonitorLogicTests(unittest.TestCase):
         )
         monitor._get_seat_value = lambda row, seat, idx: "有"
         monitor._find_book_button = lambda row: book
-        monitor._find_alternate_button = lambda row: object()
+        monitor._find_alternate_button = lambda row, seat=None: object()
 
         hit = monitor._find_hit_row({})
 
         self.assertEqual(hit[5], "book")
         self.assertIs(hit[4], book)
 
-    def test_find_hit_row_unlimited_seat_triggers_houbu(self):
-        class Row:
-            text = "G101 北京 上海"
-
-            def find_elements(self, by=None, value=None):
-                return []
-
-        class Table:
-            def find_elements(self, by=None, value=None):
-                return [Row()]
-
-        class Driver:
-            def find_element(self, by=None, value=None):
-                return Table()
-
-        monitor = TicketMonitor(
-            Driver(),
-            {"train_code": "", "seat_keyword": "", "auto_alternate": True},
-            log_callback=lambda m: None,
-        )
-        monitor._find_book_button = lambda row: None
-        monitor._find_alternate_button = lambda row: object()
-
-        hit = monitor._find_hit_row({})
-
-        self.assertIsNotNone(hit)
-        self.assertEqual(hit[1], "未指定席别")
-        self.assertEqual(hit[5], "alternate")
+    def test_unlimited_seat_cannot_create_unspecified_houbu_order(self):
+        monitor = TicketMonitor(Mock(), {"auto_alternate": True}, log_callback=lambda m: None)
+        monitor.driver.find_element.return_value.find_elements.return_value = []
+        self.assertIsNone(monitor._find_hit_row({}))
 
     def test_find_hit_row_no_houbu_when_auto_alternate_disabled(self):
         class Row:
@@ -563,155 +523,37 @@ class TicketMonitorLogicTests(unittest.TestCase):
         )
         monitor._get_seat_value = lambda row, seat, idx: "无"
         monitor._find_book_button = lambda row: None
-        monitor._find_alternate_button = lambda row: object()
+        monitor._find_alternate_button = lambda row, seat=None: object()
 
         self.assertIsNone(monitor._find_hit_row({}))
 
-    def test_alternate_submit_success_when_passenger_selected(self):
-        humans = []
-
-        class Btn:
-            def __init__(self):
-                self.clicked = False
-
-            def is_displayed(self):
-                return True
-
-            def click(self):
-                self.clicked = True
-
-        class Row:
-            def __init__(self):
-                self.btn = Btn()
-
-            def find_element(self, by=None, value=None):
-                if value in ("a.btn-houbu", ".//a[contains(text(),'候补')]", "a.btn72.btn-houbu", "a[onclick*='houbu']"):
-                    return self.btn
-                raise NoSuchElementException("nf")
-
-        class Driver:
-            def __init__(self):
-                self.submit = Btn()
-                self.confirm = Btn()
-
-            def execute_script(self, script, *args):
-                if "targetNames" in script:
-                    return 1
-                if "deadline" in script:
-                    return True
-                return False
-
-            def find_element(self, by=None, value=None):
-                if value == "#submitHoubu_id":
-                    return self.submit
-                if value == "#confirmHB_id":
-                    return self.confirm
-                raise NoSuchElementException("nf")
-
-            def next_wait_result(self):
-                return object()
-
-        driver = Driver()
-        monitor = TicketMonitor(
-            driver,
-            {"auto_alternate": True, "passenger_count": 1, "passengers": "", "alternate_deadline": ""},
-            log_callback=lambda m: None,
-            human_action_callback=lambda p: humans.append(p),
-        )
-        monitor.verification.alternate_success_present = lambda: True
-
-        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
-            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
-
-        self.assertEqual(result, "success")
-        self.assertTrue(driver.submit.clicked)
-        self.assertEqual(humans, [])
+    def test_alternate_submit_uses_structured_order_evidence(self):
+        from railwatch_alternate_flow import AlternateFlow
+        from railwatch_orders import OrderResult
+        from test_orders import intent, CONFIG
+        button = Mock()
+        flow = AlternateFlow(Mock(), CONFIG, Mock(), find_alternate_button=lambda row, seat: button)
+        flow.order_page = Mock()
+        expected = OrderResult("pending_payment", order_id="E123")
+        flow.order_page.alternate.return_value = expected
+        selected = intent("alternate")
+        self.assertEqual(flow.try_alternate_order(Mock(), "G101", "二等座", selected), expected)
+        flow.order_page.alternate.assert_called_once_with(button, selected)
 
     def test_alternate_submit_hands_off_when_success_not_confirmed(self):
-        # 已点击提交但无成功标记：不得谎报 success，应交人工核对
-        humans = []
+        from test_orders import snapshot, intent
+        from railwatch_order_page import OrderPage
+        driver = Mock()
+        driver.execute_script.return_value = snapshot(orders=[])
+        self.assertEqual(OrderPage(driver).result(intent("alternate"), submitted=True).status, "unknown")
 
-        class Btn:
-            def __init__(self):
-                self.clicked = False
-
-            def is_displayed(self):
-                return True
-
-            def click(self):
-                self.clicked = True
-
-        class Row:
-            def __init__(self):
-                self.btn = Btn()
-
-            def find_element(self, by=None, value=None):
-                if value in ("a.btn-houbu", ".//a[contains(text(),'候补')]", "a.btn72.btn-houbu", "a[onclick*='houbu']"):
-                    return self.btn
-                raise NoSuchElementException("nf")
-
-        class Switch:
-            def window(self, handle):
-                return None
-
-        class Driver:
-            current_window_handle = "w"
-            switch_to = Switch()
-
-            def __init__(self):
-                self.submit = Btn()
-                self.confirm = Btn()
-
-            def execute_script(self, script, *args):
-                if "targetNames" in script:
-                    return 1
-                return False  # no verification, and (crucially) no success marker
-
-            def find_element(self, by=None, value=None):
-                if value == "#submitHoubu_id":
-                    return self.submit
-                if value == "#confirmHB_id":
-                    return self.confirm
-                raise NoSuchElementException("nf")
-
-            def next_wait_result(self):
-                return object()
-
-        driver = Driver()
-        monitor = TicketMonitor(
-            driver,
-            {"auto_alternate": True, "passenger_count": 1, "passengers": "", "alternate_deadline": ""},
-            log_callback=lambda m: None,
-            human_action_callback=lambda p: humans.append(p),
-        )
-
-        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
-            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
-
-        self.assertEqual(result, "human")
-        self.assertTrue(driver.submit.clicked)
-        self.assertEqual(len(humans), 1)
-
-    def test_alternate_submit_retry_when_button_missing(self):
-        # 候补按钮暂不可点（尚未离开查询页）：返回 retry，不打扰用户
-        humans = []
-
-        class Row:
-            def find_element(self, by=None, value=None):
-                raise NoSuchElementException("nf")
-
-        monitor = TicketMonitor(
-            object(),
-            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
-            log_callback=lambda m: None,
-            human_action_callback=lambda p: humans.append(p),
-        )
-
-        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
-            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
-
-        self.assertEqual(result, "retry")
-        self.assertEqual(humans, [])
+    def test_alternate_submit_reports_not_submitted_when_button_missing(self):
+        from railwatch_alternate_flow import AlternateFlow
+        from test_orders import CONFIG, intent
+        flow = AlternateFlow(Mock(), CONFIG, Mock(), find_alternate_button=lambda *args: None)
+        result = flow.try_alternate_order(Mock(), "G101", "二等座", intent("alternate"))
+        self.assertEqual(result.status, "not_submitted")
+        self.assertTrue(result.no_order)
 
     def test_alternate_success_present_reflects_driver_result_and_is_safe(self):
         class Driver:
@@ -721,7 +563,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
             def execute_script(self, script, *args):
                 return self.value
 
-        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None).verification.alternate_success_present())
+        self.assertFalse(TicketMonitor(Driver(True), {}, log_callback=lambda m: None).verification.alternate_success_present())
         self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None).verification.alternate_success_present())
 
         class BadDriver:
@@ -731,188 +573,75 @@ class TicketMonitorLogicTests(unittest.TestCase):
         self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None).verification.alternate_success_present())
 
     def test_alternate_submit_hands_off_on_verification(self):
-        humans = []
+        from test_orders import snapshot, intent
+        from railwatch_order_page import OrderPage
+        driver = Mock()
+        driver.execute_script.return_value = snapshot(orders=[], dialogs=["请完成人脸核验"])
+        self.assertEqual(OrderPage(driver).result(intent("alternate")).status, "verification")
 
-        class Btn:
-            def __init__(self):
-                self.clicked = False
-
-            def is_displayed(self):
-                return True
-
-            def click(self):
-                self.clicked = True
-
-        class Row:
-            def __init__(self):
-                self.btn = Btn()
-
-            def find_element(self, by=None, value=None):
-                if value in ("a.btn-houbu", ".//a[contains(text(),'候补')]", "a.btn72.btn-houbu", "a[onclick*='houbu']"):
-                    return self.btn
-                raise NoSuchElementException("nf")
-
-        class Switch:
-            def window(self, handle):
-                return None
-
-        class Driver:
-            current_window_handle = "w"
-            switch_to = Switch()
-
-            def __init__(self):
-                self.submit = Btn()
-
-            def execute_script(self, script, *args):
-                if "targetNames" in script:
-                    return 1
-                return True  # verification present
-
-            def find_element(self, by=None, value=None):
-                if value == "#submitHoubu_id":
-                    return self.submit
-                raise NoSuchElementException("nf")
-
-            def next_wait_result(self):
-                return object()
-
-        driver = Driver()
-        monitor = TicketMonitor(
-            driver,
-            {"auto_alternate": True, "passenger_count": 1, "passengers": ""},
-            log_callback=lambda m: None,
-            human_action_callback=lambda p: humans.append(p),
-        )
-
-        with patch("railwatch_alternate_flow.WebDriverWait", FakeWait):
-            result = monitor.alternate_flow.try_alternate_order(Row(), "G101", "二等座")
-
-        self.assertEqual(result, "human")
-        self.assertEqual(len(humans), 1)
-        self.assertFalse(driver.submit.clicked)
-
-    def test_run_single_loop_alternate_success_emits_alternate_hit(self):
-        hits = []
-        notifications = []
-
-        class Driver:
-            def refresh(self):
-                return None
-
-        monitor = TicketMonitor(
-            Driver(),
-            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
-            log_callback=lambda m: None,
-            notify_callback=lambda title, message: notifications.append((title, message)),
-            on_hit=lambda p: hits.append(p),
-        )
-        monitor.click_query_button = lambda: True
-        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
-        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
-        monitor._focus_and_highlight = lambda row, btn: None
-        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "success"
-
-        with patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._run_single_loop(1, 1)
-
-        self.assertTrue(result)
-        self.assertEqual(hits[0]["source"], "alternate")
-        self.assertEqual(hits[0]["status"], "候补已提交")
-        self.assertEqual(notifications, [])
+    def test_run_single_loop_alternate_payment_publishes_order_stage(self):
+        from railwatch_orders import OrderResult, OrderJournal
+        from test_orders import CONFIG
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            orders, humans, hits = [], [], []
+            monitor = TicketMonitor(Mock(), CONFIG, log_callback=lambda _: None,
+                order_journal=OrderJournal(Path(tmp) / "orders.sqlite3"), run_id="test",
+                on_order=lambda *args: orders.append(args), human_action_callback=humans.append, on_hit=hits.append)
+            monitor.alternate_flow.try_alternate_order = Mock(return_value=OrderResult("pending_payment", order_id="E123456", evidence={"matched": True}))
+            self.assertTrue(monitor._execute_order(("G101", "二等座", "候补", Mock(), Mock(), "alternate")))
+            self.assertEqual(orders[-1][1].status, "pending_payment")
+            self.assertEqual(hits, [])
+            self.assertEqual(len(humans), 0)
 
     def test_run_single_loop_alternate_failed_hands_off_and_stops(self):
-        hits = []
-        humans = []
+        from railwatch_orders import OrderResult, OrderJournal
+        from test_orders import CONFIG
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            orders, humans, hits = [], [], []
+            monitor = TicketMonitor(Mock(), CONFIG, log_callback=lambda _: None,
+                order_journal=OrderJournal(Path(tmp) / "orders.sqlite3"), run_id="test",
+                on_order=lambda *args: orders.append(args), human_action_callback=humans.append, on_hit=hits.append)
+            monitor.alternate_flow.try_alternate_order = Mock(return_value=OrderResult("unknown", no_order=False))
+            self.assertTrue(monitor._execute_order(("G101", "二等座", "候补", Mock(), Mock(), "alternate")))
+            self.assertEqual(orders[-1][1].status, "unknown")
+            self.assertEqual(hits, [])
+            self.assertEqual(len(humans), 1)
 
-        class Switch:
-            def window(self, handle):
-                return None
-
-        class Driver:
-            current_window_handle = "w"
-            switch_to = Switch()
-
-            def refresh(self):
-                return None
-
-        monitor = TicketMonitor(
-            Driver(),
-            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
-            log_callback=lambda m: None,
-            on_hit=lambda p: hits.append(p),
-            human_action_callback=lambda p: humans.append(p),
-        )
-        monitor.click_query_button = lambda: True
-        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
-        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
-        monitor._focus_and_highlight = lambda row, btn: None
-        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "failed"
-
-        with patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._run_single_loop(1, 1)
-
-        # 失败后停止刷新（避免停留在候补页空转），并交人工处理
-        self.assertTrue(result)
-        self.assertEqual(hits, [])
-        self.assertEqual(len(humans), 1)
-
-    def test_run_single_loop_alternate_retry_keeps_monitoring(self):
-        hits = []
-        humans = []
-
-        class Driver:
-            def refresh(self):
-                return None
-
-        monitor = TicketMonitor(
-            Driver(),
-            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
-            log_callback=lambda m: None,
-            on_hit=lambda p: hits.append(p),
-            human_action_callback=lambda p: humans.append(p),
-        )
-        monitor.click_query_button = lambda: True
-        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
-        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
-        monitor._focus_and_highlight = lambda row, btn: None
-        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "retry"
-
-        with patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._run_single_loop(1, 1)
-
-        # retry 表示尚未进入候补流程：继续监控，不命中、不打扰用户
-        self.assertFalse(result)
-        self.assertEqual(hits, [])
-        self.assertEqual(humans, [])
+    def test_run_single_loop_alternate_not_submitted_hands_off(self):
+        from railwatch_orders import OrderResult, OrderJournal
+        from test_orders import CONFIG
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            orders, humans, hits = [], [], []
+            monitor = TicketMonitor(Mock(), CONFIG, log_callback=lambda _: None,
+                order_journal=OrderJournal(Path(tmp) / "orders.sqlite3"), run_id="test",
+                on_order=lambda *args: orders.append(args), human_action_callback=humans.append, on_hit=hits.append)
+            monitor.alternate_flow.try_alternate_order = Mock(return_value=OrderResult("not_submitted", no_order=True))
+            self.assertTrue(monitor._execute_order(("G101", "二等座", "候补", Mock(), Mock(), "alternate")))
+            self.assertEqual(orders[-1][1].status, "not_submitted")
+            self.assertEqual(hits, [])
+            self.assertEqual(len(humans), 1)
 
     def test_run_single_loop_alternate_human_stops_without_hit_or_double_signal(self):
-        hits = []
-        humans = []
-
-        class Driver:
-            def refresh(self):
-                return None
-
-        monitor = TicketMonitor(
-            Driver(),
-            {"interval": 1, "query_timeout": 1, "auto_alternate": True},
-            log_callback=lambda m: None,
-            on_hit=lambda p: hits.append(p),
-            human_action_callback=lambda p: humans.append(p),
-        )
-        monitor.click_query_button = lambda: True
-        monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
-        monitor._find_hit_row = lambda indices: ("G101", "二等座", "候补", object(), object(), "alternate")
-        monitor._focus_and_highlight = lambda row, btn: None
-        # "human" 约定：候补流程内部已发出人工接管信号，循环不应重复发信号或误报命中
-        monitor.alternate_flow.try_alternate_order = lambda row, code, seat: "human"
-
-        with patch("gui_12306_0.time.sleep", lambda s: None):
-            result = monitor._run_single_loop(1, 1)
-
-        self.assertTrue(result)
-        self.assertEqual(hits, [])
-        self.assertEqual(humans, [])
+        from railwatch_orders import OrderResult, OrderJournal
+        from test_orders import CONFIG
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            orders, humans, hits = [], [], []
+            monitor = TicketMonitor(Mock(), CONFIG, log_callback=lambda _: None,
+                order_journal=OrderJournal(Path(tmp) / "orders.sqlite3"), run_id="test",
+                on_order=lambda *args: orders.append(args), human_action_callback=humans.append, on_hit=hits.append)
+            monitor.alternate_flow.try_alternate_order = Mock(return_value=OrderResult("verification", no_order=False))
+            self.assertTrue(monitor._execute_order(("G101", "二等座", "候补", Mock(), Mock(), "alternate")))
+            self.assertEqual(orders[-1][1].status, "verification")
+            self.assertEqual(hits, [])
+            self.assertEqual(len(humans), 1)
 
     def test_verification_present_reflects_driver_result_and_is_safe(self):
         class Driver:
@@ -1033,7 +762,6 @@ class TicketMonitorLogicTests(unittest.TestCase):
             fills,
             [
                 ("北京", "上海", "2026-09-20"),
-                ("北京", "上海", "2026-09-20"),
             ],
         )
 
@@ -1121,7 +849,7 @@ class TicketMonitorDateRangeTests(unittest.TestCase):
         with patch("gui_12306_0.time.sleep", lambda seconds: None):
             monitor._run_single_loop(5, 1)
 
-        self.assertEqual(driver.events, ["refresh", "date:2026-06-10"])
+        self.assertEqual(driver.events, [])
 
 
 if __name__ == "__main__":

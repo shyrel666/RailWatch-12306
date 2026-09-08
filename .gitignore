@@ -25,6 +25,8 @@ log_*.txt
 user_config.json
 device_profile.json
 station_codes_cache.json
+orders.sqlite3
+orders.sqlite3-*
 chrome_profile_12306/
 railwatch-12306/
 chromedriver.exe

@@ -74,7 +74,12 @@ jobs:
           if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
             gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --title "RailWatch 12306 $tag" --notes "Windows installer build for RailWatch 12306 $tag." --latest
+            $notesFile = "docs/releases/$tag.md"
+            if (Test-Path -LiteralPath $notesFile) {
+              gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --title "RailWatch 12306 $tag" --notes-file $notesFile --latest
+            } else {
+              gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --title "RailWatch 12306 $tag" --notes "Windows installer build for RailWatch 12306 $tag." --latest
+            }
           }
 
       - name: Upload unpacked app

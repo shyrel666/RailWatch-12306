@@ -508,39 +508,30 @@ export function TripSetupPage({
                     />
                   </label>
                   <label className="trip-field">
-                    <span>预备秒数</span>
-                    <NumberStepper
-                      ariaLabel="预备秒数"
-                      max={30}
-                      min={0}
-                      step={1}
-                      suffix="秒"
-                      value={config.prepare_time}
-                      onChange={(value) => update({ prepare_time: value })}
-                    />
-                  </label>
-                  <label className="trip-field">
                     <span>候补截止</span>
                     <input
                       aria-label="候补截止"
                       className="native-input"
-                      type="time"
+                      type="text"
+                      placeholder="开车前60分钟，或 2026-09-10 18:00"
                       value={config.alternate_deadline}
                       onChange={(event) => update({ alternate_deadline: event.target.value })}
                     />
                   </label>
                   <label className="trip-field">
-                    <span>定时启动</span>
+                    <span>起售日期时间（北京时间）</span>
                     <input
                       aria-label="定时启动时间"
                       className="native-input"
-                      type="time"
+                      type="datetime-local"
                       step="1"
-                      value={config.target_time}
-                      onChange={(event) => update({ target_time: event.target.value })}
+                      value={config.sale_at?.replace(/\+08:00$/, "") || ""}
+                      onChange={(event) => update({ sale_at: event.target.value ? `${event.target.value}+08:00` : "", target_time: event.target.value.slice(11), sale_time_source: "manual", sale_time_checked_at: new Date().toISOString() })}
                     />
                   </label>
                 </div>
+                <p>请提前完成登录及人证核验。候补截止可填“开车前60分钟”或完整日期时间，仅选择官方页面提供的对应选项。起售前10秒不再启动准备操作。</p>
+                <p>请按12306公布的起售日期和车站核对。旧版时间 {config.target_time} 不会自动顺延至次日；定时使用系统时钟，请提前校准电脑时间。</p>
                 <div className="trip-advanced-switches">
                   <label className="switch-row">
                     <Switch aria-label="定时启动" checked={config.timer_enabled} onChange={(checked) => update({ timer_enabled: checked })} />
@@ -565,7 +556,7 @@ export function TripSetupPage({
                   <RiskToggle
                     checked={config.auto_alternate}
                     title={config.auto_alternate ? "候补排队已启用" : "候补排队关闭"}
-                    description="开启时需要确认；开启后无票时可能自动提交候补。"
+                    description="按已配置的乘车人和席别提交首选候补；人工支付预付款后才生效。实验性功能，需核对官方订单。"
                     onChange={(checked) => void guardedAutomation("auto_alternate", checked)}
                   />
                 </div>

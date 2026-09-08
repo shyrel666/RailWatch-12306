@@ -28,7 +28,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertFalse(config["timer_enabled"])
         self.assertFalse(config["auto_submit"])
         self.assertFalse(config["auto_alternate"])
-        self.assertEqual(config["alternate_deadline"], "18:00")
+        self.assertEqual(config["alternate_deadline"], "开车前60分钟")
 
     def test_validate_config_matches_renderer_form_shape(self):
         from railwatch_bridge import validate_config
@@ -139,6 +139,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 "to_station_cn": "上海",
                 "date": "2026-06-08",
                 "auto_submit": True,
+                "passengers": "张三",
+                "seat_keyword": "二等座",
+                "train_code": "G101",
                 "auto_alternate": True,
             },
             confirmed=False,
@@ -316,8 +319,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             bridge.server_time_sync = Mock()
             bridge.server_time_sync.server_timestamp = lambda: clock[0]
             bridge._prewarm_query_page = Mock(return_value=True)
-            with patch("railwatch_bridge.time.monotonic", lambda: clock[0]), patch("railwatch_bridge.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
-                bridge._wait_for_target_timestamp(1062, {"keep_alive":True})
+            bridge._task.cancel.wait = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+            with patch("railwatch_bridge.time.monotonic", lambda: clock[0]), patch("railwatch_bridge.time.time", lambda: clock[0]):
+                bridge._wait_for_target_timestamp(1080, {"keep_alive":True})
             self.assertEqual(bridge.driver.execute_async_script.call_count, 1)
 
     def test_wait_for_target_time_skips_keep_alive_when_disabled(self):
@@ -379,7 +383,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         with patch("railwatch_bridge.CORE_AVAILABLE", True), patch(
             "railwatch_bridge.TicketMonitor", FakeMonitor
         ), patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer):
-            bridge._monitor_worker({"timer_enabled": True, "target_time":"08:30:00"})
+            bridge._monitor_worker({"timer_enabled": True, "target_time":"08:30:00", "sale_at":"2026-06-10T08:30:00+08:00"})
 
         self.assertEqual(prewarm_calls, [])
         # 定时路径必须把填参回调传给监控核心（开抢前预热时同步查询参数）
@@ -422,7 +426,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         with patch("railwatch_bridge.CORE_AVAILABLE", True), patch(
             "railwatch_bridge.TicketMonitor", FakeMonitor
         ), patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer):
-            bridge._monitor_worker({"timer_enabled": True, "target_time":"08:30:00"})
+            bridge._monitor_worker({"timer_enabled": True, "target_time":"08:30:00", "sale_at":"2026-06-10T08:30:00+08:00"})
 
         self.assertEqual(order, ["driver", "wait", "monitor"])
 
@@ -780,33 +784,19 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             self.assertEqual(captured["target_dir"], temp_dir)
             self.assertEqual(os.path.dirname(result["chromedriver_path"]), temp_dir)
 
-    def test_basic_anti_detect_injection_prefers_cdp(self):
+    def test_browser_uses_persistent_profile_and_bounded_transport_without_fingerprint_injection(self):
         from railwatch_bridge import RailWatchBridge
-
-        class FakeDriver:
-            def __init__(self):
-                self.commands = []
-                self.executed_scripts = []
-
-            def execute_cdp_cmd(self, command, payload):
-                self.commands.append((command, payload))
-
-            def execute_script(self, script):
-                self.executed_scripts.append(script)
-
-        driver = FakeDriver()
+        driver = Mock()
         bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
-
-        bridge._inject_basic_anti_detect(driver)
-
-        self.assertEqual(driver.commands[0][0], "Page.addScriptToEvaluateOnNewDocument")
-        source = driver.commands[0][1]["source"]
-        self.assertIn("navigator", source)
-        self.assertIn("webdriver", source)
-        self.assertIn("const originalQuery = navigator.permissions && navigator.permissions.query", source)
-        self.assertNotIn("this === navigator.permissions.query", source)
-        self.assertIn("window.chrome = window.chrome || {}", source)
-        self.assertEqual(driver.executed_scripts, [])
+        options = Mock(arguments=[])
+        options.add_argument.side_effect = options.arguments.append
+        chrome = Mock(return_value=driver)
+        with patch.object(bridge, "_ensure_matching_chromedriver"), patch("railwatch_bridge.SELENIUM_AVAILABLE", True), patch("railwatch_bridge.webdriver", Mock(Chrome=chrome, ChromeOptions=Mock(return_value=options))):
+            self.assertIs(bridge._ensure_driver(), driver)
+        self.assertTrue(any(value.startswith("--user-data-dir=") for value in chrome.call_args.kwargs["options"].arguments))
+        self.assertEqual(driver.command_executor.client_config.timeout, 35)
+        driver.execute_cdp_cmd.assert_not_called()
+        driver.execute_script.assert_not_called()
 
     def test_runtime_process_outputs_utf8_json(self):
         completed = subprocess.run(
