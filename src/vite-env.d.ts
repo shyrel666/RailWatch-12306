@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { AppInfo, BridgeEvent, UpdateCheckResult, UpdateRuntimeState } from "./types";
+import type { AppInfo, BridgeEvent, ConfirmRequestPayload, UpdateCheckResult, UpdateRuntimeState } from "./types";
 
 declare global {
   interface Window {
@@ -9,6 +9,8 @@ declare global {
       onEvent: (callback: (event: BridgeEvent) => void) => () => void;
       showSaveDialog: (defaultPath?: string) => Promise<string | null>;
       stopUrgentAlert: () => void;
+      onConfirmRequest: (callback: (request: ConfirmRequestPayload) => void) => () => void;
+      respondConfirmation: (id: string, accepted: boolean) => void;
       checkUpdate: (options?: { force?: boolean }) => Promise<UpdateCheckResult>;
       getUpdateState: () => Promise<UpdateRuntimeState>;
       installUpdate: () => Promise<{ ok: boolean; error?: string }>;

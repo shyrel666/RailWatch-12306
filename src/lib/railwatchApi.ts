@@ -1,4 +1,4 @@
-import type { AppInfo, BridgeEvent, UpdateCheckResult, UpdateRuntimeState } from "../types";
+import type { AppInfo, BridgeEvent, ConfirmRequestPayload, UpdateCheckResult, UpdateRuntimeState } from "../types";
 
 const missingElectronMessage = "Electron bridge is not available.";
 
@@ -23,6 +23,15 @@ export const railwatchApi = {
   },
   stopUrgentAlert() {
     window.railwatch?.stopUrgentAlert();
+  },
+  onConfirmRequest(callback: (request: ConfirmRequestPayload) => void) {
+    if (!window.railwatch) {
+      return () => undefined;
+    }
+    return window.railwatch.onConfirmRequest(callback);
+  },
+  respondConfirmation(id: string, accepted: boolean) {
+    window.railwatch?.respondConfirmation(id, accepted);
   },
   checkUpdate(options: { force?: boolean } = {}) {
     if (!window.railwatch) {

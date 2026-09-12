@@ -19,7 +19,7 @@
 </div>
 
 > [!IMPORTANT]
-> **v0.3.6 的交易自动化仍为实验性功能。** 真实账号下单与支付流程尚待人工验收。RailWatch 不是 12306 官方产品，不保证抢票成功或候补兑现；登录核验和支付须由你在官方页面完成。
+> **v0.3.7 的交易自动化仍为实验性功能。** 真实账号下单与支付流程尚待人工验收。RailWatch 不是 12306 官方产品，不保证抢票成功或候补兑现；登录核验和支付须由你在官方页面完成。
 
 <p align="center">
   <a href="#preview">界面预览</a> ·
@@ -167,7 +167,7 @@ python -m pip install pyinstaller
 npm run package
 ```
 
-也可使用一键脚本 `.\package-windows.cmd 0.3.6`。该脚本会设置 npm 版本号并清理旧 `release/` 输出；维护新版本时需同步核对 `pyproject.toml` 和更新日志。
+也可使用一键脚本 `.\package-windows.cmd 0.3.7`。该脚本会设置 npm 版本号并清理旧 `release/` 输出；维护新版本时需同步核对 `pyproject.toml` 和更新日志。
 
 构建结果位于 `release/`。GitHub 的版本标签推送会触发 [Windows 打包工作流](https://github.com/shyrel666/RailWatch-12306/actions/workflows/package-windows.yml)，将安装程序、`.blockmap` 和 `latest.yml` 发布到对应 Release。
 
@@ -202,7 +202,7 @@ flowchart LR
 
 | 你想了解 | 入口 |
 | --- | --- |
-| 当前版本变化 | [更新日志](CHANGELOG.md) · [v0.3.6 发布说明](docs/releases/v0.3.6.md) |
+| 当前版本变化 | [更新日志](CHANGELOG.md) · [v0.3.7 发布说明](docs/releases/v0.3.7.md) |
 | 交易行为、恢复规则及实测限制 | [交易可靠性实现与验收记录](docs/transaction-reliability.md) |
 | 如何开发和提交改进 | [贡献指南](CONTRIBUTING.md) |
 | 发布前需要检查什么 | [发布检查清单](docs/RELEASE_CHECKLIST.md) |

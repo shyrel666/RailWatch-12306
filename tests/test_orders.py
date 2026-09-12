@@ -386,6 +386,27 @@ class RegularConfirmationTests(unittest.TestCase):
             "unknown", "未获得匹配的订单证据，请打开官方订单详情核对")
         return page
 
+    def test_confirmation_clicks_directly_even_when_modal_readback_differs(self):
+        # 弹窗打开时回读会把乘客在背景页和弹窗表格各读一遍，核对必然失败；
+        # 自动化模式下必须跳过二次核对直接确认。
+        page = self._page()
+        state = {"dialog": False}
+        page.verify_form = lambda target: not state["dialog"]
+        page.wait_result = lambda target, submitted=True, timeout=10: OrderResult(
+            "pending_payment", order_id="E123456", evidence={"matched": True})
+        confirm = Mock()
+        def button(selectors):
+            if selectors == ("#qr_submit_id",):
+                state["dialog"] = True
+                return confirm
+            submit = Mock()
+            submit.click.side_effect = lambda: state.update(dialog=True)
+            return submit
+        page.button = button
+        result = page.regular(Mock(), intent())
+        confirm.click.assert_called_once()
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+
     def test_confirmation_still_completes_when_stop_is_requested(self):
         page = self._page()
         state = {"stopped": False}

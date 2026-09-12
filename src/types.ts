@@ -241,3 +241,9 @@ export type UpdateRuntimeState = {
   error?: string;
   result?: UpdateCheckResult;
 };
+
+export type ConfirmRequestPayload = {
+  id: string;
+  title: string;
+  message: string;
+};

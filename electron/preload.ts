@@ -19,6 +19,14 @@ contextBridge.exposeInMainWorld("railwatch", {
   stopUrgentAlert: () => {
     ipcRenderer.send("railwatch:stop-alert");
   },
+  onConfirmRequest: (callback: (request: { id: string; title: string; message: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload as { id: string; title: string; message: string });
+    ipcRenderer.on("railwatch:confirm-request", listener);
+    return () => ipcRenderer.removeListener("railwatch:confirm-request", listener);
+  },
+  respondConfirmation: (id: string, accepted: boolean) => {
+    ipcRenderer.send("railwatch:confirm-response", { id, accepted });
+  },
   checkUpdate: (options: { force?: boolean } = {}) => {
     return ipcRenderer.invoke("railwatch:check-update", options);
   },

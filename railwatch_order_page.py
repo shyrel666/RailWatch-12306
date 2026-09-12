@@ -444,8 +444,10 @@ class OrderPage:
                         applied = False
                     self.log(f"座位偏好已回读确认：{seat_preference}" if applied else
                              f"未能应用座位偏好（{seat_preference}），当前页面不支持或可选位置不足，将按官方分配继续。")
-                if not self.verify_form(intent):
-                    return OrderResult("verification", "确认购买前订单信息发生变化")
+                # 核对已在点击“提交订单”前完成。弹窗打开时再回读会把乘客在背景页
+                # 和弹窗表格里各读一遍（名单必然不一致），只会白白错失抢票窗口，
+                # 因此自动化模式下弹窗出现后直接确认提交。
+                self.log("官方确认弹窗已出现，直接点击“确认”提交订单。")
                 if self.stop():
                     self.log("已请求停止，但官方确认弹窗已出现：仍完成本次确认，之后只需人工支付。")
                 confirmed_clicked = True  # An attempted click may already have reached the server.

@@ -12,6 +12,11 @@ import { ShellLayout } from "./components/Shell";
 import { TripSetupPage } from "./components/TripSetupPage";
 import { railwatchApi } from "./lib/railwatchApi";
 import { exportEventLog } from "./lib/exportEventLog";
+import {
+  useConfirmationBridge,
+  useUpdateReadyPrompt,
+  type ThemedDialog,
+} from "./lib/useThemedDialogs";
 import { railwatchStore } from "./store/railwatchStore";
 import { useRailWatchStore } from "./store/useRailWatchStore";
 import type {
@@ -187,14 +192,14 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     [notification],
   );
 
-  const confirm = useCallback(
-    (title: string, content: string) =>
+  const showThemedDialog = useCallback<ThemedDialog>(
+    ({ title, content, okText, cancelText }) =>
       new Promise<boolean>((resolve) => {
         modal.confirm({
           title,
           content,
-          okText: "确认",
-          cancelText: "取消",
+          okText,
+          cancelText,
           centered: true,
           onOk: () => resolve(true),
           onCancel: () => resolve(false),
@@ -202,6 +207,15 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       }),
     [modal],
   );
+
+  const confirm = useCallback(
+    (title: string, content: string) =>
+      showThemedDialog({ title, content, okText: "确认", cancelText: "取消" }),
+    [showThemedDialog],
+  );
+
+  useConfirmationBridge(showThemedDialog);
+  useUpdateReadyPrompt(showThemedDialog);
 
   const runCommand = useCallback(
     async <T,>(

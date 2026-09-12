@@ -14,12 +14,12 @@ import {
   type ConfirmationPrompt,
 } from "./ipcSecurity";
 import { registerAlertIpcHandlers, showUrgentAlert, stopUrgentAlertLoop } from "./alertManager";
+import { ConfirmationBridge } from "./confirmationBridge";
 import { RailWatchPythonRuntimeClient, RuntimeEvent } from "./pythonRuntime";
 import {
   createUpdateManager,
   shouldEnableAutoUpdate,
   type UpdateManager,
-  type UpdaterInfo,
 } from "./updateManager";
 
 let mainWindow: BrowserWindow | null = null;
@@ -41,19 +41,21 @@ function keepAwake(active: boolean) {
   if (!active && wakeLock !== null) { powerSaveBlocker.stop(wakeLock); wakeLock = null; }
 }
 
-async function requestMainConfirmation(prompt: ConfirmationPrompt): Promise<boolean> {
-  const options = {
-    type: "warning" as const,
-    title: prompt.title,
-    message: prompt.message,
-    buttons: ["取消", "确认"],
-    defaultId: 1,
-    cancelId: 0,
-    noLink: true,
-  };
-  const result = mainWindow ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
-  return result.response === 1;
-}
+// Confirmations are rendered by the themed renderer dialog instead of native
+// OS message boxes; the gate still lives here and only a renderer response
+// (or timeout) lets the command through.
+const confirmationBridge = new ConfirmationBridge({
+  sendRequest: (request) => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      throw new Error("Renderer window is not available.");
+    }
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.webContents.send("railwatch:confirm-request", request);
+  },
+});
 
 function assertTrustedSender(frameUrl: string | null | undefined): void {
   if (!frameUrl || !allowedRendererUrl || !isTrustedRailWatchUrl(frameUrl, allowedRendererUrl)) {
@@ -75,24 +77,6 @@ function sendToRenderer(channel: string, payload: unknown): void {
   mainWindow.webContents.send(channel, payload);
 }
 
-async function promptRestartToInstall(info: UpdaterInfo): Promise<void> {
-  const version = info.version;
-  const options = {
-    type: "info" as const,
-    title: "发现新版本",
-    message: `RailWatch 12306 ${version} 已下载完成。`,
-    detail: "是否立即重启并安装更新？",
-    buttons: ["稍后", "立即重启安装"],
-    defaultId: 1,
-    cancelId: 0,
-    noLink: true,
-  };
-  const result = mainWindow ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
-  if (result.response === 1) {
-    updateManager?.installUpdate();
-  }
-}
-
 function initializeAutoUpdater(): void {
   const enabled = shouldEnableAutoUpdate({
     isPackaged: app.isPackaged,
@@ -107,9 +91,6 @@ function initializeAutoUpdater(): void {
     updater: autoUpdater,
     enabled,
     onStateChange: () => broadcastUpdateState(),
-    onUpdateDownloaded: (info) => {
-      void promptRestartToInstall(info);
-    },
   });
 
   if (enabled) {
@@ -215,10 +196,19 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   keepAwake(false);
   stopUrgentAlertLoop();
+  confirmationBridge.cancelAll();
   pythonRuntime.stop();
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+ipcMain.on("railwatch:confirm-response", (event, payload: unknown) => {
+  assertTrustedSender(event.senderFrame?.url);
+  if (!isRecord(payload) || typeof payload.id !== "string") {
+    return;
+  }
+  confirmationBridge.respond(payload.id, payload.accepted === true);
 });
 
 ipcMain.handle("railwatch:command", async (event, command: string, payload: Record<string, unknown> = {}) => {
@@ -233,7 +223,7 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
   const confirmation = getCommandConfirmation(command, normalizedPayload);
   const requestPayload = { ...normalizedPayload };
   if (confirmation) {
-    const accepted = await requestMainConfirmation(confirmation);
+    const accepted = await confirmationBridge.request(confirmation);
     if (!accepted) {
       return { cancelled: true };
     }
