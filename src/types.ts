@@ -19,6 +19,8 @@ export type RailWatchConfig = {
   seat_keyword: string;
   interval: number;
   query_timeout: number;
+  query_priority?: "speed" | "reliability";
+  request_mode?: "fast" | "balanced" | "conservative" | "legacy";
   auto_submit: boolean;
   seat_prefer: string;
   passenger_count: number;

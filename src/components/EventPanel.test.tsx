@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
@@ -22,6 +22,7 @@ function resetStore() {
     activePage: "仪表盘",
     logPaused: false,
     pausedLogs: [],
+    droppedLogs: 0,
     eventPanelVisible: true,
   });
 }
@@ -96,5 +97,51 @@ describe("EventPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "恢复事件流" }));
     expect(railwatchStore.getState().logPaused).toBe(false);
+  });
+
+  test("preserves visible and paused logs when clear fails without a success event", async () => {
+    const user = userEvent.setup();
+    railwatchStore.setState({ logPaused: true, pausedLogs: [{ time: "10:00:00", level: "WARN", message: "缓存警告" }], droppedLogs: 4 });
+    // App.runCommand reports the error and returns undefined on rejection.
+    render(<EventPanel onClose={vi.fn()} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    await user.click(screen.getByRole("button", { name: "清空事件" }));
+    expect(railwatchStore.getState().logs).toHaveLength(3);
+    expect(railwatchStore.getState().pausedLogs).toHaveLength(1);
+    expect(railwatchStore.getState().droppedLogs).toBe(4);
+  });
+
+  test("does not clear newer events when the command response follows logsCleared", async () => {
+    const user = userEvent.setup();
+    let finish!: () => void;
+    const runCommand = vi.fn(() => new Promise<void>(resolve => { finish = resolve; })) as CommandRunner;
+    render(<EventPanel onClose={vi.fn()} runCommand={runCommand} />);
+    const button = screen.getByRole("button", { name: "清空事件" }) as HTMLButtonElement;
+    await user.click(button);
+    expect(button.disabled).toBe(true);
+    expect(railwatchStore.getState().logs).toHaveLength(3);
+    act(() => {
+      // App applies the backend logsCleared event before the command response.
+      railwatchStore.getState().clearLogs();
+      railwatchStore.getState().applyLog({ time: "10:00:00", level: "INFO", message: "清空后的新日志" });
+    });
+    await act(async () => finish());
+    expect(button.disabled).toBe(false);
+    expect(screen.getByText("清空后的新日志")).toBeTruthy();
+    expect(railwatchStore.getState().logs).toHaveLength(1);
+  });
+
+  test("tab counts match the merged feed and warning filters", async () => {
+    const user = userEvent.setup();
+    railwatchStore.setState({ logs: [
+      { time: "09:00:00", level: "INFO", message: "正在检查 Python、Selenium 和 ChromeDriver..." },
+      { time: "09:00:01", level: "INFO", message: "Python 3.10.8" },
+      { time: "09:00:02", level: "WARN", message: "未找到 ChromeDriver。" },
+    ] });
+    render(<EventPanel onClose={vi.fn()} runCommand={vi.fn()} />);
+    expect(screen.getByRole("tab", { name: /全部\s*2/ })).toBeTruthy();
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    await user.click(screen.getByRole("tab", { name: /警告\s*1/ }));
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(screen.getByText("未找到 ChromeDriver。")).toBeTruthy();
   });
 });

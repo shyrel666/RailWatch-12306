@@ -10,7 +10,28 @@ from selenium.common.exceptions import NoSuchElementException, StaleElementRefer
 
 from railwatch_selectors import QUERY_ROW_SELECTOR, QUERY_TABLE_ID, TABLE_HEADER_SELECTORS
 
-TRAIN_CODE_PATTERN = re.compile(r"\b([GDKTZCS]\d{1,4})\b")
+TRAIN_CODE_PATTERN = re.compile(r"^\s*([GDCZTKYSL]\d{1,5}|\d{4,5})(?=\s|$)", re.IGNORECASE)
+
+BATCH_ROWS_JS = r"""
+const table = document.getElementById('queryLeftTable');
+if (!table) return [];
+const seatPrefixes = arguments[0];
+const headers = [...(table.closest('table')?.querySelectorAll('thead th') || [])]
+  .map(h => h.innerText.replace(/\s+/g,'').trim());
+return [...table.querySelectorAll('tr[id^="ticket_"]')].filter(row => row.getClientRects().length).map(row => {
+  const field = row.querySelector('a.number,.train-number,.train-code') || row.cells[0];
+  const train = (field?.innerText || '').trim().split(/\s+/)[0];
+  const seats = {};
+  const seat_indices = {};
+  for (const [name,prefix] of Object.entries(seatPrefixes)) {
+    const index = headers.indexOf(name);
+    if (index >= 0) seat_indices[name] = index;
+    const cell = (prefix && row.querySelector('td[id^="'+prefix+'_"]')) || (index >= 0 ? row.cells[index] : null);
+    seats[name] = cell ? cell.innerText.trim().replace(/\n/g,'') : null;
+  }
+  return {element:row, train, raw:row.innerText.trim(), seats, seat_indices};
+});
+"""
 
 
 class RowParser:
@@ -21,7 +42,22 @@ class RowParser:
   @staticmethod
   def extract_train_code(text: str) -> Optional[str]:
     match = TRAIN_CODE_PATTERN.search(text or "")
-    return match.group(1) if match else None
+    return match.group(1).upper() if match else None
+
+  def snapshot_rows(self, seats=()) -> List[dict]:
+    values = self.driver.execute_script(BATCH_ROWS_JS, {seat: self.seat_type_get_prefix(seat) for seat in seats})
+    if not isinstance(values, list):
+      raise RuntimeError("无法读取查询结果快照")
+    result = []
+    for value in values:
+      train = self.extract_train_code(value.get("train", ""))
+      if train:
+        result.append({**value, "train": train})
+    return result
+
+  @staticmethod
+  def display_rows(snapshot) -> List[dict]:
+    return [{"train": row["train"], "raw": row["raw"]} for row in snapshot]
 
   @staticmethod
   def is_seat_available(value: Optional[str]) -> bool:
@@ -40,21 +76,19 @@ class RowParser:
     return False
 
   def parse_rows(self) -> List[dict]:
+    return self.display_rows(self.snapshot_rows())
+
+  @staticmethod
+  def selected_route(row):
+    """Bind the booking to the actual stations displayed on the selected row."""
     try:
-      table = self.driver.find_element(By.ID, QUERY_TABLE_ID)
-      rows = table.find_elements(By.CSS_SELECTOR, QUERY_ROW_SELECTOR)
-      results = []
-      for row in rows:
-        text = row.text.strip()
-        if not text:
-          continue
-        train_code = self.extract_train_code(text)
-        if not train_code:
-          continue
-        results.append({"train": train_code, "raw": text})
-      return results
-    except (NoSuchElementException, StaleElementReferenceException):
-      return []
+      stations = [element.text.strip() for element in row.find_elements(By.CSS_SELECTOR, '.cdz strong')
+                  if element.is_displayed()]
+      if len(stations) == 2 and all(stations):
+        return tuple(stations)
+    except Exception:
+      pass
+    return None
 
   def get_seat_col_index(self, seat_keyword: str) -> Optional[int]:
     for selector in TABLE_HEADER_SELECTORS:
@@ -102,7 +136,7 @@ class RowParser:
           button = row.find_element(By.XPATH, selector)
         else:
           button = row.find_element(By.CSS_SELECTOR, selector)
-        if button and button.is_displayed():
+        if button and button.is_displayed() and button.is_enabled() and button.get_attribute("aria-disabled") != "true":
           return button
       except NoSuchElementException:
         continue

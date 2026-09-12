@@ -41,6 +41,9 @@ jobs:
       - name: Build Electron installer
         run: npm run package
 
+      - name: Verify packaged runtime starts and restores orders
+        run: python -X utf8 tests/runtime_order_smoke.py
+
       - name: Set release version
         shell: pwsh
         run: |

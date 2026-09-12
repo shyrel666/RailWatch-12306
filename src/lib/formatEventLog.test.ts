@@ -44,6 +44,11 @@ describe("presentEventLogs", () => {
     expect(events[0]?.title).toBe("环境检查通过");
     expect(events[1]?.title).toBe("环境检查");
     expect(events[1]?.detail).toContain("正在检查 Python");
+    expect(events[1]?.detail).toContain("Python 3.10.8");
+    expect(events[1]?.detail).toContain("平台 win32");
+    expect(events[1]?.detail).toContain("Chrome 版本: 148");
+    expect(events[1]?.detail).toContain("D:/driver/chromedriver.exe");
+    expect(events[0]?.detail).toContain("C:/profile");
   });
 
   test("splits colon separated messages into title and detail", () => {
@@ -71,7 +76,36 @@ describe("presentEventLogs", () => {
   });
 
   test("counts SUCCESS entries under the info filter", () => {
-    expect(countEventsByFilter(envCheckLogs, "信息")).toBe(7);
+    expect(countEventsByFilter(envCheckLogs, "信息")).toBe(2);
     expect(countEventsByFilter(envCheckLogs, "警告")).toBe(0);
+  });
+
+  test("never hides warning or error messages matching technical or query prefixes", () => {
+    const logs: LogEntry[] = [
+      envCheckLogs[0],
+      { time: "19:54:18", level: "WARN", message: "未找到 ChromeDriver。" },
+      { time: "19:54:19", level: "ERROR", message: "等待查询结果：超时" },
+      { time: "19:54:20", level: "INFO", message: "提示: 请下载驱动" },
+    ];
+    const all = presentEventLogs(logs, "全部");
+    expect(all.find(entry => entry.level === "WARN")?.message).toBe(logs[1].message);
+    expect(all.find(entry => entry.level === "ERROR")?.message).toBe(logs[2].message);
+    expect(all.find(entry => entry.level === "ERROR")?.detail).toBe("超时");
+    for (const filter of ["全部", "信息", "警告", "错误"]) {
+      const visible = presentEventLogs(logs, filter);
+      expect(countEventsByFilter(logs, filter)).toBe(visible.length);
+      for (const entry of visible) expect(all).toContainEqual(entry);
+    }
+    expect(countEventsByFilter(logs, "警告")).toBe(1);
+    expect(countEventsByFilter(logs, "错误")).toBe(1);
+  });
+
+  test("does not attach technical details to unrelated events or another run", () => {
+    const logs: LogEntry[] = [
+      { time: "09:00:00", level: "SUCCESS", message: "已加载保存的设置。" },
+      { ...envCheckLogs[1], run_id: "old" },
+      { ...envCheckLogs[2], run_id: "new" },
+    ];
+    expect(presentEventLogs(logs, "全部")).toHaveLength(3);
   });
 });

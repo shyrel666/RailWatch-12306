@@ -148,3 +148,67 @@ def test_anti_detect_header_uses_compliance_risk_control_language():
     assert "TLS 指纹优化" not in header
     assert "风险控制" in header
     assert "不绕过登录、验证码、订单确认、支付或网站规则" in header
+
+
+def test_generate_random_uses_host_stable_profile_not_random_draw():
+    first = DeviceProfile.generate_random(chrome_major="131")
+    second = DeviceProfile.generate_random(chrome_major="131")
+
+    assert first == second
+    assert "Chrome/131.0.0.0" in first.user_agent
+    assert first.timezone == "Asia/Shanghai"
+    assert first.screen_width >= 1280
+    assert first.canvas_noise == 0.0
+
+
+def test_host_stable_profile_ua_follows_detected_major():
+    profile = DeviceProfile.generate_random(chrome_major="137")
+    assert "Chrome/137.0.0.0" in profile.user_agent
+    assert "Windows NT 10.0" in profile.user_agent
+
+
+def test_apply_chrome_launch_hardening_sets_automation_hygiene_only():
+    class FakeOptions:
+        def __init__(self):
+            self.arguments = []
+            self.experimental = {}
+
+        def add_argument(self, value):
+            self.arguments.append(value)
+
+        def add_experimental_option(self, key, value):
+            self.experimental[key] = value
+
+    from anti_detect import apply_chrome_launch_hardening
+
+    options = FakeOptions()
+    apply_chrome_launch_hardening(options)
+
+    assert "--disable-blink-features=AutomationControlled" in options.arguments
+    assert "enable-automation" in options.experimental["excludeSwitches"]
+    assert options.experimental["useAutomationExtension"] is False
+    assert not any(arg.startswith("--user-agent=") for arg in options.arguments)
+
+
+def test_automation_hygiene_script_avoids_fingerprint_spoofing():
+    from anti_detect import build_automation_hygiene_script
+
+    script = build_automation_hygiene_script()
+
+    assert "webdriver" in script
+    assert "cdc_" in script
+    assert "toDataURL" not in script
+    assert "WebGLRenderingContext" not in script
+    assert "devicePixelRatio" not in script
+    assert "hardwareConcurrency" not in script
+
+
+def test_rate_limiter_consumes_risk_alert_once():
+    from anti_detect import AdaptiveRateLimiter
+
+    limiter = AdaptiveRateLimiter(5, 3, 30, log_callback=lambda _: None)
+    limiter.on_error("操作过快，请稍后再试")
+
+    assert limiter.risk_detected is True
+    assert limiter.consume_risk_alert() == "操作过快，请稍后再试"
+    assert limiter.consume_risk_alert() is None

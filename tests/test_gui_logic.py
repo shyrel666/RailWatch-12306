@@ -309,6 +309,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor.click_query_button = lambda: True
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
         monitor._find_hit_row = lambda indices: None
+        monitor.row_parser.snapshot_rows = Mock(return_value=[])
 
         with patch("gui_12306_0.time.sleep", lambda seconds: None):
             result = monitor._run_single_loop(1, 1)
@@ -350,6 +351,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
         monitor._find_hit_row = lambda indices: ("G101", "二等座", "有", object(), None, "book")
         monitor._focus_and_highlight = lambda row, btn: None
+        monitor.row_parser.snapshot_rows = Mock(return_value=[{"train":"G101", "raw":"G101 北京 上海 二等座 有", "seats":{}, "element":Row("G101")}])
 
         with patch("gui_12306_0.time.sleep", lambda seconds: None):
             hit = monitor._run_single_loop(1, 1)
@@ -459,6 +461,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor._get_seat_value = lambda row, seat, idx: "无"
         monitor._find_book_button = lambda row: None
         monitor._find_alternate_button = lambda row, seat=None: object()
+        monitor.row_parser.snapshot_rows = Mock(return_value=[{"train":"G101", "seats":{"二等座":"无"}, "element":Row()}])
 
         hit = monitor._find_hit_row({})
 
@@ -490,6 +493,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor._get_seat_value = lambda row, seat, idx: "有"
         monitor._find_book_button = lambda row: book
         monitor._find_alternate_button = lambda row, seat=None: object()
+        monitor.row_parser.snapshot_rows = Mock(return_value=[{"train":"G101", "seats":{"二等座":"有"}, "element":Row()}])
 
         hit = monitor._find_hit_row({})
 
@@ -499,6 +503,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
     def test_unlimited_seat_cannot_create_unspecified_houbu_order(self):
         monitor = TicketMonitor(Mock(), {"auto_alternate": True}, log_callback=lambda m: None)
         monitor.driver.find_element.return_value.find_elements.return_value = []
+        monitor.row_parser.snapshot_rows = Mock(return_value=[])
         self.assertIsNone(monitor._find_hit_row({}))
 
     def test_find_hit_row_no_houbu_when_auto_alternate_disabled(self):
@@ -524,6 +529,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor._get_seat_value = lambda row, seat, idx: "无"
         monitor._find_book_button = lambda row: None
         monitor._find_alternate_button = lambda row, seat=None: object()
+        monitor.row_parser.snapshot_rows = Mock(return_value=[{"train":"G101", "seats":{"二等座":"无"}, "element":Row()}])
 
         self.assertIsNone(monitor._find_hit_row({}))
 
@@ -749,6 +755,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor.query_executor.snapshot_form.return_value = {"page":"one", "values":["北京","BJP","上海","SHH","2026-09-20"]}
         monitor.query_executor.execute.return_value = {"status":"ok"}
         monitor.query_executor.current.return_value = True
+        monitor.row_parser.snapshot_rows = Mock(return_value=[])
         monitor.click_query_button = lambda: True
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
         monitor._find_hit_row = lambda indices: None

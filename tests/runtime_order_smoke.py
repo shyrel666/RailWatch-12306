@@ -44,6 +44,8 @@ def main():
             assert order["stage"] == "alternate_pending_payment" and order["order_id"] == "TEST123"
             assert order["recovery_required"] is True
             assert responses["config"]["ok"] is True
+            assert responses["config"]["result"]["request_mode"] == "conservative"
+            assert responses["config"]["result"]["query_priority"] == "reliability"
             assert responses["start"]["ok"] is False and responses["clear"]["ok"] is False
             assert not (directory / "chrome_profile_12306").exists()
             assert journal.pending()["result"]["order_id"] == "TEST123"

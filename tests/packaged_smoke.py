@@ -58,16 +58,20 @@ def main():
                     if "exceptionDetails" in result: raise RuntimeError(result["exceptionDetails"])
                     return result["result"].get("value")
                 for _ in range(100):
-                    if evaluate("typeof window.railwatch?.command === 'function' && document.querySelectorAll('.nav-item').length === 4"):
+                    if evaluate("typeof window.railwatch?.command === 'function' && document.querySelectorAll('.nav .nav-item').length === 5"):
                         break
                     time.sleep(0.2)
+                else:
+                    raise RuntimeError("Packaged renderer navigation did not become ready")
                 assert evaluate("typeof window.railwatch.command") == "function"
                 config = evaluate("window.railwatch.command('loadConfig')")
                 assert config["auto_submit"] is False and config["auto_alternate"] is False
                 config.pop("config_version", None)
                 saved = evaluate(f"window.railwatch.command('saveConfig', {{config:{json.dumps(config, ensure_ascii=False)}}})")
-                assert saved["config_version"] == 1
+                assert saved["config_version"] == 2
                 runtime = evaluate("window.railwatch.command('getRuntimeInfo')")
+                expected_version = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+                assert runtime["app_version"] == expected_version
                 assert runtime["core_available"] and runtime["date_policy"]["timezone"] == "Asia/Shanghai"
                 assert "task" in runtime["state"]
                 assert runtime["data_dir"].startswith(tmp)

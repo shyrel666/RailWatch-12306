@@ -1,28 +1,29 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Button, Tooltip } from "antd";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Drawer, Tooltip } from "antd";
 import {
-  Activity,
-  CheckCircle2,
-  Circle,
-  Clock3,
-  Eye,
-  EyeOff,
-  FileDown,
   Gauge,
   Info,
   MonitorPlay,
-  Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   ScrollText,
   Settings,
-  Sun,
   TrainFront,
-  XCircle,
+  type LucideIcon,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import appIconUrl from "../../assets/images/icon.png";
-import { formatAppVersion, formatDataDirFreeSpace, formatRuntimePhaseDetail, formatRuntimePhaseLabel, formatStatusClock, getRuntimePhaseTone } from "../lib/formatSystemStatus";
+import {
+  formatAppVersion,
+  formatRuntimePhaseDetail,
+  formatRuntimePhaseLabel,
+  formatStatusClock,
+  getRuntimePhaseTone,
+} from "../lib/formatSystemStatus";
+import { useClock } from "../lib/useClock";
+import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { RailWatchPage, RailWatchStatus, RuntimeInfo } from "../types";
 import { BrandWordmark } from "./BrandWordmark";
+import { ThemeControl } from "./ThemeControl";
 import { UpdateStatusControl } from "./UpdateStatusControl";
 
 export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
@@ -32,82 +33,69 @@ export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
   { name: "系统设置", icon: Settings },
   { name: "关于", icon: Info },
 ];
+const descriptions: Record<RailWatchPage, string> = {
+  仪表盘: "你的下一程，从这里开始。",
+  行程设置: "安排路线、乘客与查询偏好。",
+  购票监控: "关注余票变化，及时处理你的订单。",
+  系统设置: "让工作台以你喜欢的方式运行。",
+  关于: "为每一次出发，做好准备。",
+};
 
 export function SidebarNav({
   activePage,
   appName,
-  dataDir,
-  dataDirWritable,
-  dataDirFreeBytes,
+  collapsed = false,
+  onToggle,
   onPageChange,
 }: {
   activePage: RailWatchPage;
   appName: string;
-  dataDir: string;
-  dataDirWritable: boolean;
-  dataDirFreeBytes: number;
+  collapsed?: boolean;
+  onToggle?: () => void;
   onPageChange: (page: RailWatchPage) => void;
 }) {
-  const [now, setNow] = useState(() => new Date());
-  const clock = formatStatusClock(now);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-
+  const items = (start: number, end: number) =>
+    RAILWATCH_PAGES.slice(start, end).map(({ name, icon: Icon }) => (
+      <Tooltip
+        title={collapsed ? name : undefined}
+        placement="right"
+        key={name}
+      >
+        <button
+          className={"nav-item" + (activePage === name ? " active" : "")}
+          aria-label={name}
+          aria-current={activePage === name ? "page" : undefined}
+          onClick={() => onPageChange(name)}
+          type="button"
+        >
+          <Icon size={18} />
+          <span>{name}</span>
+        </button>
+      </Tooltip>
+    ));
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-mark">
-          <img alt="" src={appIconUrl} />
-        </div>
-        <BrandWordmark label={appName} />
+        <img alt={collapsed ? appName : ""} src={appIconUrl} />
+        <BrandWordmark label={appName || "RailWatch 12306"} />
       </div>
-      <nav className="nav">
-        {RAILWATCH_PAGES.map((page) => {
-          const Icon = page.icon;
-          return (
-            <button
-              className={activePage === page.name ? "nav-item active" : "nav-item"}
-              key={page.name}
-              onClick={() => onPageChange(page.name)}
-              type="button"
-            >
-              <Icon size={18} />
-              <span>{page.name}</span>
-            </button>
-          );
-        })}
+      <div className="nav-caption">工作空间</div>
+      <nav className="nav" aria-label="工作空间">
+        {items(0, 3)}
       </nav>
-      <div className="sidebar-footer">
-        <div className="sidebar-status">
-          <div className="sidebar-status-title">
-            <span>数据目录</span>
-            <em className={dataDirWritable ? "" : "warning"}>
-              <Circle size={8} fill="currentColor" />
-              {dataDirWritable ? "正常" : "异常"}
-            </em>
-          </div>
-          <strong>{dataDir || "正在加载..."}</strong>
-          <div className="sidebar-space">
-            <span>可用空间</span>
-            <strong>{formatDataDirFreeSpace(dataDirFreeBytes)}</strong>
-          </div>
-        </div>
-        <div className="runtime-card" aria-label="系统时钟">
-          <div className="runtime-card-head">
-            <span className="runtime-card-eyebrow">
-              <Clock3 size={14} />
-              北京时间
-            </span>
-            <span className="runtime-clock-date">{clock.date}</span>
-          </div>
-          <time className="runtime-clock-time" dateTime={now.toISOString()}>
-            {clock.time}
-          </time>
-        </div>
-      </div>
+      <nav className="nav nav-bottom" aria-label="应用">
+        {items(3, 5)}
+      </nav>
+      <button
+        className="nav-item sidebar-collapse"
+        aria-label={collapsed ? "展开侧栏" : "折叠侧栏"}
+        aria-expanded={!collapsed}
+        onClick={onToggle}
+        type="button"
+      >
+        {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        <span>折叠侧栏</span>
+      </button>
     </aside>
   );
 }
@@ -121,8 +109,6 @@ export function ShellLayout({
   runtime,
   status,
   onPageChange,
-  onExportLog,
-  onThemeChange,
   onToggleEventPanel,
 }: {
   activePage: RailWatchPage;
@@ -133,180 +119,178 @@ export function ShellLayout({
   runtime: RuntimeInfo;
   status: RailWatchStatus;
   onPageChange: (page: RailWatchPage) => void;
-  onExportLog: () => void;
-  onThemeChange: (darkMode: boolean) => void;
+  onExportLog?: () => void;
   onToggleEventPanel: () => void;
 }) {
-  const shellClassName = [
-    "app-shell",
-    darkMode ? "dark" : "",
-    eventPanelVisible ? "" : "without-event-panel",
-    activePage === "仪表盘" ? "dashboard-shell" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const isDashboard = activePage === "仪表盘";
-  const hideTopbar =
-    isDashboard || activePage === "行程设置" || activePage === "购票监控" || activePage === "系统设置" || activePage === "关于";
-  const workspaceClassName = [
-    "workspace",
-    isDashboard ? "dashboard-workspace" : "",
-    activePage === "行程设置" ? "trip-setup-workspace-shell" : "",
-    activePage === "购票监控" ? "monitor-workspace-shell" : "",
-    activePage === "系统设置" ? "settings-workspace-shell" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-
+  const [compact, setCompact] = useState(
+    () => window.matchMedia("(max-width: 1279px)").matches,
+  );
+  const [override, setOverride] = useState<boolean | null>(null);
+  const collapsed = override ?? compact;
+  const pageSection = useRailWatchStore((state) => state.pageSection);
+  const logTriggerRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1279px)");
+    const update = () => {
+      setCompact(media.matches);
+      setOverride(null);
+    };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (!pageSection) {
+      if (contentRef.current) contentRef.current.scrollTop = 0;
+      return;
+    }
+    const target = document.getElementById(pageSection);
+    if (target) {
+      if (target instanceof HTMLDetailsElement) target.open = true;
+      const scroller =
+        target.closest<HTMLElement>(".trip-setup-form-scroll") ??
+        contentRef.current;
+      if (scroller) {
+        const stickyHeader =
+          pageSection === "monitor-attention" || pageSection === "monitor-human"
+            ? (document
+                .getElementById("monitor-controls")
+                ?.getBoundingClientRect().height ?? 0)
+            : 0;
+        scroller.scrollTop = Math.max(
+          0,
+          scroller.scrollTop +
+            target.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top -
+            stickyHeader -
+            12,
+        );
+      }
+      target.tabIndex = -1;
+      const focusTarget =
+        target.querySelector<HTMLElement>("summary, button, input") ?? target;
+      focusTarget.focus({ preventScroll: true });
+    }
+  }, [activePage, pageSection]);
   return (
-    <div className={shellClassName}>
+    <div
+      className={
+        "app-shell" +
+        (darkMode ? " dark" : "") +
+        (collapsed ? " collapsed" : "")
+      }
+    >
       <SidebarNav
         activePage={activePage}
         appName={runtime.app_display_name}
-        dataDir={runtime.data_dir}
-        dataDirWritable={runtime.data_dir_writable}
-        dataDirFreeBytes={runtime.data_dir_free_bytes}
+        collapsed={collapsed}
+        onToggle={() => setOverride(!collapsed)}
         onPageChange={onPageChange}
       />
-
-      <main className={workspaceClassName}>
-        {hideTopbar ? null : (
-          <header className="topbar">
-            <div>
-              <h1>{activePage}</h1>
-              <p>{status.summary}</p>
-            </div>
-            <div aria-label="顶部操作" className="topbar-actions" role="toolbar">
-              <StatusPill status={status} />
-              <ThemeToggle darkMode={darkMode} onThemeChange={onThemeChange} />
-              <Button
-                icon={eventPanelVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-                onClick={onToggleEventPanel}
-              >
-                {eventPanelVisible ? "隐藏事件" : "显示事件"}
-              </Button>
-            </div>
-          </header>
-        )}
-        <section className="page-surface">{children}</section>
+      <main
+        className={
+          "workspace" +
+          (activePage === "购票监控" ? " monitor-workspace-shell" : "")
+        }
+      >
+        <header className="page-header">
+          <div>
+            <span className="page-eyebrow">RAILWATCH / 工作空间</span>
+            <h1>{activePage}</h1>
+            <p>{descriptions[activePage]}</p>
+          </div>
+          <div className="header-actions">
+            <ThemeControl />
+            <button
+              ref={logTriggerRef}
+              className="quiet-button"
+              aria-label={eventPanelVisible ? "隐藏事件日志" : "显示事件日志"}
+              aria-expanded={eventPanelVisible}
+              onClick={onToggleEventPanel}
+              type="button"
+            >
+              <ScrollText size={16} />
+              事件日志
+            </button>
+          </div>
+        </header>
+        <section className="page-surface" ref={contentRef}>
+          {children}
+        </section>
       </main>
-
-      {eventPanel}
-      <BottomStatusBar
-        darkMode={darkMode}
-        eventPanelVisible={eventPanelVisible}
-        runtime={runtime}
-        status={status}
-        onExportLog={onExportLog}
-        onThemeChange={onThemeChange}
-        onToggleEventPanel={onToggleEventPanel}
-      />
+      <Drawer
+        afterOpenChange={(open) => {
+          if (!open) logTriggerRef.current?.focus();
+        }}
+        title="事件日志"
+        size={400}
+        open={eventPanelVisible}
+        onClose={onToggleEventPanel}
+        forceRender
+        className="log-drawer"
+        styles={{
+          body: {
+            padding: 0,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          },
+        }}
+      >
+        {eventPanel}
+      </Drawer>
+      <BottomStatusBar runtime={runtime} status={status} />
     </div>
-  );
-}
-
-function ThemeToggle({ darkMode, onThemeChange }: { darkMode: boolean; onThemeChange: (darkMode: boolean) => void }) {
-  return (
-    <div aria-label="外观" className="theme-toggle" role="group">
-      <Tooltip title="明亮主题">
-        <button
-          aria-label="明亮主题"
-          aria-pressed={!darkMode}
-          className={!darkMode ? "theme-option active" : "theme-option"}
-          onClick={() => onThemeChange(false)}
-          type="button"
-        >
-          <Sun size={16} />
-        </button>
-      </Tooltip>
-      <Tooltip title="暗黑主题">
-        <button
-          aria-label="暗黑主题"
-          aria-pressed={darkMode}
-          className={darkMode ? "theme-option active" : "theme-option"}
-          onClick={() => onThemeChange(true)}
-          type="button"
-        >
-          <Moon size={16} />
-        </button>
-      </Tooltip>
-    </div>
-  );
-}
-
-function StatusPill({ status }: { status: RailWatchStatus }) {
-  const icon = status.error_message ? <XCircle size={15} /> : status.monitoring ? <Activity size={15} /> : <CheckCircle2 size={15} />;
-  return (
-    <span className={`status-pill ${status.risk_level}`}>
-      {icon}
-      {status.error_message || status.status_message}
-    </span>
   );
 }
 
 function BottomStatusBar({
-  darkMode,
-  eventPanelVisible,
   runtime,
   status,
-  onExportLog,
-  onThemeChange,
-  onToggleEventPanel,
 }: {
-  darkMode: boolean;
-  eventPanelVisible: boolean;
   runtime: RuntimeInfo;
   status: RailWatchStatus;
-  onExportLog: () => void;
-  onThemeChange: (darkMode: boolean) => void;
-  onToggleEventPanel: () => void;
 }) {
-  const phaseTone = getRuntimePhaseTone(status.phase);
-  const phaseLabel = formatRuntimePhaseLabel(status.status_message, status.phase);
-  const phaseDetail = formatRuntimePhaseDetail(status.status_message, status.phase);
-
+  const now = useClock();
+  const clock = formatStatusClock(new Date(now));
   return (
     <footer className="bottom-statusbar" aria-label="系统状态">
       <div className="statusbar-group">
-        <span className={`statusbar-chip${runtime.network_ok ? "" : " warning"}`}>
+        <span
+          className={"statusbar-chip" + (runtime.network_ok ? "" : " warning")}
+        >
           网络 <strong>{runtime.network_label}</strong>
         </span>
-        <span className={`statusbar-chip${runtime.railway_ok ? "" : " warning"}`}>
+        <span
+          className={"statusbar-chip" + (runtime.railway_ok ? "" : " warning")}
+        >
           12306 <strong>{runtime.railway_label}</strong>
         </span>
-        <span className={`statusbar-chip phase-${phaseTone}`} title={phaseDetail ?? undefined}>
-          运行 <strong>{phaseLabel}</strong>
+        <span
+          className={
+            "statusbar-chip phase-" + getRuntimePhaseTone(status.phase)
+          }
+          title={
+            formatRuntimePhaseDetail(status.status_message, status.phase) ??
+            undefined
+          }
+        >
+          运行{" "}
+          <strong>
+            {formatRuntimePhaseLabel(status.status_message, status.phase)}
+          </strong>
         </span>
       </div>
       <div className="statusbar-group right">
-        <span className="statusbar-version">{formatAppVersion(runtime.app_version)}</span>
+        <time
+          aria-label="系统时钟"
+          title={clock.date}
+          dateTime={new Date(now).toISOString()}
+        >
+          北京时间 {clock.time}
+        </time>
+        <span>{formatAppVersion(runtime.app_version)}</span>
         <UpdateStatusControl appVersion={runtime.app_version} />
-        <Tooltip title={darkMode ? "切换到明亮主题" : "切换到暗黑主题"}>
-          <button
-            aria-label={darkMode ? "切换到明亮主题" : "切换到暗黑主题"}
-            className="statusbar-icon-button"
-            onClick={() => onThemeChange(!darkMode)}
-            type="button"
-          >
-            {darkMode ? <Moon size={16} /> : <Sun size={16} />}
-          </button>
-        </Tooltip>
-        <Tooltip title={eventPanelVisible ? "隐藏事件日志" : "显示事件日志"}>
-          <button
-            aria-label={eventPanelVisible ? "隐藏事件日志" : "显示事件日志"}
-            aria-pressed={eventPanelVisible}
-            className={eventPanelVisible ? "statusbar-icon-button active" : "statusbar-icon-button"}
-            onClick={onToggleEventPanel}
-            type="button"
-          >
-            <ScrollText size={16} />
-          </button>
-        </Tooltip>
-        <Tooltip title="导出日志">
-          <button aria-label="导出日志" className="statusbar-icon-button" onClick={onExportLog} type="button">
-            <FileDown size={16} />
-          </button>
-        </Tooltip>
       </div>
     </footer>
   );

@@ -1,4 +1,5 @@
 import { createStore } from "zustand/vanilla";
+import { DEFAULT_QUERY_STRATEGY } from "../lib/queryStrategy";
 import type {
   HumanActionPayload,
   LogEntry,
@@ -80,6 +81,7 @@ export const defaultConfig: RailWatchConfig = {
   prewarm_lead_seconds: 120,
   config_version: 2,
   automation_route: "compliance_alerts",
+  ...DEFAULT_QUERY_STRATEGY,
 };
 
 export type RailWatchStore = {
@@ -108,7 +110,8 @@ export type RailWatchStore = {
   applyHumanAction: (payload: HumanActionPayload) => void;
   clearHumanAction: () => void;
   setConfig: (patch: Partial<RailWatchConfig>) => void;
-  setActivePage: (page: RailWatchPage) => void;
+  pageSection: string | null;
+  setActivePage: (page: RailWatchPage, section?: string) => void;
   setLogPaused: (paused: boolean) => void;
   setEventPanelVisible: (visible: boolean) => void;
   clearLogs: () => void;
@@ -141,8 +144,9 @@ export function createRailWatchStore() {
     notifications: [],
     lastHumanAction: null,
     activePage: "仪表盘",
+    pageSection: null,
     logPaused: false,
-    eventPanelVisible: true,
+    eventPanelVisible: false,
     applyRuntimeInfo: (runtime) => {
       set({
         runtime,
@@ -196,8 +200,8 @@ export function createRailWatchStore() {
     setConfig: (patch) => {
       set({ config: { ...get().config, ...patch } });
     },
-    setActivePage: (page) => {
-      set({ activePage: page });
+    setActivePage: (page, section) => {
+      set({ activePage: page, pageSection: section ?? null });
     },
     setLogPaused: (paused) => {
       if (!paused && get().pausedLogs.length > 0) {

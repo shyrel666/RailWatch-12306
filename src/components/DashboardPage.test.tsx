@@ -3,7 +3,12 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { isoDaysFromToday } from "../lib/tripDate";
-import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
+import {
+  defaultConfig,
+  defaultRuntimeInfo,
+  defaultStatus,
+  railwatchStore,
+} from "../store/railwatchStore";
 import { DashboardPage } from "./DashboardPage";
 
 function resetStore() {
@@ -18,6 +23,7 @@ function resetStore() {
     notifications: [],
     activePage: "仪表盘",
     logPaused: false,
+    lastHumanAction: null,
     eventPanelVisible: true,
   });
 }
@@ -26,78 +32,74 @@ describe("DashboardPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
 
-  test("renders the screenshot-style dashboard chrome and hides raw risk codes", async () => {
-    const user = userEvent.setup();
-
+  test("shows one trip summary and sends the next action to environment setup", async () => {
     render(<DashboardPage />);
-
-    expect(screen.getByLabelText("当前行程")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "行程概览" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "查询分析" })).toBeTruthy();
-    expect(screen.getByText("检查环境")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "监控未运行" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "危险自动化（已锁定）" })).toBeTruthy();
-    expect(screen.getByText("低风险")).toBeTruthy();
-    expect(screen.queryByText("notice")).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "查看 / 编辑行程" }));
-
-    expect(railwatchStore.getState().activePage).toBe("行程设置");
-  });
-
-  test("shows a five-step workflow and keeps setup fields off the dashboard", () => {
-    render(<DashboardPage />);
-
-    const workflow = screen.getByRole("list", { name: "监控流程" });
-    const steps = within(workflow).getAllByRole("listitem");
-
-    expect(steps).toHaveLength(5);
-    expect(steps[0].textContent).toContain("环境");
-    expect(steps[2].textContent).toContain("查询");
-    expect(steps[4].textContent).toContain("命中");
-    expect(screen.getByText("站点范围")).toBeTruthy();
-    expect(screen.getByText("请求模式")).toBeTruthy();
-    expect(screen.queryByText("并发请求")).toBeNull();
-    expect(screen.queryByText("自动跳转支付")).toBeNull();
-    expect(screen.queryByRole("button", { name: "了解更多风险说明" })).toBeNull();
+    expect(screen.getAllByLabelText("当前行程")).toHaveLength(1);
+    expect(screen.queryByText("站点范围")).toBeNull();
+    expect(screen.queryByText("请求模式")).toBeNull();
     expect(screen.getByLabelText("自动化状态")).toBeTruthy();
-    expect(screen.queryByLabelText("乘客")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "检查环境" }));
+    expect(railwatchStore.getState().activePage).toBe("系统设置");
+    expect(railwatchStore.getState().pageSection).toBe("settings-environment");
   });
-
-  test("uses a single dashboard action to enter the monitor page", async () => {
-    const user = userEvent.setup();
-
+  test("automation shortcut targets the actual trip controls", async () => {
     render(<DashboardPage />);
-
+    await userEvent.click(screen.getByRole("button", { name: /配置自动化/ }));
+    expect(railwatchStore.getState().activePage).toBe("行程设置");
+    expect(railwatchStore.getState().pageSection).toBe("trip-automation");
+  });
+  test("shows five workflow steps and keeps mutation controls on their pages", () => {
+    render(<DashboardPage />);
+    expect(
+      within(screen.getByRole("list", { name: "监控流程" })).getAllByRole(
+        "listitem",
+      ),
+    ).toHaveLength(5);
+    expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByRole("button", { name: /启动监控/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /停止监控/ })).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: /进入购票监控/ }));
-    expect(railwatchStore.getState().activePage).toBe("购票监控");
   });
-
-  test("shows the configured date range instead of a hardcoded range", () => {
+  test("uses the task snapshot and never fabricates a next query deadline", () => {
     railwatchStore.setState({
-      config: { ...defaultConfig, date: "2026-06-10", date_range: "±2天" },
-    });
-
-    render(<DashboardPage />);
-
-    expect(screen.getByText("6月10日（±2天）")).toBeTruthy();
-    expect(screen.queryByText("6月10日（±3天）")).toBeNull();
-  });
-
-  test("does not fabricate elapsed time or submission counts", () => {
-    railwatchStore.setState({
-      status: { ...defaultStatus, query_ready: true, monitoring: true },
+      config: { ...defaultConfig, from_station_cn: "广州" },
+      status: {
+        ...defaultStatus,
+        monitoring: true,
+        current_config: { ...defaultConfig },
+      },
       monitorLoops: 9,
     });
-
     render(<DashboardPage />);
-
-    expect(screen.queryByText("00:12")).toBeNull();
-    expect(screen.queryByText("成功提交")).toBeNull();
-    expect(screen.getByText("请求次数").parentElement?.textContent).toContain("9");
+    expect(screen.getByText("北京")).toBeTruthy();
+    expect(screen.queryByText("广州")).toBeNull();
+    expect(screen.getByText("查询次数").parentElement?.textContent).toContain(
+      "9",
+    );
+    expect(screen.getByText("下次查询").parentElement?.textContent).toContain(
+      "—",
+    );
+  });
+  test("prioritizes pending payment over monitoring and environment flags", async () => {
+    railwatchStore.setState({
+      status: {
+        ...defaultStatus,
+        monitoring: true,
+        order: { status: "pending_payment" },
+      },
+    });
+    render(<DashboardPage />);
+    expect(screen.getByRole("heading", { name: "预订待支付" })).toBeTruthy();
+    await userEvent.click(
+      screen.getByRole("button", { name: "查看并处理订单" }),
+    );
+    expect(railwatchStore.getState().activePage).toBe("购票监控");
+    expect(railwatchStore.getState().pageSection).toBe("monitor-attention");
+  });
+  test("surfaces manual action before idle setup", () => {
+    railwatchStore.setState({
+      lastHumanAction: { title: "请完成核验", message: "打开官方页面继续" },
+    });
+    render(<DashboardPage />);
+    expect(screen.getByRole("heading", { name: "请完成核验" })).toBeTruthy();
   });
 
   test("moves the workflow current step to hit after a ticket hit", () => {
@@ -167,7 +169,9 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     expect(screen.getAllByRole("status").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText(/出发日期已过去/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/出发日期已过去/).length).toBeGreaterThanOrEqual(
+      1,
+    );
   });
 
   test("does not warn for a date inside the presale window", () => {

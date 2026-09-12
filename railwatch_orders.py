@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 import json
 import sqlite3
+import os
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -16,8 +18,9 @@ STAGES = {
     "fulfilled": "购票成功", "sold_out": "已确认售罄", "not_submitted": "明确未提交",
     "verification": "需要人工核验", "unknown": "订单结果待核对",
     "cancelled": "订单已取消", "expired": "订单已过期", "failed": "候补兑现失败",
+    "dismissed": "已结束本地核对",
 }
-TERMINAL = {"sold_out", "not_submitted", "fulfilled", "cancelled", "expired", "failed"}
+TERMINAL = {"sold_out", "not_submitted", "fulfilled", "cancelled", "expired", "failed", "dismissed"}
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,8 @@ class OrderJournal:
     """
     def __init__(self, filename):
         self.filename = str(filename)
+        self._resume_guard = threading.RLock()
+        self._resume_owner = None
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.executescript("""
@@ -81,6 +86,35 @@ class OrderJournal:
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, intent_id TEXT,
                     stage TEXT NOT NULL, at REAL NOT NULL, monotonic REAL NOT NULL, detail TEXT NOT NULL);
             """)
+        # An OS lock survives threads but is released on process exit. Only its
+        # next owner may retire a crashed recovery claim; submission markers stay.
+        lease = self._try_resume_lease()
+        if lease is not None:
+            try:
+                with self.connection() as db:
+                    db.execute("UPDATE order_events SET stage='resume_released' WHERE stage='resume_claimed'")
+            finally:
+                lease.close()
+
+    def _try_resume_lease(self):
+        path = self.filename + ".resume.lock"
+        try:
+            with open(path, "xb") as created:
+                created.write(b"0")
+        except FileExistsError:
+            pass
+        lease = open(path, "r+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lease.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lease.close()
+            return None
+        return lease
 
     @contextmanager
     def connection(self):
@@ -135,20 +169,62 @@ class OrderJournal:
         with self.connection() as db:
             return bool(db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit','resume_claimed') LIMIT 1", (intent_id,)).fetchone())
 
+    def dismiss(self, intent_id):
+        """Archive a user-dismissed review without claiming any official outcome."""
+        lease = self._try_resume_lease()
+        if lease is None:
+            raise RuntimeError("订单正在恢复处理中，请等待任务结束后再操作。")
+        try:
+            with self.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT run_id,result FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone()
+                if not row:
+                    raise ValueError("待核对记录已变化，请刷新后重试。")
+                previous = json.loads(row[1])
+                if previous.get("status") not in ("unknown", "verification"):
+                    raise ValueError("仅可结束结果不明或需人工核验的记录；待支付订单请继续处理。")
+                result = OrderResult("dismissed", "用户结束本地核对，官方订单状态未改变",
+                                     order_id=previous.get("order_id", ""), evidence=previous.get("evidence", {}))
+                db.execute("UPDATE orders SET result=?,unresolved=0,updated_at=? WHERE intent_id=?",
+                           (json.dumps(result.payload(), ensure_ascii=False), time.time(), intent_id))
+                db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
+                           (row[0], intent_id, "dismissed", time.time(), time.monotonic(), '{"user_confirmed":true}'))
+        finally:
+            lease.close()
+
     def claim_resume(self, run_id, intent_id):
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
+        with self._resume_guard:
+            if self._resume_owner is not None:
                 return False
-            if db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit','resume_claimed') LIMIT 1", (intent_id,)).fetchone():
+            lease = self._try_resume_lease()
+            if lease is None:
                 return False
-            db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
-                       (run_id, intent_id, "resume_claimed", time.time(), time.monotonic(), "{}"))
-            return True
+            try:
+                with self.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    db.execute("UPDATE order_events SET stage='resume_released' WHERE stage='resume_claimed'")
+                    if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
+                        return False
+                    if db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit') LIMIT 1", (intent_id,)).fetchone():
+                        return False
+                    db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
+                               (run_id, intent_id, "resume_claimed", time.time(), time.monotonic(), "{}"))
+                self._resume_owner = (run_id, intent_id, lease)
+                return True
+            finally:
+                if self._resume_owner is None:
+                    lease.close()
 
     def release_resume(self, run_id, intent_id):
-        with self.connection() as db:
-            db.execute("UPDATE order_events SET stage='resume_released' WHERE run_id=? AND intent_id=? AND stage='resume_claimed'", (run_id, intent_id))
+        with self._resume_guard:
+            if self._resume_owner is None or self._resume_owner[:2] != (run_id, intent_id):
+                return
+            try:
+                with self.connection() as db:
+                    db.execute("UPDATE order_events SET stage='resume_released' WHERE run_id=? AND intent_id=? AND stage='resume_claimed'", (run_id, intent_id))
+            finally:
+                self._resume_owner[2].close()
+                self._resume_owner = None
 
     def mark(self, run_id, stage, intent_id="", detail=None):
         with self.connection() as db:

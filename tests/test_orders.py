@@ -10,7 +10,7 @@ from contextlib import nullcontext
 from gui_12306_0 import TicketMonitor
 from railwatch_bridge import RailWatchBridge
 from railwatch_orders import OrderIntent, OrderJournal, OrderResult
-from railwatch_order_page import OrderPage
+from railwatch_order_page import OrderPage, seat_label
 from railwatch_time import ServerTimeSync, resolve_sale_timestamp
 from railwatch_task import MonitorTask
 
@@ -33,6 +33,69 @@ def snapshot(state="待支付", **changes):
 
 
 class OrderEvidenceTests(unittest.TestCase):
+    def test_priced_seat_labels_preserve_exact_class(self):
+        for value in ('二等座（927.0元）', '二等座 (￥927.00元)', '二等座（¥927元）', '二等座'):
+            self.assertEqual(seat_label(value), '二等座')
+        for value in ('高级软卧', '二等座/一等座', '二等座（不可用）'):
+            self.assertEqual(seat_label(value), value)
+
+    def test_regular_form_requires_exact_route_train_and_seat(self):
+        selected = replace(intent(), from_station='北京丰台', to_station='成都东')
+        data = {'regular': '2026-09-10（周四） G101次 北京丰台站（09:29开）—成都东站（19:00到）',
+                'passengers': ['张三'], 'seats': ['二等座（927.0元）']}
+        page = OrderPage(Mock())
+        page.snapshot = lambda: data
+        self.assertTrue(page.verify_form(selected))
+        for changed in (replace(selected, from_station='北京'), replace(selected, to_station='成都'),
+                        replace(selected, train_code='G10'), replace(selected, seat='一等座'),
+                        replace(selected, from_station='成都东', to_station='北京丰台')):
+            self.assertFalse(page.verify_form(changed))
+
+    def test_packed_official_summary_without_spaces_verifies(self):
+        # The official confirm page glues tokens together; measured 2026-09-11:
+        # 2026-09-12（周六）G1307次北京丰台站（09:29开）—成都东站（19:00到）
+        selected = replace(intent(), from_station='北京丰台', to_station='成都东', train_code='G1307')
+        data = {'regular': '2026-09-10（周四）G1307次北京丰台站（09:29开）—成都东站（19:00到）',
+                'passengers': ['张三'], 'seats': ['二等座（¥927.0元）']}
+        page = OrderPage(Mock())
+        page.snapshot = lambda: data
+        self.assertTrue(page.verify_form(selected))
+        # A longer station or train sharing the prefix must still be rejected.
+        for changed in (replace(selected, from_station='北京'), replace(selected, to_station='成都'),
+                        replace(selected, train_code='G130'), replace(selected, train_code='G13071')):
+            self.assertFalse(page.verify_form(changed))
+
+    def test_train_and_station_tokens_reject_extension_only(self):
+        from railwatch_order_page import form_token, train_token
+        packed = '2026-09-10（周四）G101次北京丰台站（09:29开）—上海虹桥站（19:00到）'
+        self.assertTrue(train_token(packed, 'G101'))
+        self.assertFalse(train_token(packed, 'G10'))
+        self.assertFalse(train_token(packed, 'G1011'))
+        self.assertFalse(train_token('G1010次', 'G101'))
+        self.assertTrue(form_token(packed, '北京丰台', '站'))
+        self.assertFalse(form_token(packed, '北京', '站'))
+        self.assertTrue(form_token(packed, '上海虹桥', '站'))
+        self.assertFalse(form_token(packed, '上海', '站'))
+        self.assertFalse(form_token(packed, '丰台', '站'))
+
+    def test_order_record_matches_packed_official_text(self):
+        record = {'order_id': 'E123456', 'kind': 'regular',
+                  'text': 'G1307 2026年09月10日 北京丰台—成都东 二等座（¥927.0元） 张三',
+                  'state': '待支付', 'passengers': ['张三']}
+        selected = replace(intent(), from_station='北京丰台', to_station='成都东', train_code='G1307')
+
+        def read_with(order_text, target):
+            driver = Mock()
+            driver.execute_script.return_value = {
+                'url': 'https://kyfw.12306.cn/otn/view/train_order.html', 'dialogs': [], 'details': [],
+                'orders': [{**record, 'text': order_text}]}
+            return OrderPage(driver).result(target)
+
+        self.assertEqual(read_with(record['text'], selected).status, 'pending_payment')
+        for changed in (replace(selected, train_code='G130'), replace(selected, from_station='北京'),
+                        replace(selected, to_station='成都'), replace(selected, seat='一等座')):
+            self.assertEqual(read_with(record['text'], changed).status, 'unknown')
+
     def read(self, value, selected=None, **kwargs):
         driver = Mock()
         driver.execute_script.return_value = value
@@ -138,6 +201,7 @@ class JournalTests(unittest.TestCase):
         original = intent()
         self.journal.begin("first", original, CONFIG)
         self.journal.claim_resume("resume", original.intent_id)
+        self.addCleanup(self.journal.release_resume, "resume", original.intent_id)
         with self.assertRaises(RuntimeError): self.journal.mark("first", "regular_submit", original.intent_id)
         self.journal.mark("resume", "regular_submit", original.intent_id)
         with self.assertRaises(RuntimeError): self.journal.mark("resume", "regular_submit", original.intent_id)
@@ -202,6 +266,15 @@ class DecisionTests(unittest.TestCase):
                                      human_action_callback=self.humans.append)
         self.hit = ("G101", "二等座", "有", Mock(), Mock(), "book")
 
+    def test_order_uses_selected_row_stations_and_preserves_query_config(self):
+        self.monitor.row_parser.selected_route = Mock(return_value=('北京丰台', '上海虹桥'))
+        self.monitor.submit_flow.try_auto_submit = Mock(return_value=OrderResult('unknown'))
+        self.monitor._execute_order(self.hit)
+        pending = self.journal.pending()
+        self.assertEqual((pending['intent']['from_station'], pending['intent']['to_station']), ('北京丰台', '上海虹桥'))
+        self.assertEqual(pending['config']['from_station_cn'], '北京')
+        self.assertEqual(self.monitor.submit_flow.try_auto_submit.call_args.kwargs['intent'].to_station, '上海虹桥')
+
     def test_regular_rejection_routes_to_houbu_without_sleep(self):
         self.monitor.submit_flow.try_auto_submit = Mock(return_value=OrderResult("sold_out", no_order=True))
         self.monitor._sleep = Mock()
@@ -240,6 +313,8 @@ class DecisionTests(unittest.TestCase):
         self.monitor._find_book_button = lambda row: row
         self.monitor._find_alternate_button = lambda row, seat: row
         self.monitor._get_seat_value = lambda row, *args: "无" if row is rows[0] else "有"
+        self.monitor.row_parser.snapshot_rows = lambda seats: [
+            {"train":row.text.split()[0], "element":row, "seats":{"二等座":self.monitor._get_seat_value(row)}} for row in rows]
         self.assertEqual(self.monitor._find_hit_row({})[0], "G101")
         self.monitor._get_seat_value = lambda *args: "有"
         self.assertEqual(self.monitor._find_hit_row({})[0], "G101")
@@ -294,6 +369,76 @@ class ScheduleTests(unittest.TestCase):
             bridge.system_resumed()
             self.assertTrue(bridge._task.cancel.is_set())
             self.assertFalse(bridge._wait_for_target_timestamp(10**12, {}))
+
+
+class RegularConfirmationTests(unittest.TestCase):
+    """提交在途后的收尾语义：弹窗必完成、未知必核对、页面不乱跳。"""
+
+    def _page(self):
+        from railwatch_order_page import OrderPage
+        page = OrderPage(Mock())
+        page.snapshot = lambda: {"formReady": True}
+        page.result = lambda *a, **k: OrderResult("unknown")
+        page.prepare_people = lambda names: True
+        page.select_regular_seats = lambda target: True
+        page.verify_form = lambda target: True
+        page.wait_result = lambda target, submitted=True, timeout=10: OrderResult(
+            "unknown", "未获得匹配的订单证据，请打开官方订单详情核对")
+        return page
+
+    def test_confirmation_still_completes_when_stop_is_requested(self):
+        page = self._page()
+        state = {"stopped": False}
+        page.stop = lambda: state["stopped"]
+        confirm = Mock()
+        def button(selectors):
+            if selectors == ("#qr_submit_id",):
+                return confirm
+            submit = Mock()
+            submit.click.side_effect = lambda: state.update(stopped=True)
+            return submit
+        page.button = button
+        # 停止请求让确认弹窗 poll 立即返回空：弹窗只能靠最终直查兜住。
+        poll_results = iter([True, True, None])
+        page.poll = lambda predicate, timeout=10, ignore_stop=False: next(poll_results, None)
+        logs = []
+        page.log = logs.append
+        result = page.regular(Mock(), intent())
+        confirm.click.assert_called_once()
+        self.assertTrue(any("仍完成本次确认" in message for message in logs))
+        self.assertEqual(result.status, "unknown")
+
+    def test_unknown_after_confirmation_reconciles_official_order_page(self):
+        page = self._page()
+        page.button = lambda selectors: Mock()
+        page.snapshot = lambda: {"formReady": True}
+        page.reconcile = Mock(return_value=OrderResult("pending_payment", order_id="E123456",
+                                                       evidence={"matched": True}))
+        result = page.regular(Mock(), intent())
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        page.reconcile.assert_called_once()
+
+    def test_pending_dialog_reports_actionable_verification_without_navigation(self):
+        page = self._page()
+        page.button = lambda selectors: Mock()
+        page.snapshot = lambda: {"formReady": True, "confirmation": True}
+        page.reconcile = Mock()
+        result = page.regular(Mock(), intent())
+        self.assertEqual(result.status, "verification")
+        self.assertIn("确认", result.reason)
+        self.assertIn("继续处理", result.reason)
+        page.reconcile.assert_not_called()
+
+    def test_missing_dialog_keeps_page_and_never_reconciles(self):
+        page = self._page()
+        page.button = lambda selectors: Mock() if selectors == ("#submitOrder_id",) else None
+        page.reconcile = Mock()
+        # ready 与回读轮询需返回真值，确认弹窗轮询返回空。
+        poll_results = iter([True, True, None])
+        page.poll = lambda predicate, timeout=10, ignore_stop=False: next(poll_results, None)
+        result = page.regular(Mock(), intent())
+        self.assertEqual(result.status, "unknown")
+        page.reconcile.assert_not_called()
 
 
 if __name__ == "__main__":

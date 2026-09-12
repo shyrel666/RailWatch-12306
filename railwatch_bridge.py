@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -24,7 +26,7 @@ from railwatch_config_contract import (
     validate_config as contract_validate_config,
 )
 from railwatch_notify import NotificationService
-from railwatch_preferences import load_theme_preference, save_theme_preference
+from railwatch_preferences import load_theme_preference, save_theme_preference, normalize_theme
 from railwatch_dates import expand_travel_dates, eligible_travel_dates, beijing_now, PRESALE_WINDOW_DAYS
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, AppPhase, RailWatchState, TicketHit
 from railwatch_system import get_app_version, inspect_data_dir, probe_connectivity
@@ -88,6 +90,51 @@ MAX_LOG_ENTRIES = 1000
 MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
 MONITOR_PREWARM_INTERVAL_SECONDS = 30.0
 NOTIFICATION_SETTINGS_FILE = "notification_settings.json"
+
+# 用户可以在应用之外关掉受控的 Chrome 窗口。此时缓存的 WebDriver 句柄看上去仍然可用，
+# 只有真正发一条命令才会发现 ChromeDriver 已经不认识这个会话（invalid session id）。
+SESSION_LOST_EXCEPTION_NAMES = frozenset({
+    "InvalidSessionIdException",
+    "NoSuchSessionException",
+    "SessionNotCreatedException",
+})
+SESSION_LOST_MESSAGE_HINTS = (
+    "invalid session id",
+    "no such session",
+    "disconnected",
+    "chrome not reachable",
+    "cannot connect to the service",
+    "connection refused",
+    "connection aborted",
+    "max retries exceeded",
+    "newconnectionerror",
+    "unable to connect to",
+)
+
+
+def is_session_lost(exc: BaseException) -> bool:
+    """判断异常是否表示句柄背后的浏览器会话已经不存在。"""
+    if any(klass.__name__ in SESSION_LOST_EXCEPTION_NAMES for klass in type(exc).__mro__):
+        return True
+    message = str(exc).lower()
+    return any(hint in message for hint in SESSION_LOST_MESSAGE_HINTS)
+
+
+def driver_session_alive(driver) -> bool:
+    """在复用缓存句柄前探测一次，避免拿着已关闭的会话继续发命令。
+
+    探测走的是真实请求，所以能区分「窗口已被关掉」和「句柄从未打开过页面」。
+    只有明确的会话失效才算死亡：抛出其他异常的测试替身或残缺对象保持原样，
+    探测本身不会误杀一个健康浏览器。
+    """
+    if driver is None:
+        return False
+    try:
+        driver.window_handles
+    except Exception as exc:
+        return not is_session_lost(exc)
+    return True
+
 
 def get_resource_path(relative_path: str) -> str:
     if hasattr(sys, "_MEIPASS"):
@@ -190,6 +237,7 @@ class RailWatchBridge:
         self._driver_lock = threading.RLock()
         self.worker_threads: List[threading.Thread] = []
         self.log_entries: List[Dict[str, str]] = []
+        self._log_lock = threading.RLock()
         self.query_results: List[dict] = []
         self.config_manager = ConfigManager(self.data_dir) if CORE_AVAILABLE and ConfigManager else None
         self.chromedriver_path = CHROMEDRIVER_PATH
@@ -281,10 +329,11 @@ class RailWatchBridge:
             "level": level,
             "message": str(message),
         }
-        self.log_entries.append(entry)
-        if len(self.log_entries) > MAX_LOG_ENTRIES:
-            del self.log_entries[: len(self.log_entries) - MAX_LOG_ENTRIES]
-        self.emit("log", entry)
+        with self._log_lock:
+            self.log_entries.append(entry)
+            if len(self.log_entries) > MAX_LOG_ENTRIES:
+                del self.log_entries[: len(self.log_entries) - MAX_LOG_ENTRIES]
+            self.emit("log", entry)
         return entry
 
     def get_runtime_info(self) -> dict:
@@ -415,6 +464,9 @@ class RailWatchBridge:
                     self.log("提示: 请手动下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing/", "INFO")
 
             with self._driver_lock:
+                if self.driver and not driver_session_alive(self.driver):
+                    self.log("受控浏览器已关闭，将重新启动 Chrome 进行环境检查。", "WARN")
+                    self._release_driver()
                 if self.driver:
                     self.driver.execute_script("return document.readyState")
                     return self.emit_state(self.state.with_environment(True, "环境就绪"))
@@ -425,12 +477,15 @@ class RailWatchBridge:
             return self.emit_state(self.state.with_environment(True, "环境就绪"))
         except Exception as exc:
             error_msg = str(exc)
-            if "version" in error_msg.lower() or "session" in error_msg.lower():
+            lowered = error_msg.lower()
+            if "version" in lowered or "session not created" in lowered:
                 if CD_MANAGER_AVAILABLE:
                     error_msg += "\n\n可能是 ChromeDriver 版本与 Chrome 不匹配，点击「下载 ChromeDriver」自动获取正确版本。"
                 else:
                     error_msg += "\n\n请下载与 Chrome 版本匹配的 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing/"
-            return self.emit_state(self.state.with_error(f"环境检查失败: {error_msg}"))
+            message = f"环境检查失败: {error_msg}"
+            self.log(message, "ERROR")
+            return self.emit_state(self.state.with_error(message))
 
     @idle_browser_command
     def download_chromedriver(self) -> dict:
@@ -460,8 +515,18 @@ class RailWatchBridge:
             raise RuntimeError("监控运行中，请先停止监控后再打开登录页。")
         try:
             with self._driver_lock:
-                driver = self._ensure_driver()
-                driver.get(LOGIN_URL)
+                try:
+                    driver = self._ensure_driver()
+                    driver.get(LOGIN_URL)
+                except Exception as exc:
+                    if not is_session_lost(exc):
+                        raise
+                    # 窗口是在应用之外被关掉的（或浏览器刚刚崩溃）：放掉旧句柄后新开一个，
+                    # 而不是把无效会话错误一直抛给用户。
+                    self.log("浏览器窗口已被关闭，正在重新打开登录页。", "WARN")
+                    self._release_driver()
+                    driver = self._ensure_driver()
+                    driver.get(LOGIN_URL)
                 self.log("登录页面已打开，请在浏览器中完成 12306 登录。")
                 return self.emit_state(self.state.with_login_opened("登录页面已打开，请在浏览器中完成 12306 登录。"))
         except Exception as exc:
@@ -571,6 +636,27 @@ class RailWatchBridge:
             threading.Thread(target=lambda: self._finish_task(task), name="railwatch-task-finalizer", daemon=True).start()
             return state_to_payload(self.state)
 
+    def dismiss_order(self, intent_id: str, confirmed: bool = False) -> dict:
+        with self._task_lock:
+            if self.is_monitoring or self._browser_busy:
+                raise RuntimeError("请等待当前监控或浏览器任务退出后再结束核对。")
+            pending = self.order_journal.pending()
+            if not pending or not intent_id or pending["intent"]["intent_id"] != intent_id:
+                raise ValueError("待核对记录已变化，请刷新后重试。")
+            if not confirmed:
+                return {"requires_confirmation": True, "title": "结束本次核对",
+                        "message": "结束后可重新启动监控，并保留本地历史记录。此操作不会取消12306订单；如曾提交或手动下单，请先在官方页面核对并处理。是否继续？"}
+            self.order_journal.dismiss(intent_id)
+            self._task = None
+            self._pending_human_action = None
+            self.state = replace(self.state, order={}, task={}, monitoring=False,
+                                 phase=AppPhase.QUERY_READY, risk_level="notice", error_message="",
+                                 status_message="已结束本次核对，可重新启动监控")
+            self.log("已结束本次本地订单核对，保留历史记录，可重新启动监控。", "INFO")
+            result = self.emit_state()
+            self.emit("orderDismissed", {"intent_id": intent_id})
+            return result
+
     def continue_order(self) -> dict:
         """Resume only the saved intent; never replay an uncertain submission."""
         with self._task_lock:
@@ -598,12 +684,14 @@ class RailWatchBridge:
                 driver.set_script_timeout(3)
                 with guard_browser(driver, task, lambda: self._transition(task)):
                     page = OrderPage(driver, task.cancel.is_set, lambda seconds: self._task_wait(task, seconds),
-                                     lambda stage, detail=None: self.order_journal.mark(task.run_id, stage, intent.intent_id, detail))
+                                     lambda stage, detail=None: self.order_journal.mark(task.run_id, stage, intent.intent_id, detail), log=self.log)
                     known_id = pending["result"].get("order_id", "")
                     result = page.result(intent, submitted=True, known_id=known_id)
                     if result.status == "unknown" and page.snapshot().get("formReady") and self.order_journal.claim_resume(task.run_id, intent.intent_id):
-                        result = page.alternate(None, intent) if intent.kind == "alternate" else page.regular(None, intent)
-                        self.order_journal.release_resume(task.run_id, intent.intent_id)
+                        try:
+                            result = page.alternate(None, intent) if intent.kind == "alternate" else page.regular(None, intent, seat_preference=task.config.get("seat_prefer", "无偏好"))
+                        finally:
+                            self.order_journal.release_resume(task.run_id, intent.intent_id)
                     elif result.status in ("unknown", "verification"):
                         result = page.reconcile(intent, known_id=known_id, navigate=True,
                                                 allow_empty=not self.order_journal.submission_started(intent.intent_id))
@@ -698,8 +786,12 @@ class RailWatchBridge:
             }
         try:
             with self._driver_lock:
-                self.driver.quit()
-                self.driver = None
+                driver, self.driver = self.driver, None
+                error = self._dispose_driver(driver)
+                if error is not None and not is_session_lost(error):
+                    raise error
+                if error is not None:
+                    self.log("浏览器窗口已被关闭，残留会话已释放。", "WARN")
             self.log("浏览器已关闭。", "SUCCESS")
             return {"closed": True}
         except Exception as exc:
@@ -723,10 +815,7 @@ class RailWatchBridge:
             self.log(f"拒绝清除意外的数据目录: {target}", "ERROR")
             raise RuntimeError(f"拒绝清除意外的数据目录: {target}")
         if self.driver:
-            try:
-                self.driver.quit()
-            finally:
-                self.driver = None
+            self._release_driver()
         if os.path.exists(target):
             shutil.rmtree(target)
         os.makedirs(target, exist_ok=True)
@@ -735,18 +824,31 @@ class RailWatchBridge:
         self.log("本地 RailWatch 数据已清除。", "SUCCESS")
         return {"cleared": True, "data_dir": target}
 
-    def export_log(self, path: Optional[str] = None) -> dict:
+    def export_log(self, path: Optional[str] = None, entries: Optional[list] = None) -> dict:
+        if entries is None:
+            with self._log_lock:
+                entries = list(self.log_entries)
+        else:
+            # The desktop snapshot includes stderr and paused events that are
+            # not necessarily present in this runtime's in-memory buffer.
+            if not isinstance(entries, list) or len(entries) > MAX_LOG_ENTRIES * 2:
+                raise ValueError("导出日志数据无效。")
+            if any(not isinstance(entry, dict) or any(not isinstance(entry.get(key), str)
+                   for key in ("time", "level", "message")) for entry in entries):
+                raise ValueError("导出日志条目无效。")
+            entries = [{key: entry[key] for key in ("time", "level", "message")} for entry in entries]
         export_path = path or os.path.join(self.data_dir, f"railwatch-events-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt")
         os.makedirs(os.path.dirname(export_path) or self.data_dir, exist_ok=True)
         with open(export_path, "w", encoding="utf-8") as file:
-            for entry in self.log_entries:
+            for entry in entries:
                 file.write(f"[{entry['time']}] [{entry['level']}] {entry['message']}\n")
         self.log(f"事件已导出到 {export_path}", "SUCCESS")
         return {"path": export_path}
 
     def clear_log(self) -> dict:
-        self.log_entries.clear()
-        self.emit("logsCleared", {})
+        with self._log_lock:
+            self.log_entries.clear()
+            self.emit("logsCleared", {})
         return {"cleared": True}
 
     def load_preferences(self) -> dict:
@@ -756,7 +858,7 @@ class RailWatchBridge:
         }
 
     def save_preferences(self, theme: str, notification_settings: Optional[dict] = None) -> dict:
-        selected = "dark" if str(theme).lower() == "dark" else "light"
+        selected = normalize_theme(theme)
         save_theme_preference(self.data_dir, selected)
         if notification_settings is not None:
             self._save_notification_settings(notification_settings)
@@ -1024,9 +1126,90 @@ class RailWatchBridge:
         # The task's done event owns heartbeat lifetime.
         pass
 
+    def _dispose_driver(self, driver) -> Optional[Exception]:
+        """尽力关闭浏览器并结束它背后的 ChromeDriver 进程，返回 quit 时的异常。"""
+        error = None
+        try:
+            driver.quit()
+        except Exception as exc:
+            error = exc
+        service = getattr(driver, "service", None)
+        if service is not None:
+            try:
+                service.stop()
+            except Exception:
+                pass
+        return error
+
+    def _release_driver(self) -> None:
+        """丢弃缓存句柄，并清理它残留的浏览器与 ChromeDriver 进程。"""
+        driver, self.driver = self.driver, None
+        self.device_id_protector = None
+        if driver is None:
+            return
+        self._dispose_driver(driver)
+
+    def _terminate_profile_chrome(self) -> int:
+        """停止仍占用本应用浏览器配置目录的残留 Chrome。
+
+        应用被强制退出时 Selenium Chrome 会存活下来；配置目录被它占用后，
+        新启动的 Chrome 会在 DevToolsActivePort 生成前直接退出。
+        只按命令行里的配置目录匹配，不会波及用户自己的 Chrome 窗口。
+        """
+        profile_dir = os.path.join(self.data_dir, "chrome_profile_12306")
+        try:
+            if sys.platform == "win32":
+                # Keep the path out of PowerShell source. Match the complete
+                # argument, including either quoting form used by Windows.
+                script = r'''
+$cleanupEscapedPath = [regex]::Escape($env:RAILWATCH_CLEANUP_PROFILE.Replace('\', '/'))
+$pattern = '(?:^|\s)(?:"--user-data-dir=' + $cleanupEscapedPath + '"|--user-data-dir="' + $cleanupEscapedPath + '"|--user-data-dir=' + $cleanupEscapedPath + ')(?=\s|$)'
+$targets = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Replace('\', '/') -match $pattern } |
+    Select-Object -ExpandProperty ProcessId)
+$targets | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+$targets.Count
+'''
+                result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                        capture_output=True, text=True, timeout=30,
+                                        env={**os.environ, "RAILWATCH_CLEANUP_PROFILE": profile_dir},
+                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                numbers = [int(part) for part in result.stdout.split() if part.strip().isdigit()]
+                return numbers[-1] if numbers else 0
+            result = subprocess.run(["pkill", "-f", "(^|[[:space:]])--user-data-dir="
+                                    + re.escape(profile_dir) + "([[:space:]]|$)"],
+                                    capture_output=True, text=True, timeout=15)
+            return 1 if result.returncode == 0 else 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.log(f"清理残留 Chrome 失败（{type(exc).__name__}），如反复出现请手动关闭旧的受控浏览器窗口。", "WARN")
+            return 0
+
+    @staticmethod
+    def _is_profile_locked_start(exc: Exception) -> bool:
+        text = str(exc)
+        lowered = text.lower()
+        return ("devtoolsactiveport" in lowered
+                or ("session not created" in lowered and "crashed" in lowered))
+
+    def _launch_chrome(self, options):
+        service = Service(executable_path=self.chromedriver_path) if Service and os.path.exists(self.chromedriver_path) else None
+        try:
+            return webdriver.Chrome(options=options, service=service) if service else webdriver.Chrome(options=options)
+        except Exception:
+            # A failed session still leaves its ChromeDriver listening; stop it.
+            if service is not None:
+                try:
+                    service.stop()
+                except Exception:
+                    pass
+            raise
+
     def _ensure_driver(self, test_only: bool = False):
         if self.driver and not test_only:
-            return self.driver
+            if driver_session_alive(self.driver):
+                return self.driver
+            self.log("受控浏览器已关闭，正在重新启动 Chrome。", "WARN")
+            self._release_driver()
         if not SELENIUM_AVAILABLE or webdriver is None:
             raise RuntimeError("Selenium 未安装。")
 
@@ -1040,17 +1223,39 @@ class RailWatchBridge:
         options.add_argument("--start-maximized")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-dev-shm-usage")
-        # Use the same ordinary Chrome profile; do not modify browser fingerprints.
+        # Same ordinary profile; no UA/screen/WebGL/canvas spoofing.
         options.add_experimental_option("prefs", {
             "credentials_enable_service": False,
             "profile.password_manager_enabled": False,
         })
-        service = Service(executable_path=self.chromedriver_path) if Service and os.path.exists(self.chromedriver_path) else None
-        driver = webdriver.Chrome(options=options, service=service) if service else webdriver.Chrome(options=options)
+        try:
+            from anti_detect import apply_chrome_launch_hardening
+            apply_chrome_launch_hardening(options)
+        except Exception as harden_exc:
+            self.log(f"启动硬化未应用（继续使用默认 Chrome 选项）: {harden_exc}", "WARN")
+        try:
+            driver = self._launch_chrome(options)
+        except Exception as exc:
+            if not self._is_profile_locked_start(exc):
+                raise
+            # One recoverable cause: a previous hard exit left Chrome holding the profile.
+            self.log("检测到残留的受控 Chrome 仍占用浏览器配置，已自动清理并重试。", "WARN")
+            self._terminate_profile_chrome()
+            time.sleep(0.5)
+            driver = self._launch_chrome(options)
+        try:
+            from anti_detect import inject_automation_hygiene
+            if inject_automation_hygiene(driver):
+                self.log("已安装浏览器环境稳定脚本（仅清除自动化特征，不伪造指纹）。")
+            else:
+                self.log("浏览器环境稳定脚本未注入，不影响主流程。", "WARN")
+        except Exception as hygiene_exc:
+            self.log(f"浏览器环境稳定脚本跳过: {hygiene_exc}", "WARN")
         # Bound a disconnected driver's transport as well as page/script waits.
         driver.command_executor.client_config.timeout = 35
         if not test_only:
             self.driver = driver
+            self.device_id_protector = RailDeviceIdProtector(driver, self.log) if RailDeviceIdProtector else None
         return driver
 
     def _run_worker(self, name: str, target: Callable[[], None]) -> None:
@@ -1168,6 +1373,8 @@ class RailWatchBridge:
             seat_keyword=config["seat_keyword"],
             interval=config["interval"],
             query_timeout=config["query_timeout"],
+            query_priority=config["query_priority"],
+            request_mode=config["request_mode"],
             auto_submit=config["auto_submit"],
             seat_prefer=config["seat_prefer"],
             passenger_count=config["passenger_count"],

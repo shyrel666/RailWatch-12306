@@ -18,7 +18,7 @@ describe("ShellLayout update control", () => {
     vi.spyOn(railwatchApi, "onUpdateState").mockReturnValue(() => undefined);
   });
 
-  test("renders update control to the left of theme toggle", () => {
+  test("renders update control in the status bar and appearance in the header", () => {
     render(
       <ShellLayout
         activePage="购票监控"
@@ -29,7 +29,6 @@ describe("ShellLayout update control", () => {
         status={{ ...defaultStatus, summary: "就绪" }}
         onPageChange={vi.fn()}
         onExportLog={vi.fn()}
-        onThemeChange={vi.fn()}
         onToggleEventPanel={vi.fn()}
       >
         <div>内容</div>
@@ -37,7 +36,7 @@ describe("ShellLayout update control", () => {
     );
 
     expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "切换到明亮主题" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /外观主题/ })).toBeTruthy();
   });
 
   test("checks for updates from bottom status bar", async () => {
@@ -65,7 +64,6 @@ describe("ShellLayout update control", () => {
         status={{ ...defaultStatus, summary: "就绪" }}
         onPageChange={vi.fn()}
         onExportLog={vi.fn()}
-        onThemeChange={vi.fn()}
         onToggleEventPanel={vi.fn()}
       >
         <div>内容</div>
@@ -98,7 +96,6 @@ describe("ShellLayout update control", () => {
         status={{ ...defaultStatus, summary: "就绪" }}
         onPageChange={vi.fn()}
         onExportLog={vi.fn()}
-        onThemeChange={vi.fn()}
         onToggleEventPanel={vi.fn()}
       >
         <div>内容</div>

@@ -32,7 +32,7 @@ class SubmitFlow:
     self.cfg = cfg
     self.log = log_callback or (lambda _message: None)
     self.handle_popups = popup_handler or (lambda: False)
-    self.select_seat_preference = seat_preference_handler or (lambda _preference: None)
+    self.select_seat_preference = seat_preference_handler
 
   @staticmethod
   def _parse_passenger_selection_result(result, target_passengers: List[str]) -> Tuple[int, List[str]]:
@@ -67,8 +67,9 @@ class SubmitFlow:
     from railwatch_order_page import OrderPage
     from railwatch_orders import OrderIntent
     intent = intent or OrderIntent.from_config(self.cfg, self.cfg.get("train_code", ""), seat_type_name, "regular")
-    page = getattr(self, "order_page", None) or OrderPage(self.driver)
-    return page.regular(book_btn, intent)
+    page = getattr(self, "order_page", None) or OrderPage(self.driver, log=self.log)
+    return page.regular(book_btn, intent, seat_preference=self.cfg.get("seat_prefer", "无偏好"),
+                        preference_handler=self.select_seat_preference)
 
   def _select_seat_type(self, seat_type_name: str) -> None:
     self.log(f"💺 尝试选择席别: {seat_type_name}")

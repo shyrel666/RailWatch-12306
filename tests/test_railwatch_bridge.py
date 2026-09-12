@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 
 class RailWatchBridgeContractTests(unittest.TestCase):
-    def test_default_config_preserves_existing_ui_defaults(self):
+    def test_default_config_uses_reliability_strategy_and_preserves_trip_defaults(self):
         from railwatch_bridge import default_config
 
         config = default_config(today=dt.date(2026, 6, 7))
@@ -19,7 +19,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertEqual(config["date"], "2026-06-08")
         self.assertEqual(config["train_code"], "")
         self.assertEqual(config["seat_keyword"], "")
-        self.assertEqual(config["interval"], 5)
+        self.assertEqual(config["interval"], 6)
+        self.assertEqual(config["query_priority"], "reliability")
+        self.assertEqual(config["request_mode"], "conservative")
         self.assertEqual(config["passenger_count"], 1)
         self.assertEqual(config["seat_prefer"], "无偏好")
         self.assertEqual(config["prepare_time"], 2)
@@ -784,34 +786,370 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             self.assertEqual(captured["target_dir"], temp_dir)
             self.assertEqual(os.path.dirname(result["chromedriver_path"]), temp_dir)
 
-    def test_browser_uses_persistent_profile_and_bounded_transport_without_fingerprint_injection(self):
+    def test_browser_uses_persistent_profile_bounded_transport_and_hygiene_only(self):
         from railwatch_bridge import RailWatchBridge
         driver = Mock()
         bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
-        options = Mock(arguments=[])
+        options = Mock(arguments=[], experimental_options={})
         options.add_argument.side_effect = options.arguments.append
+
+        def add_exp(key, value):
+            options.experimental_options[key] = value
+
+        options.add_experimental_option.side_effect = add_exp
         chrome = Mock(return_value=driver)
         with patch.object(bridge, "_ensure_matching_chromedriver"), patch("railwatch_bridge.SELENIUM_AVAILABLE", True), patch("railwatch_bridge.webdriver", Mock(Chrome=chrome, ChromeOptions=Mock(return_value=options))):
             self.assertIs(bridge._ensure_driver(), driver)
         self.assertTrue(any(value.startswith("--user-data-dir=") for value in chrome.call_args.kwargs["options"].arguments))
         self.assertEqual(driver.command_executor.client_config.timeout, 35)
-        driver.execute_cdp_cmd.assert_not_called()
+        # Launch hygiene only: no full fingerprint overwrite via execute_script.
         driver.execute_script.assert_not_called()
+        self.assertTrue(driver.execute_cdp_cmd.called)
+        command, payload = driver.execute_cdp_cmd.call_args[0]
+        self.assertEqual(command, "Page.addScriptToEvaluateOnNewDocument")
+        source = payload["source"]
+        self.assertIn("webdriver", source)
+        self.assertIn("cdc_", source)
+        self.assertNotIn("toDataURL", source)
+        self.assertNotIn("WebGLRenderingContext", source)
+        self.assertNotIn("devicePixelRatio", source)
+        self.assertIn("--disable-blink-features=AutomationControlled", options.arguments)
+        self.assertIn("enable-automation", options.experimental_options.get("excludeSwitches", []))
 
     def test_runtime_process_outputs_utf8_json(self):
-        completed = subprocess.run(
-            [sys.executable, "railwatch_runtime.py"],
-            input=b'{"id":"1","command":"getRuntimeInfo","payload":{}}\n',
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            check=True,
-        )
+        # An actual pending order in the user's data directory is valid state;
+        # this encoding test must use its own empty profile.
+        with tempfile.TemporaryDirectory() as data_home:
+            completed = subprocess.run(
+                [sys.executable, "railwatch_runtime.py"],
+                input=b'{"id":"1","command":"getRuntimeInfo","payload":{}}\n',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=True,
+                env={**os.environ, "LOCALAPPDATA": data_home, "XDG_DATA_HOME": data_home, "HOME": data_home},
+            )
 
         response = json.loads(completed.stdout.decode("utf-8"))
 
         self.assertTrue(response["ok"])
         self.assertEqual(response["result"]["state"]["status_message"], "就绪")
+
+
+class ClosedBrowserDriver:
+    """A cached WebDriver handle whose Chrome window was closed outside the app.
+
+    ChromeDriver answers every command on such a handle with the same
+    InvalidSessionIdException a real driver raises once its browser is gone.
+    """
+
+    class InvalidSessionIdException(Exception):
+        pass
+
+    def __init__(self):
+        self.quit_calls = 0
+        self.service = Mock()
+
+    @property
+    def window_handles(self):
+        raise self.InvalidSessionIdException("Message: invalid session id")
+
+    def get(self, url):
+        raise self.InvalidSessionIdException("Message: invalid session id")
+
+    def quit(self):
+        self.quit_calls += 1
+        raise self.InvalidSessionIdException("Message: invalid session id")
+
+
+class StaleBrowserSessionTests(unittest.TestCase):
+    """Closing the controlled Chrome window must not wedge the cached driver handle."""
+
+    def _bridge(self):
+        from railwatch_bridge import RailWatchBridge
+
+        return RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+
+    def test_session_probe_only_treats_lost_sessions_as_dead(self):
+        from railwatch_bridge import driver_session_alive, is_session_lost
+
+        class TimeoutException(Exception):
+            pass
+
+        class PartialDriver:
+            """A test double without window_handles must keep its old meaning."""
+
+        self.assertTrue(is_session_lost(ClosedBrowserDriver.InvalidSessionIdException("invalid session id")))
+        self.assertTrue(is_session_lost(Exception("Message: invalid session id; For documentation on this error, please visit")))
+        self.assertTrue(is_session_lost(Exception("Message: disconnected: not connected to DevTools")))
+        self.assertFalse(is_session_lost(TimeoutException("timeout: Timed out receiving message from renderer")))
+
+        self.assertFalse(driver_session_alive(None))
+        self.assertFalse(driver_session_alive(ClosedBrowserDriver()))
+        self.assertTrue(driver_session_alive(PartialDriver()))
+
+    def test_ensure_driver_restarts_chrome_when_the_cached_browser_is_gone(self):
+        bridge = self._bridge()
+        closed = ClosedBrowserDriver()
+        bridge.driver = closed
+        replacement = Mock()
+        webdriver_module = Mock()
+        webdriver_module.Chrome.return_value = replacement
+
+        with patch.object(bridge, "_ensure_matching_chromedriver"), \
+                patch("railwatch_bridge.SELENIUM_AVAILABLE", True), \
+                patch("railwatch_bridge.webdriver", webdriver_module), \
+                patch("railwatch_bridge.Service", None):
+            driver = bridge._ensure_driver()
+
+        self.assertIs(driver, replacement)
+        self.assertIs(bridge.driver, replacement)
+        self.assertEqual(closed.quit_calls, 1)
+        self.assertTrue(closed.service.stop.called)
+
+    def test_open_login_reopens_the_browser_after_the_window_was_closed(self):
+        bridge = self._bridge()
+        closed = ClosedBrowserDriver()
+
+        class FreshDriver:
+            def __init__(self):
+                self.opened = []
+
+            def get(self, url):
+                self.opened.append(url)
+
+        fresh = FreshDriver()
+        pending = [closed, fresh]
+
+        def ensure(test_only=False):
+            driver = pending.pop(0)
+            bridge.driver = driver
+            return driver
+
+        bridge._ensure_driver = ensure
+        state = bridge.open_login()
+
+        self.assertEqual(pending, [])
+        self.assertIn("login.html", fresh.opened[-1])
+        self.assertIn("登录页面已打开", state["status_message"])
+        self.assertEqual(closed.quit_calls, 1)
+        self.assertTrue(closed.service.stop.called)
+
+    def test_open_login_surfaces_non_session_failures_without_relaunching(self):
+        bridge = self._bridge()
+        launches = []
+
+        class TimeoutDriver:
+            def get(self, url):
+                raise RuntimeError("timeout: Timed out receiving message from renderer: 30.000")
+
+        def ensure(test_only=False):
+            launches.append(1)
+            bridge.driver = TimeoutDriver()
+            return bridge.driver
+
+        bridge._ensure_driver = ensure
+        state = bridge.open_login()
+
+        self.assertEqual(len(launches), 1)
+        self.assertIn("打开登录页失败", state["error_message"])
+        self.assertIsNotNone(bridge.driver)
+
+    def test_close_browser_releases_a_handle_whose_session_is_already_gone(self):
+        bridge = self._bridge()
+        closed = ClosedBrowserDriver()
+        bridge.driver = closed
+
+        result = bridge.close_browser(confirmed=True)
+
+        self.assertEqual(result, {"closed": True})
+        self.assertIsNone(bridge.driver)
+        self.assertEqual(closed.quit_calls, 1)
+        self.assertTrue(closed.service.stop.called)
+
+    def test_close_browser_still_releases_the_handle_when_quit_fails(self):
+        bridge = self._bridge()
+
+        class StubbornDriver:
+            service = None
+
+            def quit(self):
+                raise RuntimeError("user data directory is busy")
+
+        bridge.driver = StubbornDriver()
+
+        with self.assertRaisesRegex(RuntimeError, "busy"):
+            bridge.close_browser(confirmed=True)
+        self.assertIsNone(bridge.driver)
+
+    def test_check_environment_recovers_after_the_browser_was_closed(self):
+        bridge = self._bridge()
+        closed = ClosedBrowserDriver()
+
+        class ProbeDriver:
+            def __init__(self):
+                self.quit_called = False
+
+            def quit(self):
+                self.quit_called = True
+
+        probe = ProbeDriver()
+        bridge.driver = closed
+        bridge._ensure_driver = lambda test_only=False: probe
+
+        with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", False), \
+                patch("railwatch_bridge.SELENIUM_AVAILABLE", True):
+            state = bridge.check_environment()
+
+        self.assertTrue(state["environment_ready"])
+        self.assertEqual(state["error_message"], "")
+        self.assertEqual(closed.quit_calls, 1)
+        self.assertTrue(closed.service.stop.called)
+        self.assertTrue(probe.quit_called)
+        self.assertIsNone(bridge.driver)
+
+    def test_environment_error_does_not_blame_the_chromedriver_version_for_a_lost_session(self):
+        bridge = self._bridge()
+
+        def explode(test_only=False):
+            raise RuntimeError("Message: invalid session id")
+
+        bridge._ensure_driver = explode
+
+        with patch.object(bridge, "_ensure_matching_chromedriver"), \
+                patch("railwatch_bridge.CD_MANAGER_AVAILABLE", True), \
+                patch("railwatch_bridge.SELENIUM_AVAILABLE", True):
+            state = bridge.check_environment()
+
+        self.assertIn("invalid session id", state["error_message"])
+        self.assertNotIn("版本与 Chrome 不匹配", state["error_message"])
+
+    def test_environment_error_keeps_the_version_hint_for_a_real_version_mismatch(self):
+        bridge = self._bridge()
+
+        def explode(test_only=False):
+            raise RuntimeError("session not created: This version of ChromeDriver only supports Chrome version 152")
+
+        bridge._ensure_driver = explode
+
+        with patch.object(bridge, "_ensure_matching_chromedriver"), \
+                patch("railwatch_bridge.CD_MANAGER_AVAILABLE", True), \
+                patch("railwatch_bridge.SELENIUM_AVAILABLE", True):
+            state = bridge.check_environment()
+
+        self.assertIn("版本与 Chrome 不匹配", state["error_message"])
+
+
+class DriverLaunchRecoveryTests(unittest.TestCase):
+    def make_bridge(self):
+        from railwatch_bridge import RailWatchBridge
+        return RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+
+    def test_profile_locked_start_signature(self):
+        from railwatch_bridge import RailWatchBridge
+        crashed = Exception("session not created: Chrome failed to start: crashed. "
+                            "(session not created: DevToolsActivePort file doesn't exist)")
+        self.assertTrue(RailWatchBridge._is_profile_locked_start(crashed))
+        self.assertFalse(RailWatchBridge._is_profile_locked_start(Exception("element not interactable")))
+
+    def test_stale_profile_chrome_is_cleaned_and_launch_retried(self):
+        bridge = self.make_bridge()
+        bridge._ensure_matching_chromedriver = lambda: None
+        attempts = []
+
+        class FakeClientConfig:
+            timeout = 0
+
+        class FakeExecutor:
+            client_config = FakeClientConfig()
+
+        class FakeDriver:
+            command_executor = FakeExecutor()
+
+        def flaky_launch(options):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise Exception("session not created: Chrome failed to start: crashed. "
+                                "(session not created: DevToolsActivePort file doesn't exist)")
+            return FakeDriver()
+
+        swept = []
+        bridge._launch_chrome = flaky_launch
+        bridge._terminate_profile_chrome = lambda: swept.append(1) and 1
+        driver = bridge._ensure_driver()
+        self.assertIsInstance(driver, FakeDriver)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(swept), 1)
+        self.assertIs(bridge.driver, driver)
+        self.assertEqual(driver.command_executor.client_config.timeout, 35)
+
+    def test_unrelated_launch_failure_is_reraised_without_sweep(self):
+        bridge = self.make_bridge()
+        bridge._ensure_matching_chromedriver = lambda: None
+
+        def broken(options):
+            raise ValueError("bad proxy")
+
+        bridge._launch_chrome = broken
+        bridge._terminate_profile_chrome = lambda: self.fail("不匹配的启动失败不应清理浏览器")
+        with self.assertRaises(ValueError):
+            bridge._ensure_driver()
+
+    def test_terminate_profile_chrome_targets_only_app_profile(self):
+        bridge = self.make_bridge()
+        issued = []
+
+        class Result:
+            returncode = 0
+            stdout = "2\n"
+
+        def fake_run(command, **kwargs):
+            issued.append((command, kwargs))
+            return Result()
+
+        with patch("railwatch_bridge.subprocess.run", fake_run):
+            killed = bridge._terminate_profile_chrome()
+        self.assertEqual(killed, 2)
+        command, options = issued[-1]
+        self.assertEqual(options["env"]["RAILWATCH_CLEANUP_PROFILE"],
+                         os.path.join(bridge.data_dir, "chrome_profile_12306"))
+        self.assertNotIn(bridge.data_dir, command[-1])
+
+    @unittest.skipUnless(os.name == "nt", "Windows command-line matching")
+    def test_cleanup_matches_exact_profile_argument_without_evaluating_path(self):
+        import subprocess
+        bridge = self.make_bridge()
+        calls = []
+        with patch("railwatch_bridge.subprocess.run", side_effect=lambda command, **kwargs:
+                   calls.append((command, kwargs)) or Mock(stdout="0")):
+            bridge._terminate_profile_chrome()
+        command, options = calls[0]
+        for folder in (r"C:\Users\Test User\railwatch", r"C:\Users\O'Brien [work] $()\railwatch"):
+            profile = folder + r"\chrome_profile_12306"
+            lines = [
+                f'chrome.exe "--user-data-dir={profile}" --test',
+                f'chrome.exe --user-data-dir="{profile}" --test',
+                f'chrome.exe "--user-data-dir={profile}-backup" --test',
+                f'chrome.exe "--user-data-dir={profile}2" --test',
+                f'chrome.exe "--log-file={profile}"',
+                'chrome.exe --user-data-dir=C:\\unrelated',
+                f'chrome.exe "--user-data-dir={profile.replace(chr(92), chr(47))}"',
+            ]
+            fake_processes = json.dumps([{"ProcessId": i + 1, "CommandLine": line}
+                                         for i, line in enumerate(lines)])
+            # Replace enumeration and termination with in-process test doubles;
+            # exercise the actual matcher without terminating any processes.
+            prelude = '''
+function Get-CimInstance { param($ClassName, $Filter) $items = $env:RAILWATCH_TEST_PROCESSES | ConvertFrom-Json; foreach ($item in $items) { $item } }
+function Stop-Process { param($Id, [switch]$Force, $ErrorAction) Write-Output "matched:$Id" }
+'''
+            result = subprocess.run(command[:-1] + [prelude + command[-1]],
+                                    capture_output=True, text=True, timeout=15,
+                                    env={**options["env"], "RAILWATCH_CLEANUP_PROFILE": profile,
+                                         "RAILWATCH_TEST_PROCESSES": fake_processes},
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.split(), ["matched:1", "matched:2", "matched:7", "3"])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from railwatch_dates import validate_travel_date, beijing_now
+from railwatch_policies import normalize_strategy, priority_defaults
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -20,6 +21,8 @@ TRIP_FIELD_KEYS = (
     "seat_keyword",
     "interval",
     "query_timeout",
+    "query_priority",
+    "request_mode",
     "auto_submit",
     "seat_prefer",
     "passenger_count",
@@ -77,6 +80,7 @@ def default_config(
         "burst_window_seconds": DEFAULT_BURST_WINDOW_SECONDS,
         "prewarm_lead_seconds": DEFAULT_PREWARM_LEAD_SECONDS,
     }
+    trip.update(priority_defaults())
     return {
         "config_version": CONFIG_VERSION,
         "automation_route": AUTOMATION_ROUTE,
@@ -160,6 +164,7 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     trip["keep_alive"] = _to_bool(trip.get("keep_alive"))
     trip["smart_rate"] = _to_bool(trip.get("smart_rate"))
     trip["timer_enabled"] = _to_bool(trip.get("timer_enabled"))
+    normalize_strategy(trip, raw_trip)
     return trip
 
 

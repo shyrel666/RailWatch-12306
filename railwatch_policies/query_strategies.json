@@ -1,0 +1,13 @@
+{
+  "default_priority": "reliability",
+  "priorities": {
+    "speed": { "label": "速度优先", "request_mode": "fast" },
+    "reliability": { "label": "成功率优先", "request_mode": "conservative" }
+  },
+  "modes": {
+    "fast": { "label": "快速模式", "interval": 3, "query_timeout": 20, "min_interval": 3, "max_interval": 30 },
+    "balanced": { "label": "均衡模式", "interval": 5, "query_timeout": 30, "min_interval": 4, "max_interval": 45 },
+    "conservative": { "label": "保守模式", "interval": 6, "query_timeout": 40, "min_interval": 5, "max_interval": 60 },
+    "legacy": { "label": "原有配置", "interval": 5, "query_timeout": 40, "min_interval": 3, "max_interval": 30 }
+  }
+}

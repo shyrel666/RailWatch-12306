@@ -21,7 +21,7 @@ import json
 import urllib.request
 import random
 from typing import Optional, List, Dict, Callable, Tuple, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from railwatch_dates import expand_travel_dates
@@ -116,7 +116,7 @@ class SeatType(Enum):
         seat_name = (seat_name or "").strip()
         for member in cls:
             cn_name, prefix = member.value
-            if cn_name == seat_name or cn_name in seat_name or seat_name in cn_name:
+            if cn_name == seat_name:
                 return prefix
         return None
 
@@ -149,6 +149,8 @@ class QueryConfig:
     seat_keyword: str = ""    # 兼容旧版单席别
     interval: float = 3.0
     query_timeout: int = 40
+    query_priority: str = "reliability"
+    request_mode: str = "legacy"
     auto_submit: bool = False  # 是否自动提交订单
     seat_prefer: str = "无偏好"  # 座位偏好：无偏好/靠窗优先/靠过道优先
     passenger_count: int = 1    # 未指定姓名时默认勾选的乘车人数
@@ -184,6 +186,8 @@ class QueryConfig:
             "seat_keyword": self.seat_keyword,
             "interval": self.interval,
             "query_timeout": self.query_timeout,
+            "query_priority": self.query_priority,
+            "request_mode": self.request_mode,
             "auto_submit": self.auto_submit,
             "seat_prefer": self.seat_prefer,
             "passenger_count": self.passenger_count,
@@ -214,6 +218,8 @@ class QueryConfig:
             seat_keyword=data.get("seat_keyword", ""),
             interval=data.get("interval", 3.0),
             query_timeout=data.get("query_timeout", 40),
+            query_priority=data.get("query_priority", "reliability"),
+            request_mode=data.get("request_mode", "legacy"),
             auto_submit=data.get("auto_submit", False),
             seat_prefer=data.get("seat_prefer", "无偏好"),
             passenger_count=data.get("passenger_count", 1),
@@ -355,24 +361,8 @@ class BaseHandler:
         return "候补" in value.strip()
 
     def _parse_rows(self) -> List[dict]:
-        """解析当前查询结果表格行 -> [{"train","raw"}]"""
-        if hasattr(self, "row_parser") and self.row_parser is not None:
-            return self.row_parser.parse_rows()
-        try:
-            table = self.driver.find_element(By.ID, QUERY_TABLE_ID)
-            rows = table.find_elements(By.CSS_SELECTOR, QUERY_ROW_SELECTOR)
-            results = []
-            for row in rows:
-                text = row.text.strip()
-                if not text:
-                    continue
-                train_code = self.extract_train_code(text)
-                if not train_code:
-                    continue
-                results.append({"train": train_code, "raw": text})
-            return results
-        except (NoSuchElementException, StaleElementReferenceException):
-            return []
+        parser = getattr(self, "row_parser", None) or RowParser(self.driver, SeatType.get_prefix)
+        return parser.parse_rows()
 
 
 # ==================== 站点编码解析器 ====================
@@ -601,10 +591,13 @@ class TicketMonitor(BaseHandler):
         self.auto_alternate = cfg.get("auto_alternate", False)
         self.rate_limiter = None
         if cfg.get("smart_rate", False) and AdaptiveRateLimiter:
+            from railwatch_policies import rate_bounds
+            min_interval, max_interval = rate_bounds(cfg)
+            base_interval = max(min_interval, _read_float(cfg.get("interval", 3), 3.0))
             self.rate_limiter = AdaptiveRateLimiter(
-                base_interval=max(3.0, _read_float(cfg.get("interval", 3), 3.0)),
-                min_interval=3.0,
-                max_interval=30.0,
+                base_interval=base_interval,
+                min_interval=min_interval,
+                max_interval=max(max_interval, base_interval),
                 log_callback=self.log,
             )
         travel_date = str(cfg.get("date", "")).strip()
@@ -615,13 +608,13 @@ class TicketMonitor(BaseHandler):
         self.params_filled = False
         self._form_snapshot = None
         self.row_parser = RowParser(self.driver, SeatType.get_prefix)
+        self._row_snapshot = None
         self.verification = VerificationDetector(self.driver, log_callback=self.log)
         self.submit_flow = SubmitFlow(
             self.driver,
             cfg,
             log_callback=self.log,
             popup_handler=self._handle_popups,
-            seat_preference_handler=self._select_seat_preference,
         )
         self.alternate_flow = AlternateFlow(
             self.driver,
@@ -631,7 +624,7 @@ class TicketMonitor(BaseHandler):
             human_action_callback=self.human_action,
             find_alternate_button=self._find_alternate_button,
         )
-        self.order_page = OrderPage(driver, self.should_stop, self._poll_wait, self._mark)
+        self.order_page = OrderPage(driver, self.should_stop, self._poll_wait, self._mark, log=self.log)
         self.submit_flow.order_page = self.order_page
         self.alternate_flow.order_page = self.order_page
 
@@ -645,6 +638,9 @@ class TicketMonitor(BaseHandler):
             self._signal_human_action(train, "订单持久化不可用，已停止自动提交")
             return True
         intent = OrderIntent.from_config(self.cfg, train, seat, "alternate" if action == "alternate" else "regular")
+        route = self.row_parser.selected_route(row)
+        if route:
+            intent = replace(intent, from_station=route[0], to_station=route[1])
         self._intent_id = intent.intent_id
         try:
             self.order_journal.begin(self.run_id, intent, self.cfg)
@@ -781,7 +777,10 @@ class TicketMonitor(BaseHandler):
         """主监控循环（风控优化增强版）"""
         base_interval = max(1.0, _read_float(self.cfg.get("interval", 3), 3.0))
         
-        self.log(f"⏱ 基础刷新间隔：{base_interval}s（实际将随机浮动 ±30%）")
+        if self.rate_limiter:
+            self.log(f"⏱ 智能限速：基础 {self.rate_limiter.base_interval}s，±20% 浮动，范围 {self.rate_limiter.min_interval}–{self.rate_limiter.max_interval}s")
+        else:
+            self.log(f"⏱ 基础刷新间隔：{base_interval}s（实际将随机浮动 ±30%）")
         self.log(f"🚄 目标车次：{', '.join(self.target_trains) if self.target_trains else '不限定'}")
         self.log(f"💺 目标席别：{', '.join(self.target_seats) if self.target_seats else '不限定'}")
         self.log(f"📝 自动提交：{'开启' if self.auto_submit else '关闭'}")
@@ -814,10 +813,23 @@ class TicketMonitor(BaseHandler):
                 self.log(f"⚠️ 监控异常：{e}")
                 if self.rate_limiter:
                     self.rate_limiter.on_error(str(e))
-                self._sleep(get_random_interval(base_interval))
+                    self._flush_rate_limit_alert()
+                self._sleep(self.rate_limiter.get_interval() if self.rate_limiter else get_random_interval(base_interval))
 
         self.log("⏹ 监控结束/停止")
-    
+
+    def _flush_rate_limit_alert(self) -> None:
+        """Surface a one-shot human notice when the limiter first sees risk signals."""
+        if not self.rate_limiter:
+            return
+        message = self.rate_limiter.consume_risk_alert()
+        if not message:
+            return
+        self._signal_human_action(
+            "",
+            f"查询节奏触发限频信号：{message}。已自动放慢轮询，请稍后再启动或在官方页面完成核验。",
+        )
+
     def _is_burst_mode(self, loop_count: int) -> bool:
         target = self.cfg.get("_target_timestamp")
         if target is not None:
@@ -837,6 +849,7 @@ class TicketMonitor(BaseHandler):
 
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:
         """单次监控循环，返回是否命中（风控优化版）"""
+        self._row_snapshot = None
         if self.should_stop() or not self.session_check():
             return True
         self.tick(status="querying", next_query_at=None)
@@ -866,6 +879,26 @@ class TicketMonitor(BaseHandler):
             status = result["status"]
             if status == "cancelled":
                 return True
+            if status in ("rate_limited", "server_backoff"):
+                reason = result.get("reason", f"查询收到 HTTP {result.get('http_status')}")
+                if self.rate_limiter:
+                    if status == "rate_limited":
+                        self.rate_limiter.on_error("操作过快：" + reason)
+                        self.rate_limiter.consume_risk_alert()  # Handled by this branch.
+                    else:
+                        self.rate_limiter.on_timeout()
+                retry_after = result.get("retry_after_seconds")
+                if retry_after is None:
+                    self._signal_human_action("", reason + "，未提供有效等待时间，已暂停自动查询，请检查官方页面后再启动。")
+                    return True
+                delay = max(interval, retry_after,
+                            self.rate_limiter.get_interval() if self.rate_limiter else interval)
+                self.log(f"{reason}，服务端要求等待 {retry_after:.1f}s；将在至少 {delay:.1f}s 后重试。")
+                # Server cooldown is independent of smart-rate settings and its
+                # local upper bound. Do not reload, query or submit while waiting.
+                self._sleep(delay)
+                self._needs_navigation = True
+                return False
             if status in ("human_action", "unknown"):
                 self._signal_human_action("", result.get("reason", "请检查浏览器页面"))
                 return True
@@ -873,7 +906,7 @@ class TicketMonitor(BaseHandler):
                 if not self._dismiss_query_blockers():
                     self._signal_human_action("", "未起售提示无法关闭，请检查浏览器")
                     return True
-                self._sleep(min(interval, BURST_RETRY_SLEEP_SECONDS) if is_burst_mode else interval)
+                self._sleep(min(interval, BURST_RETRY_SLEEP_SECONDS) if is_burst_mode and not self.rate_limiter else interval)
                 return False
             if status not in ("ok", "empty"):
                 self.log(f"本轮查询未完成：{result.get('reason', status)}")
@@ -884,40 +917,43 @@ class TicketMonitor(BaseHandler):
                 return False
             if not self.query_executor.current():
                 self._needs_navigation = True
+                self._sleep(interval)
                 return False
         else:
             # Compatibility for standalone core callers without a form adapter.
             if not self.click_query_button() or not self.wait_for_rows(timeout=int(self.cfg.get("query_timeout", 40)), stop_check=self.should_stop):
                 if self.rate_limiter:
                     self.rate_limiter.on_timeout()
-                self._sleep(interval)
+                self._sleep(max(interval, self.rate_limiter.get_interval() if self.rate_limiter else interval))
                 return False
         if self.rate_limiter:
             self.rate_limiter.on_success()
 
+        self._row_snapshot = [] if self.last_query.get("status") == "empty" else self.row_parser.snapshot_rows(self.target_seats)
         if self.progress:
             try:
-                self.progress({**self.last_query, "loop": loop_count, "date": self.current_loop_date or str(self.cfg.get("date", "")), "rows": [] if self.last_query.get("status") == "empty" else self._parse_rows()})
+                self.progress({**self.last_query, "loop": loop_count, "date": self.current_loop_date or str(self.cfg.get("date", "")), "rows": self.row_parser.display_rows(self._row_snapshot)})
             except Exception:
                 pass
 
         # 6) 找到席别列索引（兆底用）
         seat_col_indices = {}
-        for seat in self.target_seats:
-            idx = self._get_seat_col_index(seat)
-            if idx is not None:
-                seat_col_indices[seat] = idx
 
         # 7) 判断是否命中
         if self.query_executor and not self.query_executor.current():
             self._needs_navigation = True
+            self._sleep(interval)
             return False
         hit = None if self.last_query.get("status") == "empty" else self._find_hit_row(seat_col_indices)
         if hit:
             train_code, seat_name, seat_value, row_el, action_btn, action_type = hit
             self.log(f"🎯 命中：{train_code} | {seat_name}={seat_value}")
 
-            if self.should_stop() or (self.query_executor and not self.query_executor.current()):
+            if self.should_stop():
+                return True
+            if self.query_executor and not self.query_executor.current():
+                self._needs_navigation = True
+                self._sleep(interval)
                 return False
             if action_type == "alternate" or (self.auto_submit and action_btn):
                 return self._execute_order(hit)
@@ -959,31 +995,36 @@ class TicketMonitor(BaseHandler):
     def _find_hit_row(self, seat_col_indices):
         """Inspect every target for cash inventory before considering one waitlist seat."""
         try:
-            rows = self.driver.find_element(By.ID, "queryLeftTable").find_elements(By.CSS_SELECTOR, "tr[id^='ticket_']")
+            rows = self._row_snapshot if self._row_snapshot is not None else self.row_parser.snapshot_rows(self.target_seats)
             ranked = []
-            for row in rows:
-                try:
-                    train = self.extract_train_code(row.text.strip())
-                    if not train or (self.target_trains and train not in self.target_trains):
-                        continue
-                    ranked.append((self.target_trains.index(train) if self.target_trains else len(ranked), train, row))
-                except StaleElementReferenceException:
+            priorities = {train: index for index, train in reversed(list(enumerate(self.target_trains)))}
+            count = len(parse_passenger_names(self.cfg.get("passengers", ""))) or int(self.cfg.get("passenger_count", 1))
+            for snapshot in rows:
+                train = snapshot["train"]
+                if self.target_trains and train not in priorities:
                     continue
+                ranked.append((priorities.get(train, len(ranked)), train, snapshot))
             ranked.sort(key=lambda item: item[0])
             if not self._prefer_alternate:
-                for _, train, row in ranked:
+                for _, train, snapshot in ranked:
+                    row = snapshot["element"]
+                    candidates = [seat for seat in self.target_seats if self.is_seat_available(snapshot["seats"].get(seat))
+                                  and (not str(snapshot["seats"][seat]).isdigit() or int(snapshot["seats"][seat]) >= count)]
+                    if self.target_seats and not candidates:
+                        continue
                     book = self._find_book_button(row)
                     if book is None:
                         continue
-                    for seat in self.target_seats:
-                        value = self._get_seat_value(row, seat, seat_col_indices.get(seat))
-                        count = len(parse_passenger_names(self.cfg.get("passengers", ""))) or int(self.cfg.get("passenger_count", 1))
+                    for seat in candidates:
+                        # Re-read only the selected candidate before taking action.
+                        value = self._get_seat_value(row, seat, snapshot.get("seat_indices", {}).get(seat, seat_col_indices.get(seat)))
                         if self.is_seat_available(value) and (not str(value).isdigit() or int(value) >= count):
                             return train, seat, value, row, book, "book"
                     if not self.target_seats and not self.auto_submit:
                         return train, "未指定席别", "有票", row, book, "book"
             if self.auto_alternate:
-                for _, train, row in ranked:
+                for _, train, snapshot in ranked:
+                    row = snapshot["element"]
                     for seat in self.target_seats:
                         button = self._find_alternate_button(row, seat)
                         if button is not None:
@@ -1173,114 +1214,9 @@ class TicketMonitor(BaseHandler):
         return popup_handled
 
     def _select_seat_preference(self, preference: str):
-        """
-        选择座位偏好（靠窗/靠过道）- 优化版
-        
-        12306 座位选择说明：
-        - 高铁/动车二等座：A/F 靠窗，C/D 靠过道
-        - 高铁/动车一等座：A/F 靠窗，C/D 靠过道
-        
-        优化策略：使用单一 JS 脚本快速检测和选择，减少 Selenium 调用开销
-        """
-        try:
-            self.log(f"🪟 尝试选择座位偏好: {preference}")
-            
-            # 使用统一的 JavaScript 快速检测和选择座位偏好
-            # 优化：一次性完成检测和选择，避免多次 DOM 操作
-            js_select_seat = r"""
-            (function(preference) {
-                // 辅助函数：检查是否是国籍选择框
-                function isNationalitySelect(s) {
-                    if (!s || !s.options || s.options.length === 0) return true;
-                    var id = (s.id || '').toLowerCase();
-                    var name = (s.name || '').toLowerCase();
-                    if (id.includes('nationality') || id.includes('country')) return true;
-                    if (name.includes('nationality') || name.includes('country')) return true;
-                    var firstText = (s.options[0].text || '').toLowerCase();
-                    if (firstText.includes('国籍') || firstText.includes('afghanistan') || 
-                        firstText.includes('请选择国籍') || firstText.includes('country')) return true;
-                    return false;
-                }
-                
-                // 辅助函数：检查是否是席别选择框（避免误选）
-                function isSeatTypeSelect(s) {
-                    var id = (s.id || '').toLowerCase();
-                    if (id.includes('seattype_') && id.match(/seattype_\d+/)) return true;
-                    return false;
-                }
-                
-                // 检查是否是座位偏好选择框
-                function isSeatPreferenceSelect(s) {
-                    if (!s.options || s.options.length < 2) return false;
-                    var hasA = false, hasC = false, hasWindow = false;
-                    for (var i = 0; i < s.options.length; i++) {
-                        var t = s.options[i].text;
-                        if (t === 'A' || t === 'F') hasA = true;
-                        if (t === 'C' || t === 'D') hasC = true;
-                        if (t.includes('窗') || t.includes('过道')) hasWindow = true;
-                    }
-                    return (hasA && hasC) || hasWindow;
-                }
-                
-                var isWindow = preference === '靠窗优先';
-                var targetChars = isWindow ? ['A', 'F'] : ['C', 'D'];
-                var targetKeyword = isWindow ? '窗' : '过道';
-                
-                // 查找所有下拉框
-                var selects = document.querySelectorAll('select');
-                var selectedCount = 0;
-                
-                for (var i = 0; i < selects.length; i++) {
-                    var s = selects[i];
-                    
-                    // 跳过隐藏的、国籍选择框
-                    if (s.offsetParent === null) continue;
-                    if (isNationalitySelect(s)) continue;
-                    if (isSeatTypeSelect(s)) continue;  // 跳过席别选择框
-                    if (!isSeatPreferenceSelect(s)) continue;  // 必须是座位偏好选择框
-                    
-                    // 遍历选项
-                    for (var j = 0; j < s.options.length; j++) {
-                        var opt = s.options[j];
-                        var t = opt.text.trim();
-                        
-                        // 匹配目标座位
-                        var matched = false;
-                        if (targetChars.includes(t)) {
-                            matched = true;
-                        } else if (t.includes(targetKeyword)) {
-                            matched = true;
-                        }
-                        
-                        if (matched) {
-                            s.value = opt.value;
-                            s.dispatchEvent(new Event('change', {bubbles: true}));
-                            selectedCount++;
-                            break;
-                        }
-                    }
-                }
-                
-                return selectedCount;
-            })(arguments[0]);
-            """
-            
-            try:
-                selected_count = self.driver.execute_script(js_select_seat, preference)
-                if selected_count and selected_count > 0:
-                    self.log(f"✅ 已为 {selected_count} 位乘车人选择座位偏好: {preference}")
-                    return
-            except Exception:
-                pass
-            
-            # 快速失败：如果 JS 方法失败，直接跳过，不再尝试其他慢速方法
-            # 优化理由：抢票时速度优先，座位偏好不影响购票成功
-            self.log(f"⚠️ 未能自动选择座位偏好，可能当前页面不支持或需要手动选择")
-            self.log(f"💡 提示：您可以在提交订单后手动选择座位")
-            
-        except Exception as e:
-            self.log(f"⚠️ 座位偏好选择异常: {e}")
-    
+        count = len(parse_passenger_names(self.cfg.get("passengers", ""))) or int(self.cfg.get("passenger_count", 1))
+        return self.order_page.apply_seat_preference(preference, count)
+
     def _signal_human_action(self, train_code: str, message: str) -> None:
         """停止自动化，把控制权交还给用户去完成核验。"""
         self.log(f"🙋 需要人工操作：{message}")

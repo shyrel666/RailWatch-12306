@@ -1,12 +1,16 @@
 """
 RailWatch browser environment and risk-control helpers.
 
-Scope:
-1. Use a persistent Chrome profile for official 12306 pages.
-2. Keep browser-visible environment values stable across app restarts.
-3. Add conservative random pacing for low-frequency monitoring.
-4. Track session/device-id consistency and warn when the official page changes it.
-5. Keep automation user-controlled and visible.
+Active on the desktop path (wired into RailWatchBridge._ensure_driver):
+1. Persistent Chrome profile for official 12306 pages.
+2. Launch hygiene: disable casual ChromeDriver automation tells only.
+3. Minimal new-document script that clears navigator.webdriver / cdc_ keys.
+4. Adaptive query pacing and RAIL_DEVICEID consistency observation.
+
+Legacy / not wired into the desktop runtime:
+- AntiDetect.create_driver and full fingerprint injection (canvas/WebGL/UA spoof).
+- BehaviorSimulator human-like click/type/scroll (unused on submit path).
+- undetected-chromedriver is not a project dependency.
 
 This module does not bypass login, captcha, order confirmation, payment, website
 rules, or service rate limits. It does not guarantee ticket availability or
@@ -14,6 +18,7 @@ successful purchase. It is intended to reduce accidental instability in normal
 personal-use monitoring, not to defeat platform protections.
 
 中文范围说明：提供合规低频个人辅助的风险控制能力；不绕过登录、验证码、订单确认、支付或网站规则。
+完整指纹伪装与拟人轨迹未接入桌面主路径，避免无效或有害的环境伪造。
 """
 
 import random
@@ -21,10 +26,133 @@ import time
 import os
 import json
 import hashlib
+import math
+import platform
 from typing import Optional, Callable, Tuple, List, Dict
 from dataclasses import dataclass
 
 from railwatch_config_contract import redact_sensitive_text
+
+
+def windows_user_agent(chrome_major: Optional[str] = None) -> str:
+    """Build a Windows Chrome UA that matches the installed major when known."""
+    major = str(chrome_major or "").strip()
+    if not major.isdigit():
+        major = "133"
+    return (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
+
+def host_screen_size() -> Tuple[int, int]:
+    """Prefer the real primary display metrics; fall back to a common desktop size."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            user32.SetProcessDPIAware()
+            width = int(user32.GetSystemMetrics(0))
+            height = int(user32.GetSystemMetrics(1))
+            if width >= 1024 and height >= 720:
+                return width, height
+    except Exception:
+        pass
+    return 1920, 1080
+
+
+def stable_seed_from_host(salt: str, extra: str = "") -> int:
+    """Deterministic seed from machine identity so restarts keep one fingerprint."""
+    raw = "|".join([
+        salt,
+        platform.node() or "",
+        platform.system() or "",
+        platform.machine() or "",
+        extra,
+    ])
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return 100000 + (int(digest[:12], 16) % 900000)
+
+
+def host_stable_profile(chrome_major: Optional[str] = None, extra: str = "") -> "DeviceProfile":
+    """A single consistent profile derived from this machine — not a random draw.
+
+    Random UA/resolution each launch is a stronger automation signal than a
+    stable, ordinary Windows Chrome environment.
+    """
+    width, height = host_screen_size()
+    major = str(chrome_major or "").strip() or None
+    return DeviceProfile(
+        user_agent=windows_user_agent(major),
+        screen_width=width,
+        screen_height=height,
+        color_depth=32,
+        pixel_ratio=1.0,
+        timezone="Asia/Shanghai",
+        timezone_offset=480,
+        languages=["zh-CN", "zh", "en-US", "en"],
+        platform="Win32",
+        hardware_concurrency=8,
+        device_memory=8,
+        canvas_noise=0.0,
+        canvas_noise_seed=stable_seed_from_host("canvas", extra),
+        audio_noise_seed=stable_seed_from_host("audio", extra),
+        webgl_vendor="Google Inc. (Google)",
+        webgl_renderer="ANGLE (Google, Vulkan 1.3.0 (NVIDIA GeForce GTX 1650 (0x00001F99)), NVIDIA)",
+    )
+
+
+def apply_chrome_launch_hardening(options) -> None:
+    """Low-risk Chrome launch flags used by the desktop path.
+
+    Only removes casual automation switches. Does not spoof UA, screen, WebGL,
+    or canvas — those belong to unused legacy fingerprint code and can create
+    inconsistent signals or break official pages.
+    """
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-infobars")
+    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+
+def build_automation_hygiene_script() -> str:
+    """Minimal new-document script: hide chromedriver tells only.
+
+    Intentionally does NOT overwrite screen, WebGL, canvas, timezone or UA.
+    """
+    return r"""
+(() => {
+  try {
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+  } catch (_) {}
+  try {
+    if (navigator.webdriver) {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+    }
+  } catch (_) {}
+  try {
+    for (const key of Object.getOwnPropertyNames(window)) {
+      if (/^cdc_/i.test(key)) {
+        try { delete window[key]; } catch (_) {}
+      }
+    }
+  } catch (_) {}
+})();
+"""
+
+
+def inject_automation_hygiene(driver) -> bool:
+    """Install the hygiene script for subsequent navigations. Best effort."""
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": build_automation_hygiene_script(),
+        })
+        return True
+    except Exception:
+        return False
 
 # ==================== User-Agent 池 ====================
 # 基于真实浏览器统计数据的 UA 池 (2025/2026 最新版本)
@@ -93,35 +221,13 @@ class DeviceProfile:
     webgl_renderer: str
     
     @classmethod
-    def generate_random(cls) -> "DeviceProfile":
-        """生成随机设备配置"""
-        resolution = random.choice(SCREEN_RESOLUTIONS)
-        tz = random.choice(TIMEZONES)
-        
-        return cls(
-            user_agent=random.choice(USER_AGENTS),
-            screen_width=resolution[0],
-            screen_height=resolution[1],
-            color_depth=random.choice([24, 32]),
-            pixel_ratio=random.choice([1, 1.25, 1.5, 2]),
-            timezone=tz[0],
-            timezone_offset=tz[1],
-            languages=random.choice(LANGUAGES),
-            platform=random.choice(PLATFORMS),
-            hardware_concurrency=random.choice([4, 8, 12, 16]),
-            device_memory=random.choice([4, 8, 16, 32]),
-            canvas_noise=random.uniform(0.0001, 0.001),
-            canvas_noise_seed=random.randint(100000, 999999),
-            audio_noise_seed=random.randint(100000, 999999),
-            webgl_vendor="Google Inc. (NVIDIA)",
-            webgl_renderer=random.choice([
-                "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-                "ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-                "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-                "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-                "ANGLE (AMD, AMD Radeon RX 580 Series Direct3D11 vs_5_0 ps_5_0, D3D11)",
-            ]),
-        )
+    def generate_random(cls, chrome_major: Optional[str] = None, extra: str = "") -> "DeviceProfile":
+        """Build the device profile used for consistency checks.
+
+        Name kept for compatibility. Values come from the host, not a random
+        draw: random fingerprints each launch are an automation signal.
+        """
+        return host_stable_profile(chrome_major=chrome_major, extra=extra)
     
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -730,17 +836,22 @@ class AdaptiveRateLimiter:
     1. 成功响应：逐步降低间隔（加速）
     2. 超时/错误：增加间隔（减速）
     3. 检测到风控：大幅增加间隔（保护）
-    4. 连续成功后进入"快速模式"
+    4. 连续五次成功后逐步恢复；随机间隔始终遵守上下限
     """
     
     def __init__(self, base_interval: float = 5.0, 
                  min_interval: float = 2.0, 
                  max_interval: float = 30.0,
                  log_callback: Optional[Callable[[str], None]] = None):
-        self.base_interval = base_interval
-        self.current_interval = base_interval
+        base_interval, min_interval, max_interval = map(float, (base_interval, min_interval, max_interval))
+        if not all(math.isfinite(value) and value > 0 for value in (base_interval, min_interval, max_interval)):
+            raise ValueError("请求间隔必须是有限的正数")
+        if min_interval > max_interval:
+            raise ValueError("最小请求间隔不能大于最大请求间隔")
         self.min_interval = min_interval
         self.max_interval = max_interval
+        self.base_interval = min(max(base_interval, min_interval), max_interval)
+        self.current_interval = self.base_interval
         self.log = log_callback or (lambda x: print(x))
         
         # 统计数据
@@ -748,16 +859,19 @@ class AdaptiveRateLimiter:
         self.fail_count = 0      # 失败计数
         self.total_requests = 0  # 总请求数
         self.risk_detected = False  # 是否检测到风控
-        
+        self.risk_alert_pending = False  # 一次性提醒，由监控器消费
+        self.last_risk_message = ""
+
     def on_success(self):
         """请求成功时调用"""
         self.success_streak += 1
         self.fail_count = 0
         self.total_requests += 1
-        self.risk_detected = False
-        
+
         # 连续成功5次后，逐步加速
         if self.success_streak >= 5:
+            self.risk_detected = False
+            self.risk_alert_pending = False
             speed_factor = 0.95  # 每次减少5%
             new_interval = self.current_interval * speed_factor
             self.current_interval = max(new_interval, self.min_interval)
@@ -786,6 +900,8 @@ class AdaptiveRateLimiter:
         
         if is_risk:
             self.risk_detected = True
+            self.risk_alert_pending = True
+            self.last_risk_message = error_msg
             # 风控：大幅增加间隔
             self.current_interval = min(self.current_interval * 2.5, self.max_interval)
             self.log(f"🛡️ 检测到风控信号，自动放慢至 {self.current_interval:.1f}s")
@@ -799,21 +915,31 @@ class AdaptiveRateLimiter:
         """风控解除后恢复正常速度"""
         if self.risk_detected:
             self.risk_detected = False
+            self.risk_alert_pending = False
             self.current_interval = self.base_interval
             self.log(f"✅ 风控解除，恢复正常频率 {self.current_interval:.1f}s")
             
     def get_interval(self) -> float:
-        """获取当前推荐的请求间隔（带随机浮动）"""
-        # 添加 ±20% 的随机浮动
+        """获取当前推荐的请求间隔；±20% 浮动后仍遵守配置上下限。"""
         variation = self.current_interval * 0.2
-        return self.current_interval + random.uniform(-variation, variation)
+        interval = self.current_interval + random.uniform(-variation, variation)
+        return min(self.max_interval, max(self.min_interval, interval))
     
+    def consume_risk_alert(self) -> Optional[str]:
+        """Return a pending risk message once, then clear the flag."""
+        if not self.risk_alert_pending:
+            return None
+        self.risk_alert_pending = False
+        return self.last_risk_message or "官方提示操作过快或频繁"
+
     def reset(self):
         """重置为初始状态"""
         self.current_interval = self.base_interval
         self.success_streak = 0
         self.fail_count = 0
         self.risk_detected = False
+        self.risk_alert_pending = False
+        self.last_risk_message = ""
         
     def get_stats(self) -> dict:
         """获取统计数据"""

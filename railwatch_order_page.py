@@ -55,9 +55,8 @@ const orders=all('.order-item').map(root=>{
    text:body.join(' ').replace(/\s+/g,' ').trim(),state,payment,passengers:passengers(root)};
 });
 const dialogs=all('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up-box').map(txt).filter(Boolean);
-const regularRoot=document.querySelector('#ticket_info');
 return {url:location.href, orders, dialogs, details,
- regular:txt(regularRoot), passengers:passengers(document),
+ regular:txt(document.querySelector('#ticket_info')||document.querySelector('#ticket_tit_id')), passengers:passengers(document),
  seats:all('select[id^="seatType_"]').map(e=>e.selectedOptions[0]?.textContent.trim()||''),
  deadline:val('#dafaultTime')||val('#deadline_time')||val('input.deadline-time'),
  extra:all('#planList .group-ticket').length,
@@ -85,26 +84,79 @@ const actual=inputs.filter(e=>e.checked).map(name);
 return actual.length===wanted.length && wanted.every(n=>actual.includes(n));
 """
 
+SEAT_PREFERENCE_JS = r"""
+const wanted = arguments[0] === '靠窗优先' ? ['A','F','靠窗','窗'] : ['C','D','靠过道','过道'];
+const count = arguments[1];
+const visible = e => !!(e && e.getClientRects().length);
+const selects = [...document.querySelectorAll('select')].filter(e => visible(e) && !e.disabled &&
+  !/^seatType_/.test(e.id) && [...e.options].some(o => wanted.includes(o.text.trim())));
+if (selects.length === count) {
+  for (const select of selects) {
+    const option = [...select.options].find(o => !o.disabled && wanted.includes(o.text.trim()));
+    if (!option) return false;
+    select.value = option.value;
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+  return selects.every(e => wanted.includes(e.selectedOptions[0]?.text.trim()));
+}
+const choices = [...document.querySelectorAll('#erdeng1 a,#yideng1 a,#seat_select [data-seat]')]
+  .filter(e => visible(e) && !e.classList.contains('disabled') && e.getAttribute('aria-disabled') !== 'true');
+const label = e => (e.getAttribute('data-seat') || e.textContent).trim();
+const selected = e => e.classList.contains('cur') || e.classList.contains('selected') || e.getAttribute('aria-pressed') === 'true';
+const targets = choices.filter(e => wanted.includes(label(e)));
+if (targets.length < count) return false;
+const picked = targets.slice(0,count);
+for (const choice of choices) if (selected(choice) !== picked.includes(choice)) choice.click();
+const actual = choices.filter(selected);
+return actual.length === count && actual.every(e => picked.includes(e));
+"""
+
 
 def normalized_date(value):
     match = re.search(r"(\d{4})[-年/](\d{1,2})[-月/](\d{1,2})", str(value))
     return "{}-{:02d}-{:02d}".format(match[1], int(match[2]), int(match[3])) if match else ""
 
 
+_TOKEN_START = r"(?:(?<![0-9A-Za-z\u4e00-\u9fff])|(?<=次))"
+
+
 def contains_token(text, token):
     # Avoid matching G1 inside G101, or a passenger name inside a longer name.
-    return bool(token and re.search(r"(?<![\w])" + re.escape(token) + r"(?![\w])", text))
+    # \w also matches CJK in Python, which would reject the packed official
+    # format "G1307次北京丰台站"; a token may sit flush only behind the train
+    # suffix 次, never inside a longer station or passenger name.
+    return bool(token and re.search(_TOKEN_START + re.escape(token)
+                                   + r"(?![0-9A-Za-z\u4e00-\u9fff])", str(text)))
+
+
+def train_token(text, code):
+    # The code may run flush into the next field: "G1307次北京丰台站（09:29开）".
+    return bool(code and re.search(_TOKEN_START + re.escape(code)
+                                   + r"(?:\s*次)?(?![0-9A-Za-z])", str(text)))
+
+
+def seat_label(value):
+    """Remove only a displayed fare, retaining the exact seat class."""
+    return re.sub(r"\s*[（(]\s*[¥￥]?\s*\d+(?:\.\d+)?\s*元\s*[）)]\s*$", "", str(value)).strip()
+
+
+def form_token(text, token, suffix):
+    # The optional suffix (次/站) absorbs the official page's glued layout; the
+    # CJK end boundary keeps 北京 from matching inside 北京南.
+    return bool(token and re.search(_TOKEN_START + re.escape(token)
+                                   + r"(?:\s*" + suffix + r")?(?![0-9A-Za-z\u4e00-\u9fff])", str(text)))
 
 
 def record_matches(record, intent):
     text = record.get("text", "")
     dates = {normalized_date(m[0]) for m in re.finditer(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}", text)}
-    trains = set(re.findall(r"(?<![\w])[GDCZTKYSL]?\d{1,5}(?![\w])", re.sub(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}(?:日)?|\d{1,2}:\d{2}", "", text)))
+    trains = set(re.findall(r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})(?![0-9A-Za-z])",
+                            re.sub(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}(?:日)?|\d{1,2}:\d{2}", "", text)))
     # Prefixed train codes must form one combination. Plain numbers elsewhere in
     # an order (fares, coach numbers) are not additional train codes.
     trains = {value for value in trains if value[0].isalpha() or value == intent.train_code}
     seats = {value for value in ("二等座", "一等座", "商务座", "特等座", "无座", "硬座", "软座", "硬卧", "软卧", "高级软卧", "动卧") if contains_token(text, value)}
-    return (record.get("kind") == intent.kind and contains_token(text, intent.train_code)
+    return (record.get("kind") == intent.kind and train_token(text, intent.train_code)
             and trains == {intent.train_code} and dates == {intent.date} and seats == {intent.seat}
             and all(contains_token(text, item) for item in (intent.from_station, intent.to_station, intent.seat))
             and text.index(intent.from_station) < text.index(intent.to_station)
@@ -112,11 +164,17 @@ def record_matches(record, intent):
 
 
 class OrderPage:
-    def __init__(self, driver, stop=lambda: False, wait=None, mark=None, *, allow_fixture=False):
+    def __init__(self, driver, stop=lambda: False, wait=None, mark=None, *, allow_fixture=False, log=None):
         self.driver, self.stop = driver, stop
         self.allow_fixture = allow_fixture
         self.wait = wait or time.sleep
         self.mark = mark or (lambda stage, detail=None: None)
+        self.log = log or (lambda message: None)
+
+    def apply_seat_preference(self, preference, passenger_count):
+        if preference not in ("靠窗优先", "靠过道优先"):
+            return False
+        return self.driver.execute_script(SEAT_PREFERENCE_JS, preference, passenger_count) is True
 
     def snapshot(self):
         try:
@@ -166,9 +224,9 @@ class OrderPage:
             return OrderResult("not_submitted", "官方待支付订单列表明确为空", no_order=True)
         return OrderResult("unknown", "未获得匹配的订单证据，请打开官方订单详情核对")
 
-    def poll(self, predicate, timeout=10):
+    def poll(self, predicate, timeout=10, ignore_stop=False):
         deadline = time.monotonic() + timeout
-        while not self.stop():
+        while ignore_stop or not self.stop():
             value = predicate()
             if value:
                 return value
@@ -188,6 +246,36 @@ class OrderPage:
                 continue
         return None
 
+    def form_mismatch_report(self, intent):
+        """Expected/actual diff for the pre-submit readback, safe for the event log."""
+        snap = self.snapshot()
+        if not snap:
+            return "无法读取订单页面"
+        text = snap.get("regular", "")
+        actual_passengers = snap.get("passengers", [])
+        masked = str(text)
+        for name in sorted(set(intent.passengers) | set(actual_passengers), key=len, reverse=True):
+            if not name:
+                continue
+            masked = masked.replace(name, "＜乘客＞")
+        fields = [
+            ("车次", intent.train_code + "次", "未读到", train_token(text, intent.train_code)),
+            ("日期", intent.date, normalized_date(text) or "未读到", normalized_date(text) == intent.date),
+            ("出发站", intent.from_station + "站", "未读到", form_token(text, intent.from_station, "站")),
+            ("到达站", intent.to_station + "站", "未读到", form_token(text, intent.to_station, "站")),
+            ("乘车人", f"{len(intent.passengers)} 位指定乘客", f"{len(actual_passengers)} 位，名单不一致",
+             sorted(actual_passengers) == sorted(intent.passengers)),
+            ("席别", "、".join([intent.seat] * len(intent.passengers)),
+             "、".join(seat_label(value) for value in snap.get("seats", [])) or "未读到",
+             [seat_label(value) for value in snap.get("seats", [])] == [intent.seat] * len(intent.passengers)),
+        ]
+        failed = "；".join(f"{name}：期望 {want}，实际 {got}" for name, want, got, matches in fields if not matches)
+        if (form_token(text, intent.from_station, "站") and form_token(text, intent.to_station, "站")
+                and text.index(intent.from_station) >= text.index(intent.to_station)):
+            failed += "；区间：出发站与到达站顺序不一致"
+        summary = f"；页面摘要：{masked[:120]}" if masked else "；页面摘要为空"
+        return (failed or "各字段均已读到") + summary
+
     def verify_form(self, intent):
         snap = self.snapshot()
         if not intent.passengers or sorted(snap.get("passengers", [])) != sorted(intent.passengers):
@@ -203,9 +291,24 @@ class OrderPage:
                     and self.deadline_matches(snap.get("deadline", ""), intent.deadline, intent.date)
                     and snap.get("standing", "").replace(" ", "") == "已关闭")
         text = snap.get("regular", "")
-        return (contains_token(text, intent.train_code) and normalized_date(text) == intent.date
-                and contains_token(text, intent.from_station) and contains_token(text, intent.to_station)
-                and snap.get("seats") == [intent.seat] * len(intent.passengers))
+        return (train_token(text, intent.train_code) and normalized_date(text) == intent.date
+                and form_token(text, intent.from_station, "站") and form_token(text, intent.to_station, "站")
+                and text.index(intent.from_station) < text.index(intent.to_station)
+                and [seat_label(value) for value in snap.get("seats", [])] == [intent.seat] * len(intent.passengers))
+
+    def select_regular_seats(self, intent):
+        from selenium.webdriver.support.ui import Select
+        selects = [Select(element) for element in self.driver.find_elements(By.CSS_SELECTOR, 'select[id^="seatType_"]')
+                   if element.is_displayed()]
+        if len(selects) != len(intent.passengers):
+            return False
+        choices = [[option for option in select.options
+                    if option.is_enabled() and seat_label(option.text) == intent.seat] for select in selects]
+        if any(len(options) != 1 for options in choices):
+            return False
+        for select, options in zip(selects, choices):
+            select.select_by_index(options[0].get_attribute("index"))
+        return True
 
     def prepare_people(self, intent):
         selected = self.driver.execute_script(SELECT_PASSENGERS_JS, list(intent.passengers)) is True
@@ -249,11 +352,31 @@ class OrderPage:
                 return bool(self.poll(lambda: self.deadline_matches(self.snapshot().get("deadline", ""), deadline, travel_date), 2))
         return False
 
-    def wait_result(self, intent, submitted=True):
+    def wait_result(self, intent, submitted=True, timeout=10):
         def terminal():
             result = self.result(intent, submitted=submitted)
             return result if result.status != "unknown" else None
-        return self.poll(terminal) or self.result(intent, submitted=submitted)
+        return self.poll(terminal, timeout) or self.result(intent, submitted=submitted)
+
+    def _post_submit(self, intent, confirmed_clicked):
+        """Resolve the outcome after the official submit/confirm step.
+
+        Grab semantics: once the submission is in flight, resolving it is the
+        only task left. A still-waiting official dialog is kept untouched for
+        the user; a completed confirmation is reconciled on the official order
+        page so a created order surfaces as pending payment, not as doubt.
+        """
+        result = self.wait_result(intent, submitted=True, timeout=20)
+        if result.status != "unknown":
+            return result
+        if self.snapshot().get("confirmation"):
+            return OrderResult("verification",
+                               "官方确认弹窗仍在等待：请在官方页面点击“确认”，然后回到监控页点击“继续处理”核对订单")
+        if confirmed_clicked and not self.stop():
+            reconciled = self.reconcile(intent, navigate=True)
+            if reconciled.status != "unknown":
+                return reconciled
+        return result
 
     def reconcile(self, intent, known_id="", navigate=False, allow_empty=False):
         result = self.result(intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
@@ -273,8 +396,9 @@ class OrderPage:
         result = self.result(intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
         return result if result.status != "unknown" else None
 
-    def regular(self, button, intent):
+    def regular(self, button, intent, *, seat_preference="无偏好", preference_handler=None):
         submitted = False
+        stage = "打开乘车人页面"
         try:
             if button is not None:
                 button.click()
@@ -283,32 +407,63 @@ class OrderPage:
                 return result if result.status in ("sold_out", "verification", "pending_payment", "fulfilled") else self.snapshot().get("formReady")
             ready_result = self.poll(ready)
             if isinstance(ready_result, OrderResult): return ready_result
+            stage = "选择乘车人"
             if not ready_result or not self.prepare_people(intent):
                 return OrderResult("verification", "乘车人未能唯一匹配，请检查官方页面")
-            selects = self.driver.find_elements(By.CSS_SELECTOR, 'select[id^="seatType_"]')
-            from selenium.webdriver.support.ui import Select
-            for select in selects:
-                if select.is_displayed(): Select(select).select_by_visible_text(intent.seat)
-            if not self.poll(lambda: self.verify_form(intent), 2):
+            stage = "选择席别"
+            if not self.select_regular_seats(intent):
+                return OrderResult("verification", "尚未点击提交订单：席别选项未能唯一匹配，请检查官方页面")
+            stage = "核对订单信息"
+            if not self.poll(lambda: self.verify_form(intent), 6):
+                self.log("回读核对未通过，已停止自动提交：" + self.form_mismatch_report(intent))
                 return OrderResult("verification", "车次、日期、区间、乘客或席别回读不一致")
             submit = self.button(("#submitOrder_id",))
             if not submit: return OrderResult("not_submitted", "提交按钮不可用", no_order=True)
             if self.stop(): return OrderResult("not_submitted", "提交前已停止", no_order=True)
+            stage = "提交订单"
             self.mark("regular_submit")
             submitted = True  # Set before click: a transport error may follow a successful action.
             submit.click()
             def confirm_or_result():
                 result = self.result(intent, submitted=True)
                 return result if result.status != "unknown" else self.button(("#qr_submit_id",))
-            confirm = self.poll(confirm_or_result)
+            # The submission is already in flight: keep waiting for the official
+            # dialog even across a stop request, so the grab window is spent on
+            # completing the order instead of abandoning a submitted form.
+            confirm = self.poll(confirm_or_result, ignore_stop=True)
             if isinstance(confirm, OrderResult): return confirm
-            if confirm and not self.stop():
+            confirmed_clicked = False
+            if confirm is None:
+                confirm = self.button(("#qr_submit_id",))
+            if confirm:
+                if seat_preference != "无偏好":
+                    try:
+                        applied = (preference_handler(seat_preference) if preference_handler else
+                                   self.apply_seat_preference(seat_preference, len(intent.passengers))) is True
+                    except Exception:
+                        applied = False
+                    self.log(f"座位偏好已回读确认：{seat_preference}" if applied else
+                             f"未能应用座位偏好（{seat_preference}），当前页面不支持或可选位置不足，将按官方分配继续。")
                 if not self.verify_form(intent):
                     return OrderResult("verification", "确认购买前订单信息发生变化")
-                confirm.click()  # Never repeat an ambiguous confirmation click.
-            return self.wait_result(intent)
-        except Exception:
-            return self.result(intent, submitted=submitted)
+                if self.stop():
+                    self.log("已请求停止，但官方确认弹窗已出现：仍完成本次确认，之后只需人工支付。")
+                confirmed_clicked = True  # An attempted click may already have reached the server.
+                try:
+                    confirm.click()  # Never repeat an ambiguous confirmation click.
+                except Exception:
+                    # A visible button does not prove rejection: the request or
+                    # DOM update may still be pending. Only observe/reconcile.
+                    self.log("确认购买点击回执异常，将等待并核对订单结果，不自动重复确认。")
+            return self._post_submit(intent, confirmed_clicked)
+        except Exception as exc:
+            # Exception text can contain passenger data and browser internals.
+            self.log(f"自动提交在{stage}阶段中断（{type(exc).__name__}）；"
+                     + ("已尝试提交，需要核对官方订单。" if submitted else "尚未点击提交订单。"))
+            result = self.result(intent, submitted=submitted)
+            if not submitted and result.status == "unknown":
+                return OrderResult("verification", f"尚未点击提交订单：{stage}失败，请检查官方页面后继续处理")
+            return result
 
     def alternate(self, button, intent):
         submitted = False

@@ -3,7 +3,9 @@
 import os
 
 
-datas = []
+# The CLI evaluates this spec before adding its directory to the module search
+# path. Resolve local policy data explicitly so console-script builds include it.
+datas = [(os.path.join(SPECPATH, "railwatch_policies", "query_strategies.json"), "railwatch_policies")]
 for optional_file in (
     "chromedriver.exe",
     "LICENSE.chromedriver",

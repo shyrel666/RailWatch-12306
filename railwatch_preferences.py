@@ -6,26 +6,27 @@ import json
 import os
 from typing import Literal
 
-ThemeMode = Literal["light", "dark"]
+ThemeMode = Literal["system", "light", "dark"]
 UI_PREFERENCES_FILE = "ui_preferences.json"
 
 
 def normalize_theme(value: object) -> ThemeMode:
-    return "dark" if str(value).lower() == "dark" else "light"
+    selected = str(value).lower()
+    return selected if selected in ("light", "dark") else "system"
 
 
 def load_theme_preference(data_dir: str) -> ThemeMode:
     path = os.path.join(data_dir, UI_PREFERENCES_FILE)
     if not os.path.exists(path):
-        return "light"
+        return "system"
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
         if isinstance(data, dict):
-            return normalize_theme(data.get("theme", "light"))
+            return normalize_theme(data.get("theme", "system"))
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
-    return "light"
+    return "system"
 
 
 def save_theme_preference(data_dir: str, mode: ThemeMode) -> None:

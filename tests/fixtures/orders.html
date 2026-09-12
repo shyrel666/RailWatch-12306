@@ -46,8 +46,9 @@ el('submitOrder_id').onclick=()=>{
  fixture.regularClicks++;
  if(fixture.mode==='timeout')return;
  if(fixture.mode==='verification'){el('dialog').innerText='请完成人脸核验';show('dialog');return;}
- el('dialog').innerHTML='<button id="qr_submit_id">确认购买</button>';show('dialog');
- el('qr_submit_id').onclick=()=>{fixture.confirmClicks++;record();};
+  el('dialog').innerHTML='<button id="qr_submit_id">确认购买</button>';show('dialog');
+ if(fixture.preferenceEnabled) el('dialog').innerHTML+='<select id="seat_preference"><option>B</option><option>A</option><option>C</option><option>F</option></select>';
+ el('qr_submit_id').onclick=()=>{fixture.confirmClicks++;fixture.seatPreference=el('seat_preference')?.value;record();};
 };
 el('toPayBtn').onclick=e=>{e.preventDefault();fixture.alternateClicks++;if(fixture.mode==='timeout')return;record();};
 </script>

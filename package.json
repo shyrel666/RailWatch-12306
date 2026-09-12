@@ -1,6 +1,6 @@
 {
   "name": "railwatch-12306-electron",
-  "version": "0.3.2",
+  "version": "0.3.5",
   "private": true,
   "license": "MIT",
   "author": "RailWatch 12306 contributors",
@@ -18,6 +18,7 @@
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','dist-electron']) fs.rmSync(p,{recursive:true,force:true});\"",
     "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env NODE_OPTIONS= VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/main.js\"",
     "dev:renderer": "vite --host 127.0.0.1",
+    "review:ui": "node scripts/review-ui.cjs",
     "build:electron": "tsc -p electron/tsconfig.json",
     "build:renderer": "vite build",
     "build:runtime": "pyinstaller RailWatch_runtime.spec --distpath dist-runtime --workpath build/runtime -y",

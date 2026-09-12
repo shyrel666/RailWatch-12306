@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "railwatch-12306"
-version = "0.3.2"
+version = "0.3.5"
 description = "Python runtime and Selenium core for the RailWatch 12306 Electron desktop app."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,6 +37,7 @@ Homepage = "https://github.com/shyrel666/RailWatch-12306"
 Issues = "https://github.com/shyrel666/RailWatch-12306/issues"
 
 [tool.setuptools]
+packages = ["railwatch_policies"]
 py-modules = [
   "anti_detect",
   "chromedriver_manager",
@@ -60,3 +61,6 @@ py-modules = [
   "railwatch_task",
   "railwatch_verification",
 ]
+
+[tool.setuptools.package-data]
+railwatch_policies = ["query_strategies.json"]

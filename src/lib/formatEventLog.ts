@@ -128,19 +128,8 @@ function isQueryNoise(message: string) {
   return queryStepPatterns.some((pattern) => pattern.test(clean));
 }
 
-function summarizeMergedDetails(details: string[]) {
-  if (details.length === 0) {
-    return null;
-  }
-  return details[0];
-}
-
 export function countEventsByFilter(logs: LogEntry[], filter: string) {
-  const levels = filterLevels[filter];
-  if (!levels) {
-    return logs.length;
-  }
-  return logs.filter((entry) => levels.includes(entry.level)).length;
+  return presentEventLogs(logs, filter).length;
 }
 
 const entryIds = new WeakMap<object, number>();
@@ -148,21 +137,25 @@ let fallbackEntryId = -1;
 
 export function presentEventLogs(logs: LogEntry[], filter: string): PresentedEvent[] {
   const levels = filterLevels[filter];
-  const filtered = levels ? logs.filter((entry) => levels.includes(entry.level)) : logs;
   const presented: PresentedEvent[] = [];
 
-  for (const entry of filtered) {
+  for (const entry of logs) {
     const meta = levelMeta[entry.level] ?? levelMeta.INFO;
     const clean = stripEmoji(entry.message);
+    const informational = entry.level === "INFO" || entry.level === "SUCCESS";
 
-    if (isQueryNoise(clean)) {
+    if (informational && isQueryNoise(clean)) {
       continue;
     }
 
-    if (isTechnicalDetail(clean) && presented.length > 0) {
-      const previous = presented[presented.length - 1];
-      const merged = previous.detail ? `${previous.detail} · ${clean}` : clean;
-      previous.detail = summarizeMergedDetails(merged.split(" · ")) ?? merged;
+    const previous = presented[presented.length - 1];
+    if (
+      informational && isTechnicalDetail(clean) && previous &&
+      (previous.level === "INFO" || previous.level === "SUCCESS") &&
+      previous.run_id === entry.run_id &&
+      (previous.title === "环境检查" || previous.title === "环境检查通过" || isTechnicalDetail(previous.message))
+    ) {
+      previous.detail = previous.detail ? `${previous.detail} · ${clean}` : clean;
       continue;
     }
 
@@ -178,5 +171,5 @@ export function presentEventLogs(logs: LogEntry[], filter: string): PresentedEve
     });
   }
 
-  return presented.reverse();
+  return (levels ? presented.filter((entry) => levels.includes(entry.level)) : presented).reverse();
 }

@@ -47,6 +47,10 @@ const LONG_RUNNING_TIMEOUT_MS = 600_000;
 export class JsonLineDecoder {
   private buffer = "";
 
+  reset(): void {
+    this.buffer = "";
+  }
+
   constructor(private readonly onInvalidLine: (line: string, error: unknown) => void = () => undefined) {}
 
   push(chunk: string): RuntimeMessage[] {
@@ -175,8 +179,13 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
     if (this.child) {
       return;
     }
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     this.intentionalStop = false;
-    this.child = spawn(this.command.executable, this.command.args, {
+    this.decoder.reset();
+    const child = spawn(this.command.executable, this.command.args, {
       cwd: this.command.cwd,
       stdio: "pipe",
       windowsHide: true,
@@ -185,31 +194,44 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
         RAILWATCH_APP_VERSION: this.appVersion,
       },
     });
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk: string) => {
+    this.child = child;
+    const finish = (error: Error, code: number | null, signal: NodeJS.Signals | null) => {
+      if (this.child !== child) return;
+      this.pending.rejectAll(error);
+      this.child = null;
+      this.emit("exit", { code, signal } satisfies RuntimeExitInfo);
+      if (!this.intentionalStop) this.scheduleRestart();
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (this.child !== child) return;
       for (const message of this.decoder.push(chunk)) {
         this.handleMessage(message);
       }
     });
-    this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk: string) => {
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (this.child !== child) return;
       this.emit("stderr", chunk);
     });
-    this.child.on("error", (error) => {
-      this.pending.rejectAll(error);
+    child.on("error", (error) => {
+      if (this.child !== child) return;
       this.emit("runtimeError", error);
+      finish(error, null, null);
     });
-    this.child.on("exit", (code, signal) => {
+    child.stdin.on("error", (error) => {
+      if (this.child !== child) return;
+      this.emit("runtimeError", error);
+      finish(error, null, null);
+      child.kill();
+    });
+    child.on("exit", (code, signal) => {
       const error = new Error(`Python runtime exited (${code ?? signal ?? "unknown"})`);
-      this.pending.rejectAll(error);
-      this.child = null;
-      const exitInfo: RuntimeExitInfo = { code, signal };
-      this.emit("exit", exitInfo);
-      if (!this.intentionalStop) {
-        this.scheduleRestart();
-      }
+      finish(error, code, signal);
     });
-    this.emit("started");
+    child.once("spawn", () => {
+      if (this.child === child) this.emit("started");
+    });
   }
 
   async request<T = unknown>(
@@ -225,7 +247,9 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
       options.timeoutMs ?? (LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS);
     const id = String(this.nextId++);
     const promise = this.pending.create(id, timeoutMs) as Promise<T>;
-    this.child.stdin.write(JSON.stringify({ id, command, payload }) + "\n");
+    this.child.stdin.write(JSON.stringify({ id, command, payload }) + "\n", (error) => {
+      if (error) this.pending.reject(id, error);
+    });
     return promise;
   }
 
@@ -238,8 +262,10 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
     if (!this.child) {
       return;
     }
-    this.child.kill();
+    const child = this.child;
     this.child = null;
+    this.pending.rejectAll(new Error("Python runtime stopped"));
+    child.kill();
   }
 
   private scheduleRestart(): void {
@@ -250,7 +276,10 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
       this.restartTimer = null;
       if (!this.intentionalStop) {
         this.start();
-        this.emit("restarted");
+        const child = this.child;
+        child?.once("spawn", () => {
+          if (this.child === child) this.emit("restarted");
+        });
       }
     }, 1000);
   }

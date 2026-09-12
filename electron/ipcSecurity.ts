@@ -12,6 +12,7 @@ export const RAILWATCH_COMMANDS = [
   "startMonitor",
   "stopMonitor",
   "continueOrder",
+  "dismissOrder",
   "closeBrowser",
   "clearLocalData",
   "exportLog",
@@ -66,6 +67,12 @@ export function isAllowedExternalUrl(value: unknown): value is string {
 }
 
 export function getCommandConfirmation(command: RailWatchCommandName, payload: Record<string, unknown>): ConfirmationPrompt | null {
+  if (command === "dismissOrder") {
+    return {
+      title: "结束本次核对",
+      message: "结束后可重新启动监控，并保留本地历史记录。此操作不会取消12306订单；如曾提交或手动下单，请先在官方页面核对并处理。是否继续？",
+    };
+  }
   if (command === "clearLocalData") {
     return {
       title: "清除本地数据",
