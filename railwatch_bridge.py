@@ -50,15 +50,20 @@ except ImportError:
     get_chrome_version_info = None
     CD_MANAGER_AVAILABLE = False
 
+SELENIUM_IMPORT_ERROR = None
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
-
+    # selenium >= 4.44 lazy-loads browser submodules via module __getattr__, so a
+    # frozen/partial install only fails when ChromeOptions is first touched.
+    # Resolve it here to surface the real error at startup instead of mid-task.
+    webdriver.ChromeOptions
     SELENIUM_AVAILABLE = True
-except ImportError:
+except ImportError as exc:
     webdriver = None
     Service = None
     SELENIUM_AVAILABLE = False
+    SELENIUM_IMPORT_ERROR = exc
 
 try:
     from anti_detect import AntiDetect, BehaviorSimulator, RailDeviceIdProtector
@@ -442,7 +447,8 @@ class RailWatchBridge:
         try:
             self.log("正在检查 Python、Selenium 和 ChromeDriver...")
             if not SELENIUM_AVAILABLE:
-                raise RuntimeError("Selenium 未安装，请运行 pip install -r requirements.txt。")
+                detail = f"（{SELENIUM_IMPORT_ERROR}）" if SELENIUM_IMPORT_ERROR else ""
+                raise RuntimeError(f"Selenium 未安装或加载失败{detail}，请运行 pip install -r requirements.txt。")
             self.log(f"Python {sys.version.split()[0]}")
             self.log(f"平台 {sys.platform}")
 

@@ -2,6 +2,14 @@
 
 import os
 
+from PyInstaller.utils.hooks import collect_submodules
+
+
+# selenium >= 4.44 lazy-loads every browser submodule (chrome.options, edge.service, ...)
+# through module __getattr__, so static import analysis never sees them and the frozen
+# app only fails at runtime when the browser is first launched. Force-collect them.
+hiddenimports = collect_submodules("selenium")
+
 
 # The CLI evaluates this spec before adding its directory to the module search
 # path. Resolve local policy data explicitly so console-script builds include it.
@@ -24,7 +32,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,6 +40,19 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# Fail the build instead of shipping an exe whose browser submodules are missing.
+frozen_modules = {name for name, *_ in a.pure}
+required_lazy_selenium = {
+    "selenium.webdriver.chrome.options",
+    "selenium.webdriver.chromium.options",
+    "selenium.webdriver.edge.options",
+    "selenium.webdriver.firefox.options",
+}
+missing = sorted(required_lazy_selenium - frozen_modules)
+if missing:
+    raise SystemExit(f"PyInstaller missed lazy-loaded selenium submodules: {missing}")
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
