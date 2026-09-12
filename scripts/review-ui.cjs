@@ -49,7 +49,7 @@ fs.mkdirSync(output, { recursive: true });
         if (command === "getRuntimeInfo")
           return {
             app_display_name: "RailWatch 12306",
-            app_version: "0.3.2",
+            app_version: "0.3.5",
             data_dir: "C:/Users/Demo/AppData/Local/railwatch-12306",
             data_dir_writable: true,
             data_dir_free_bytes: 28250000000,
@@ -85,19 +85,19 @@ fs.mkdirSync(output, { recursive: true });
       stopUrgentAlert: () => {},
       getUpdateState: async () => ({
         phase: "not-available",
-        currentVersion: "0.3.2",
+        currentVersion: "0.3.5",
       }),
       checkUpdate: async () => ({
         ok: true,
-        currentVersion: "0.3.2",
-        latestVersion: "0.3.2",
+        currentVersion: "0.3.5",
+        latestVersion: "0.3.5",
         hasUpdate: false,
       }),
       getAppInfo: async () => ({
         electronVersion: "39.2.7",
         chromeVersion: "142",
         nodeVersion: "22",
-        appVersion: "0.3.2",
+        appVersion: "0.3.5",
       }),
       openExternal: async () => ({ ok: true }),
       showSaveDialog: async () => null,

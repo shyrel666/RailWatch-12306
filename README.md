@@ -34,7 +34,7 @@
 
 ## 界面预览
 
-![RailWatch v0.3.2 行程设置界面，展示演示路线、车次、席别与北京时间起售配置](docs/images/trip-setup.png)
+![RailWatch v0.3.5 行程设置界面，展示演示路线、车次、席别与北京时间起售配置](docs/images/trip-setup.png)
 
 <p align="center"><sub>当前前端的实际渲染截图，使用演示行程；未连接真实账号，所示车次与时间不作为购票依据。</sub></p>
 
