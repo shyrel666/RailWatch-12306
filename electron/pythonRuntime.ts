@@ -130,7 +130,10 @@ export function createPythonRuntimeCommand(projectRoot: string = path.resolve(__
     return { executable: packagedExe, args: [], cwd: path.dirname(packagedExe) };
   }
 
-  const python = process.env.RAILWATCH_PYTHON || "python";
+  const venvPython = process.platform === "win32"
+    ? path.join(projectRoot, ".venv", "Scripts", "python.exe")
+    : path.join(projectRoot, ".venv", "bin", "python");
+  const python = process.env.RAILWATCH_PYTHON || (existsSync(venvPython) ? venvPython : "python");
   const runtimeScript = path.join(projectRoot, "railwatch_runtime.py");
   return { executable: python, args: [runtimeScript], cwd: projectRoot };
 }
