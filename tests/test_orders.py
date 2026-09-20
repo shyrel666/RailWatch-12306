@@ -407,6 +407,51 @@ class RegularConfirmationTests(unittest.TestCase):
         confirm.click.assert_called_once()
         self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
 
+    def test_delayed_dialog_after_ten_seconds_is_still_confirmed_automatically(self):
+        page = self._page()
+        elapsed = [0.0]
+        page.wait = lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+        submit, confirm = Mock(), Mock()
+        page.button = lambda selectors: (submit if selectors == ("#submitOrder_id",)
+                                         else confirm if elapsed[0] >= 12 else None)
+        page.wait_result = Mock(return_value=OrderResult("pending_payment", order_id="E123456"))
+        with patch("railwatch_order_page.time.monotonic", lambda: elapsed[0]):
+            result = page.regular(Mock(), intent())
+        self.assertEqual(result.status, "pending_payment")
+        submit.click.assert_called_once()
+        confirm.click.assert_called_once()
+        self.assertGreaterEqual(elapsed[0], 12)
+
+    def test_rejected_confirmation_click_reacquires_button_and_submits(self):
+        from selenium.common.exceptions import ElementClickInterceptedException, StaleElementReferenceException
+        for error in (ElementClickInterceptedException, StaleElementReferenceException):
+            with self.subTest(error=error.__name__):
+                page = self._page()
+                submit, blocked, refreshed = Mock(), Mock(), Mock()
+                blocked.click.side_effect = error("not dispatched")
+                buttons = iter([blocked, refreshed])
+                page.button = lambda selectors: (submit if selectors == ("#submitOrder_id",)
+                                                 else next(buttons))
+                page.wait_result = Mock(return_value=OrderResult("pending_payment", order_id="E123456"))
+                result = page.regular(Mock(), intent())
+                self.assertEqual(result.status, "pending_payment")
+                submit.click.assert_called_once()
+                blocked.click.assert_called_once()
+                refreshed.click.assert_called_once()
+
+    def test_verification_during_confirmation_retry_stops_clicking(self):
+        from selenium.common.exceptions import ElementClickInterceptedException
+        page = self._page()
+        submit, confirm = Mock(), Mock()
+        def blocked():
+            page.result = lambda *a, **k: OrderResult("verification", "请完成人脸核验")
+            raise ElementClickInterceptedException("verification overlay")
+        confirm.click.side_effect = blocked
+        page.button = lambda selectors: submit if selectors == ("#submitOrder_id",) else confirm
+        result = page.regular(Mock(), intent())
+        self.assertEqual(result.status, "verification")
+        confirm.click.assert_called_once()
+
     def test_confirmation_still_completes_when_stop_is_requested(self):
         page = self._page()
         state = {"stopped": False}
@@ -438,6 +483,14 @@ class RegularConfirmationTests(unittest.TestCase):
         result = page.regular(Mock(), intent())
         self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
         page.reconcile.assert_called_once()
+
+    def test_active_official_queue_does_not_navigate_away_on_wait_timeout(self):
+        page = self._page()
+        page.snapshot = lambda: {"processing": True}
+        page.reconcile = Mock()
+        result = page._post_submit(intent(), True)
+        self.assertEqual(result.status, "unknown")
+        page.reconcile.assert_not_called()
 
     def test_pending_dialog_reports_actionable_verification_without_navigation(self):
         page = self._page()

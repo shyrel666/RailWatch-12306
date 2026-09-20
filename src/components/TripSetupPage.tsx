@@ -188,7 +188,7 @@ export function TripSetupPage({
     const accepted = await confirm(
       key === "auto_submit" ? "启用自动提交" : "启用自动候补",
       key === "auto_submit"
-        ? "自动提交可在发现车票后自动进入订单流程。请确认是否继续。"
+        ? "启用后将按设置的车次、日期、乘车人和席别自动提交订单，并自动点击官方弹窗的确认按钮；核验与支付仍需人工完成。"
         : "自动候补可在无票时自动提交候补订单。请确认是否继续。",
     );
     update({ [key]: accepted });
@@ -666,7 +666,7 @@ export function TripSetupPage({
               <RiskToggle
                 checked={config.auto_submit}
                 title={config.auto_submit ? "自动提交已启用" : "自动提交关闭"}
-                description="开启时需要确认；开启后命中车票可能自动进入订单流程。"
+                description="开启后按设置的目标自动提交订单并确认，无需人工点击确认；核验与支付需人工完成。"
                 onChange={(checked) =>
                   void guardedAutomation("auto_submit", checked)
                 }

@@ -19,7 +19,7 @@
 </div>
 
 > [!IMPORTANT]
-> **v0.3.7 的交易自动化仍为实验性功能。** 真实账号下单与支付流程尚待人工验收。RailWatch 不是 12306 官方产品，不保证抢票成功或候补兑现；登录核验和支付须由你在官方页面完成。
+> **v0.4.0 的交易自动化仍为实验性功能。** 自动化回归使用本地页面验证，实际订单状态以官方页面为准。RailWatch 不是 12306 官方产品，不保证抢票成功或候补兑现；登录核验和支付须由你在官方页面完成。
 
 <p align="center">
   <a href="#preview">界面预览</a> ·
@@ -53,7 +53,7 @@
 | **订单跟踪与恢复** | 区分预订待支付、候补待支付、生效和兑现；保存提交意图，重启后可继续核对原订单。 |
 | **提醒与人工接管** | 需要支付或核验时发出桌面与声音提醒；结果未知时暂停，避免盲目重复提交。 |
 
-自动提交与自动候补默认关闭。启用后，提交前会回读目标车次、日期、区间、席别和乘客；候补还会核对截止时间及额外选项。**发现现票、点击提交，都不等于订单已经创建。**
+自动提交与自动候补默认关闭。启用后，提交前会回读目标车次、日期、区间、席别和乘客；普通订单核对通过后会自动点击“提交订单”，等待官方弹窗的确认按钮启用后自动点击“确认”，无需人工确认订单；候补还会核对截止时间及额外选项。核验与支付仍需人工完成。**发现现票、点击提交，都不等于订单已经创建。**
 
 <a id="download"></a>
 
@@ -167,7 +167,7 @@ python -m pip install pyinstaller
 npm run package
 ```
 
-也可使用一键脚本 `.\package-windows.cmd 0.3.7`。该脚本会设置 npm 版本号并清理旧 `release/` 输出；维护新版本时需同步核对 `pyproject.toml` 和更新日志。
+也可使用一键脚本 `.\package-windows.cmd 0.4.0`。该脚本会设置 npm 版本号并清理旧 `release/` 输出；维护新版本时需同步核对 `pyproject.toml` 和更新日志。
 
 构建结果位于 `release/`。GitHub 的版本标签推送会触发 [Windows 打包工作流](https://github.com/shyrel666/RailWatch-12306/actions/workflows/package-windows.yml)，将安装程序、`.blockmap` 和 `latest.yml` 发布到对应 Release。
 
@@ -202,7 +202,7 @@ flowchart LR
 
 | 你想了解 | 入口 |
 | --- | --- |
-| 当前版本变化 | [更新日志](CHANGELOG.md) · [v0.3.7 发布说明](docs/releases/v0.3.7.md) |
+| 当前版本变化 | [更新日志](CHANGELOG.md) · [v0.4.0 发布说明](docs/releases/v0.4.0.md) |
 | 交易行为、恢复规则及实测限制 | [交易可靠性实现与验收记录](docs/transaction-reliability.md) |
 | 如何开发和提交改进 | [贡献指南](CONTRIBUTING.md) |
 | 发布前需要检查什么 | [发布检查清单](docs/RELEASE_CHECKLIST.md) |

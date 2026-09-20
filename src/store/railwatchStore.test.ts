@@ -2,6 +2,14 @@ import { describe, expect, test } from "vitest";
 import { createRailWatchStore } from "./railwatchStore";
 
 describe("railwatchStore", () => {
+  test("matched order clears an old verification prompt while uncertain orders retain it", () => {
+    const store = createRailWatchStore();
+    store.getState().applyHumanAction({ title: "需要人工操作", message: "存在未识别的订单提示" });
+    store.getState().applyState({ ...store.getState().status, order: { status: "unknown", recovery_required: true } });
+    expect(store.getState().lastHumanAction).not.toBeNull();
+    store.getState().applyState({ ...store.getState().status, order: { status: "pending_payment", order_id: "E123456", recovery_required: false } });
+    expect(store.getState().lastHumanAction).toBeNull();
+  });
   test("applies runtime info and bridge state without changing feature names", () => {
     const store = createRailWatchStore();
 

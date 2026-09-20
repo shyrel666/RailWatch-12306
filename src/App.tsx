@@ -94,6 +94,9 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
           break;
         case "state":
           state.applyState(event.payload as RailWatchStatus);
+          if (state.lastHumanAction && !railwatchStore.getState().lastHumanAction) {
+            notification.destroy("railwatch-human-action");
+          }
           break;
         case "results":
           state.applyResults(event.payload as { rows: QueryResultRow[] });

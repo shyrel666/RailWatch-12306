@@ -163,7 +163,10 @@ export function createRailWatchStore() {
       if (incoming && get().retiredRuns.includes(incoming)) return;
       if (incoming && incoming === current && (status.task?.sequence ?? 0) < (get().status.task?.sequence ?? 0)) return;
       const changed = Boolean(incoming && incoming !== current);
+      const orderResolved = Boolean(status.order?.order_id && !status.order.recovery_required &&
+        ["pending_payment", "active", "fulfilled"].includes(status.order.status));
       set({ status, hits: status.hits,
+        ...(orderResolved ? { lastHumanAction: null } : {}),
         ...(changed ? { monitorLoops: 0, results: [], lastHumanAction: null,
           retiredRuns: current ? [...get().retiredRuns, current].slice(-1000) : get().retiredRuns } : {}),
       });

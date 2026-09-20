@@ -113,7 +113,7 @@ class DeviceTrackerWiringReviewTests(unittest.TestCase):
                 bridge._ensure_driver()
             self.assertIsNotNone(bridge.device_id_protector)
             self.assertIs(bridge.device_id_protector.driver, driver)
-            driver.execute_async_script.return_value = {"data": {"flag": True}}
+            driver.execute_async_script.return_value = "ok"
             bridge.check_login()
             self.assertEqual(bridge.device_id_protector.saved_device_id, "initial-device-secret")
             driver.get_cookies.return_value = [{"name": "RAIL_DEVICEID", "value": "changed-device-secret"}]

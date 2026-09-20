@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from urllib.parse import urlparse
+from selenium.common.exceptions import ElementClickInterceptedException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from railwatch_orders import OrderResult
 
 
 SNAPSHOT_JS = r"""
-const visible = e => !!(e && e.getClientRects().length);
+const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).visibility === 'visible');
 const txt = e => (e?.innerText || '').replace(/\s+/g,' ').trim();
 const all = (s,r=document) => [...r.querySelectorAll(s)].filter(visible);
 const val = (s,r=document) => {const e=r.querySelector(s);return e?.value || txt(e);};
@@ -23,7 +25,7 @@ function passengers(root) {
   const fields=all('input[id^="passenger_name_"],input.name-input',root).map(e=>e.value.trim()).filter(Boolean);
   if(fields.length) return fields;
   const names=[];
-  for(const table of all('table',root)) {
+  for(const table of (root.matches?.('table') ? [root] : all('table',root))) {
     const headers=[...table.querySelectorAll('th')].map(txt);
     const i=headers.findIndex(h=>h==='姓名'||h==='乘车人');
     if(i<0) continue;
@@ -54,7 +56,26 @@ const orders=all('.order-item').map(root=>{
  return {order_id:orderId,kind:header.includes('候补单号')?'alternate':'regular',
    text:body.join(' ').replace(/\s+/g,' ').trim(),state,payment,passengers:passengers(root)};
 });
+// The immediate payment page uses a legacy ticket table, not .order-item cards.
+const paymentTitle = document.querySelector('#show_title_ticket');
+const paymentRows = document.querySelector('#show_ticket_message');
+const paymentTable = paymentRows?.closest('table');
+if (!orders.length && visible(paymentTitle) && visible(paymentRows) && visible(document.querySelector('#payButton')) &&
+    !visible(document.querySelector('#show_title_ticket_fc'))) {
+  const ids = [...new Set([...txt(document.body).matchAll(/订单号(?:码)?\s*[：:]\s*([A-Za-z0-9]+)/g)].map(m=>m[1]))];
+  const headers = [...(paymentTable?.querySelectorAll('th') || [])].map(txt);
+  const seatIndex = headers.findIndex(h=>h==='席别');
+  const seats = seatIndex < 0 ? [] : all('tr',paymentRows).map(row=>txt(row.querySelectorAll('td')[seatIndex])).filter(Boolean);
+  if (ids.length === 1 && paymentTable && seats.length) orders.push({
+    order_id:ids[0], kind:'regular', checkout:true, text:txt(paymentTitle),
+    state:'待支付', payment:true, passengers:passengers(paymentTable), seat_names:seats,
+  });
+}
 const dialogs=all('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up-box').map(txt).filter(Boolean);
+// The official post-confirmation progress dialog is not an .order-queue.
+const officialProgress = all('#orderResultInfo_id .tit').some(e =>
+ /^(?:正在处理[，,]请稍候[。.]?|订单已经提交[，,](?:系统正在处理中[，,]请稍等[。.]?|(?:预计等待时间超过30分钟|最新预估等待时间.+)[，,]请耐心等待[。.]?))$/.test(txt(e))) &&
+ all('#iamge_status_id.i-work,#iamge_status_id.i-queue').length > 0;
 return {url:location.href, orders, dialogs, details,
  regular:txt(document.querySelector('#ticket_info')||document.querySelector('#ticket_tit_id')), passengers:passengers(document),
  seats:all('select[id^="seatType_"]').map(e=>e.selectedOptions[0]?.textContent.trim()||''),
@@ -66,7 +87,7 @@ return {url:location.href, orders, dialogs, details,
  formReady:visible(document.querySelector('#normal_passenger_id')) || visible(document.querySelector('#passenge_list')),
  confirmation:visible(document.querySelector('#qr_submit_id')),
  verification:all('#nc_1_n1z,.nc_scale,.slide-verify,#randCode,#J-loginImg').length>0,
- processing:all('.order-queue').some(e=>/排队|处理中/.test(txt(e))) };
+ processing:officialProgress || all('.order-queue').some(e=>/排队|处理中/.test(txt(e))) };
 """
 
 SELECT_PASSENGERS_JS = r"""
@@ -109,6 +130,32 @@ const picked = targets.slice(0,count);
 for (const choice of choices) if (selected(choice) !== picked.includes(choice)) choice.click();
 const actual = choices.filter(selected);
 return actual.length === count && actual.every(e => picked.includes(e));
+"""
+
+# Observe the DOM event, independently of WebDriver's command acknowledgement.
+# The marker belongs to RailWatch, never to 12306's private application state.
+CONFIRM_RECEIPT_JS = r"""
+const button = document.querySelector('#qr_submit_id');
+const token = arguments[0], action = arguments[1];
+if (!button) return null;
+if (action === 'observe') {
+  const receipt = {token, delivered:false};
+  button.__railwatchClickReceipt = receipt;
+  button.addEventListener('click', () => { receipt.delivered = true; }, {capture:true, once:true});
+  return true;
+}
+const receipt = button.__railwatchClickReceipt;
+if (!receipt || receipt.token !== token) return null;
+if (action === 'read') return receipt.delivered;
+if (action === 'dispatch' && !receipt.delivered && button.isConnected &&
+    button.getClientRects().length && getComputedStyle(button).visibility === 'visible' &&
+    button.classList.contains('btn92s') && !button.classList.contains('btn92') &&
+    !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+  receipt.delivered = true;
+  HTMLElement.prototype.click.call(button);
+  return true;
+}
+return null;
 """
 
 
@@ -155,6 +202,13 @@ def record_matches(record, intent):
     # Prefixed train codes must form one combination. Plain numbers elsewhere in
     # an order (fares, coach numbers) are not additional train codes.
     trains = {value for value in trains if value[0].isalpha() or value == intent.train_code}
+    if record.get("checkout"):
+        return (record.get("kind") == intent.kind == "regular" and train_token(text, intent.train_code)
+                and trains == {intent.train_code} and dates == {intent.date}
+                and all(form_token(text, station, "站") for station in (intent.from_station, intent.to_station))
+                and text.index(intent.from_station) < text.index(intent.to_station)
+                and sorted(record.get("passengers", [])) == sorted(intent.passengers)
+                and [seat_label(value) for value in record.get("seat_names", [])] == [intent.seat] * len(intent.passengers))
     seats = {value for value in ("二等座", "一等座", "商务座", "特等座", "无座", "硬座", "软座", "硬卧", "软卧", "高级软卧", "动卧") if contains_token(text, value)}
     return (record.get("kind") == intent.kind and train_token(text, intent.train_code)
             and trains == {intent.train_code} and dates == {intent.date} and seats == {intent.seat}
@@ -241,6 +295,14 @@ class OrderPage:
             try:
                 for element in self.driver.find_elements(By.CSS_SELECTOR, selector):
                     if element.is_displayed() and element.is_enabled() and element.get_attribute("aria-disabled") != "true":
+                        if selector == "#qr_submit_id":
+                            # The official control is an anchor: WebDriver calls
+                            # it enabled even while 12306 has unbound its handler.
+                            # passengerInfo_js.js binds the handler before switching
+                            # from the waiting class btn92 to the ready class btn92s.
+                            classes = (element.get_attribute("class") or "").split()
+                            if "btn92s" not in classes or "btn92" in classes:
+                                continue
                         return element
             except Exception:
                 continue
@@ -358,6 +420,51 @@ class OrderPage:
             return result if result.status != "unknown" else None
         return self.poll(terminal, timeout) or self.result(intent, submitted=submitted)
 
+    def _click_regular_confirmation(self, confirm, intent):
+        """Retry only clicks rejected before dispatch; ambiguous receipts are observed."""
+        def click():
+            nonlocal confirm
+            if confirm is None:
+                result = self.result(intent, submitted=True)
+                if result.status != "unknown":
+                    return result
+                confirm = self.button(("#qr_submit_id",))
+            if confirm is None:
+                return None
+            token = uuid.uuid4().hex
+            try:
+                observed = self.driver.execute_script(CONFIRM_RECEIPT_JS, token, "observe") is True
+            except Exception:
+                observed = False
+            self.mark("regular_confirm_attempt")
+            try:
+                confirm.click()
+            except (ElementClickInterceptedException, StaleElementReferenceException):
+                # WebDriver rejected the action before it reached the button.
+                # Reacquire after an overlay/DOM update instead of asking the user.
+                confirm = None
+                return None
+            except Exception:
+                self.log("确认购买点击回执异常，将等待并核对订单结果，不自动重复确认。")
+                return True
+            if observed:
+                try:
+                    delivered = self.driver.execute_script(CONFIRM_RECEIPT_JS, token, "read")
+                    if delivered is False:
+                        result = self.result(intent, submitted=True)
+                        if result.status != "unknown":
+                            return result
+                        self.log("浏览器点击未触发确认按钮，正在直接触发该按钮的点击事件。")
+                        delivered = self.driver.execute_script(CONFIRM_RECEIPT_JS, token, "dispatch")
+                    if delivered is True:
+                        self.mark("regular_confirm_dispatched")
+                        self.log("确认按钮点击事件已触发，正在等待官方订单结果。")
+                except Exception:
+                    self.log("确认按钮事件回读失败，将核对订单结果，不重复点击。")
+            return True
+
+        return click() or self.poll(click, timeout=5, ignore_stop=True)
+
     def _post_submit(self, intent, confirmed_clicked):
         """Resolve the outcome after the official submit/confirm step.
 
@@ -372,6 +479,8 @@ class OrderPage:
         if self.snapshot().get("confirmation"):
             return OrderResult("verification",
                                "官方确认弹窗仍在等待：请在官方页面点击“确认”，然后回到监控页点击“继续处理”核对订单")
+        if self.snapshot().get("processing"):
+            return result  # Do not navigate away while the official queue is active.
         if confirmed_clicked and not self.stop():
             reconciled = self.reconcile(intent, navigate=True)
             if reconciled.status != "unknown":
@@ -430,7 +539,9 @@ class OrderPage:
             # The submission is already in flight: keep waiting for the official
             # dialog even across a stop request, so the grab window is spent on
             # completing the order instead of abandoning a submitted form.
-            confirm = self.poll(confirm_or_result, ignore_stop=True)
+            # The official dialog may arrive after the initial server-side
+            # checks. Keep the entire wait actionable, not just its first 10s.
+            confirm = self.poll(confirm_or_result, timeout=30, ignore_stop=True)
             if isinstance(confirm, OrderResult): return confirm
             confirmed_clicked = False
             if confirm is None:
@@ -450,13 +561,11 @@ class OrderPage:
                 self.log("官方确认弹窗已出现，直接点击“确认”提交订单。")
                 if self.stop():
                     self.log("已请求停止，但官方确认弹窗已出现：仍完成本次确认，之后只需人工支付。")
-                confirmed_clicked = True  # An attempted click may already have reached the server.
-                try:
-                    confirm.click()  # Never repeat an ambiguous confirmation click.
-                except Exception:
-                    # A visible button does not prove rejection: the request or
-                    # DOM update may still be pending. Only observe/reconcile.
-                    self.log("确认购买点击回执异常，将等待并核对订单结果，不自动重复确认。")
+                stage = "确认订单"
+                confirmation = self._click_regular_confirmation(confirm, intent)
+                if isinstance(confirmation, OrderResult):
+                    return confirmation
+                confirmed_clicked = confirmation is True
             return self._post_submit(intent, confirmed_clicked)
         except Exception as exc:
             # Exception text can contain passenger data and browser internals.

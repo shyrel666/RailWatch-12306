@@ -179,8 +179,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         class FakeDriver:
+            def set_script_timeout(self, value): pass
             def execute_async_script(self, script):
-                return {"data": {"flag": True}}
+                return "ok"
 
         bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
         bridge.driver = FakeDriver()
@@ -209,8 +210,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             def execute_script(self, script):
                 return {}
 
+            def set_script_timeout(self, value): pass
             def execute_async_script(self, script):
-                return {"data": {"flag": True}}
+                return "ok"
 
         bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
         bridge.driver = PromiseStyleDriver()
@@ -218,6 +220,26 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         state = bridge.check_login()
 
         self.assertTrue(state["login_ready"])
+
+    def test_login_check_reports_expired_unknown_and_closed_sessions(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_query import LOGIN_CHECK_JS
+        from unittest.mock import Mock
+        from selenium.common.exceptions import InvalidSessionIdException
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = RailWatchBridge(tmp)
+            for reply, expected in [("expired", "未完成或已失效"), ("unknown", "暂时无法确认")]:
+                bridge.driver = Mock()
+                bridge.driver.execute_async_script.return_value = reply
+                state = bridge.check_login()
+                self.assertFalse(state["login_ready"])
+                self.assertIn(expected, state["status_message"])
+                bridge.driver.execute_async_script.assert_called_once_with(LOGIN_CHECK_JS)
+                bridge.driver.set_script_timeout.assert_called_once_with(5)
+            bridge.driver.execute_async_script.side_effect = InvalidSessionIdException()
+            state = bridge.check_login()
+            self.assertIn("浏览器已关闭", state["status_message"])
+            self.assertIsNone(bridge.driver)
 
     def test_analyze_query_refuses_while_monitoring(self):
         from railwatch_bridge import RailWatchBridge
@@ -580,8 +602,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         class FakeDriver:
+            def set_script_timeout(self, value): pass
             def execute_async_script(self, script):
-                return {"data": {"flag": True}}
+                return "ok"
 
         class FakeDeviceIdTracker:
             def __init__(self):

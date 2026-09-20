@@ -563,22 +563,20 @@ class RailWatchBridge:
             return self.emit_state(self.state.with_login_verified(False, "请先打开登录页。"))
         try:
             with self._driver_lock:
-                result = self.driver.execute_async_script(
-                    """
-                    const done = arguments[arguments.length - 1];
-                    fetch('/otn/login/checkUser', {credentials: 'include'})
-                      .then(response => response.json())
-                      .then(data => done(data))
-                      .catch(() => done({data: {flag: false}}));
-                    """
-                )
-            ready = bool(((result or {}).get("data") or {}).get("flag"))
-            if ready:
+                self.driver.set_script_timeout(5)
+                result = self.driver.execute_async_script(LOGIN_CHECK_JS)
+            if result == "ok":
                 self._record_device_id_after_login()
                 self.log("12306 登录状态已验证。", "SUCCESS")
                 return self.emit_state(self.state.with_login_verified(True, "登录已验证"))
-            return self.emit_state(self.state.with_login_verified(False, "12306 登录未完成。"))
+            message = ("12306 登录未完成或已失效，请在官方页面重新登录。" if result == "expired"
+                       else "暂时无法确认登录状态，请检查浏览器是否停留在12306页面及网络连接后重试。")
+            self.log(message, "WARN")
+            return self.emit_state(self.state.with_login_verified(False, message))
         except Exception as exc:
+            if is_session_lost(exc):
+                self._release_driver()
+                return self.emit_state(self.state.with_login_verified(False, "浏览器已关闭，请先打开登录页。"))
             return self.emit_state(self.state.with_login_verified(False, f"登录状态检查失败: {exc}"))
 
     @idle_browser_command

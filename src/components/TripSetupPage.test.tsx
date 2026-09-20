@@ -86,7 +86,7 @@ describe("TripSetupPage", () => {
 
     await user.click(screen.getByText("自动化", { selector: "h2" }));
     const autoSubmitSwitch = screen.getByRole("switch", {
-      name: /自动提交关闭.*开启时需要确认/,
+      name: /自动提交关闭.*无需人工点击确认/,
     });
     await user.click(autoSubmitSwitch);
 

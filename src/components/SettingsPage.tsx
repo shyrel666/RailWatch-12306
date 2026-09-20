@@ -1,4 +1,5 @@
 import { Button } from "antd";
+import { useState } from "react";
 import {
   Activity,
   Cpu,
@@ -15,6 +16,7 @@ import { useRailWatchStore } from "../store/useRailWatchStore";
 import { formatDataDirFreeSpace } from "../lib/formatSystemStatus";
 import type { CommandRunner } from "./componentTypes";
 import { ThemeControl } from "./ThemeControl";
+import type { RailWatchStatus } from "../types";
 
 export function SettingsPage({
   busy,
@@ -24,6 +26,24 @@ export function SettingsPage({
   runCommand: CommandRunner;
 }) {
   const runtime = useRailWatchStore((state) => state.runtime);
+  const loginReady = useRailWatchStore((state) => state.status.login_ready);
+  const [checkingLogin, setCheckingLogin] = useState(false);
+  const [loginResult, setLoginResult] = useState<{ ready: boolean; message: string } | null>(null);
+  const checkLogin = async () => {
+    setCheckingLogin(true);
+    setLoginResult(null);
+    try {
+      const result = await runCommand<RailWatchStatus>("checkLogin");
+      setLoginResult({
+        ready: result?.login_ready === true,
+        message: result?.status_message || "检查未完成，请查看错误提示后重试。",
+      });
+    } catch (error) {
+      setLoginResult({ ready: false, message: error instanceof Error ? error.message : "登录检查失败，请重试。" });
+    } finally {
+      setCheckingLogin(false);
+    }
+  };
   const health = [
     {
       icon: Globe,
@@ -117,18 +137,22 @@ export function SettingsPage({
           <div>
             <strong>12306 登录</strong>
             <p>在官方页面完成登录后，检查当前会话。</p>
+            <p role="status" aria-live="polite" className={checkingLogin ? "" : (loginResult?.ready ?? loginReady) ? "health-ok" : "health-warning"}>
+              {checkingLogin ? "正在检查12306登录状态…" : loginResult?.message || (loginReady ? "登录已验证" : "尚未检查当前登录状态")}
+            </p>
           </div>
           <div className="button-row">
             <Button
               icon={<LogIn size={15} />}
               loading={busy === "openLogin"}
-              onClick={() => void runCommand("openLogin")}
+              disabled={checkingLogin}
+              onClick={() => { setLoginResult(null); void runCommand("openLogin"); }}
             >
               打开登录
             </Button>
             <Button
-              loading={busy === "checkLogin"}
-              onClick={() => void runCommand("checkLogin")}
+              loading={checkingLogin || busy === "checkLogin"}
+              onClick={() => void checkLogin()}
             >
               检查登录
             </Button>

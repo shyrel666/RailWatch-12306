@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { railwatchApi } from "../lib/railwatchApi";
@@ -10,6 +10,7 @@ import {
 } from "../store/railwatchStore";
 import { SettingsPage } from "./SettingsPage";
 import type { CommandRunner } from "./componentTypes";
+import type { RailWatchStatus } from "../types";
 
 function resetStore() {
   railwatchStore.setState({
@@ -32,6 +33,31 @@ describe("SettingsPage", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  test("login check shows progress and its returned result", async () => {
+    let finish!: (value: RailWatchStatus) => void;
+    const runCommand = vi.fn(() => new Promise<RailWatchStatus>((resolve) => { finish = resolve; }));
+    render(<SettingsPage busy={null} runCommand={runCommand as CommandRunner} />);
+    await userEvent.click(screen.getByRole("button", { name: /检查登录/ }));
+    expect(runCommand).toHaveBeenCalledWith("checkLogin");
+    expect(screen.getByRole("status").textContent).toContain("正在检查");
+    await act(async () => finish({ ...defaultStatus, login_ready: true, status_message: "登录已验证" }));
+    expect(screen.getByRole("status").textContent).toBe("登录已验证");
+  });
+
+  test.each(["请先打开登录页。", "暂时无法确认登录状态，请检查网络后重试。"])("shows unsuccessful login result: %s", async (text) => {
+    const runCommand = vi.fn(async () => ({ ...defaultStatus, login_ready: false, status_message: text }));
+    render(<SettingsPage busy={null} runCommand={runCommand as CommandRunner} />);
+    await userEvent.click(screen.getByRole("button", { name: /检查登录/ }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe(text));
+  });
+
+  test("a failed command does not leave login checking indefinitely", async () => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    render(<SettingsPage busy={null} runCommand={runCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: /检查登录/ }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("检查未完成"));
   });
 
   test("shows local runtime data and separated maintenance actions", () => {

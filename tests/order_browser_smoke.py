@@ -46,6 +46,129 @@ class OrderBrowserTests(unittest.TestCase):
         self.js("fixture.record('已支付')")
         self.assertEqual(self.page.result(self.intent, known_id="E123456").status, "fulfilled")
 
+    def test_official_processing_dialog_waits_for_matching_order(self):
+        self.js("""
+          const submit=el('submitOrder_id').onclick;
+          el('submitOrder_id').onclick=()=>{
+            submit();
+            el('qr_submit_id').onclick=()=>{
+              fixture.confirmClicks++;
+              el('dialog').innerHTML='<div id="transforNotice_id" class="up-box"><i id="iamge_status_id" class="icon i-work"></i><div id="orderResultInfo_id"><div class="tit">正在处理，请稍候。</div><p>查看订单处理情况，请点击未完成订单</p></div></div>';
+              setTimeout(()=>record(),600);
+            };
+          };
+        """)
+        self.page.reconcile = Mock()
+        result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
+        self.page.reconcile.assert_not_called()
+
+    def test_immediate_payment_table_requires_order_identity_and_stays_on_page(self):
+        self.js("""
+          const submit=el('submitOrder_id').onclick;
+          el('submitOrder_id').onclick=()=>{
+            submit();
+            el('qr_submit_id').onclick=()=>{
+              fixture.confirmClicks++;
+              el('dialog').classList.add('hidden');
+              el('regular').classList.add('hidden');
+              el('records').innerHTML='<p>订单号：E123456</p><div id="show_title_ticket">2026-09-10（周四）G101次北京站（09:29开）—上海站（19:00到）</div><table><thead><tr><th>姓名</th><th>席别</th></tr></thead><tbody id="show_ticket_message"><tr><td>张三</td><td>二等座</td></tr></tbody></table><a id="payButton">网上支付</a>';
+            };
+          };
+        """)
+        self.page.reconcile = Mock()
+        result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+        self.assertEqual((result.status,result.order_id), ("pending_payment","E123456"))
+        self.page.reconcile.assert_not_called()
+        for change in (replace(self.intent, seat="一等座"), replace(self.intent, passengers=("李四",)), replace(self.intent, date="2026-09-11"), replace(self.intent, train_code="G102")):
+            self.assertEqual(self.page.result(change).status, "unknown")
+        self.js("el('records').insertAdjacentHTML('beforeend','<p>订单号：E999999</p>')")
+        self.assertEqual(self.page.result(self.intent).status, "unknown")
+
+    def test_official_queue_and_hidden_dialogs_are_not_unknown_prompts(self):
+        for title in ("订单已经提交，系统正在处理中，请稍等。", "订单已经提交，预计等待时间超过30分钟，请耐心等待。", "订单已经提交，最新预估等待时间10秒，请耐心等待。"):
+            self.js("""el('dialog').innerHTML='<i id="iamge_status_id" class="icon i-queue"></i><div id="orderResultInfo_id"><div class="tit"></div></div>';show('dialog');document.querySelector('.tit').textContent=arguments[0];""", title)
+            result = self.page.result(self.intent, submitted=True)
+            self.assertEqual(result.status, "unknown")
+            self.assertIn("仍在处理", result.reason)
+        self.js("el('dialog').style.visibility='hidden'")
+        snap = self.page.snapshot()
+        self.assertEqual(snap['dialogs'], [])
+        self.assertFalse(snap['processing'])
+
+    def test_official_anchor_waits_for_delayed_handler_binding_before_click(self):
+        # Official passengerInfo_js.js unbinds click and uses btn92 while its
+        # timer runs; only after binding the handler does it switch to btn92s.
+        self.js("""
+          const submit=el('submitOrder_id').onclick;
+          fixture.nativeConfirmClicks=0;
+          el('submitOrder_id').onclick=()=>{
+            submit();
+            const button=el('qr_submit_id'), handler=button.onclick;
+            button.onclick=null;
+            button.className='btn92';
+            button.addEventListener('click',()=>fixture.nativeConfirmClicks++);
+            setTimeout(()=>{button.onclick=handler;button.className='btn92s';},1200);
+          };
+        """)
+        original_wait = self.page.wait_result
+        self.page.wait_result = lambda intent, submitted=True, timeout=10: original_wait(
+            intent, submitted=submitted, timeout=0.2)
+        result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.nativeConfirmClicks,fixture.confirmClicks]"), [1, 1, 1])
+
+    def test_official_disabled_anchor_never_receives_a_confirmation_click(self):
+        self.js("""
+          const submit=el('submitOrder_id').onclick;
+          fixture.nativeConfirmClicks=0;
+          el('submitOrder_id').onclick=()=>{
+            submit();
+            const button=el('qr_submit_id');
+            button.onclick=null;
+            button.className='btn92';
+            button.addEventListener('click',()=>fixture.nativeConfirmClicks++);
+          };
+        """)
+        original_poll = self.page.poll
+        self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
+            predicate, min(timeout, 0.2), ignore_stop=ignore_stop)
+        self.page.regular(self.driver.find_element("id", "book"), self.intent)
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.nativeConfirmClicks,fixture.confirmClicks]"), [1, 0, 0])
+
+    def test_delayed_official_confirmation_submits_without_manual_action(self):
+        self.js("""
+          const submit=el('submitOrder_id').onclick;
+          el('submitOrder_id').onclick=()=>setTimeout(()=>{
+            submit();
+            el('dialog').insertAdjacentHTML('afterbegin',
+              '<h3>请核对以下信息</h3><table><tr><th>姓名</th></tr><tr><td>张三</td></tr></table>');
+            el('qr_submit_id').innerText='确认';
+          }, 11000);
+        """)
+        result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
+
+    def test_confirmation_dom_replacement_is_retried_automatically(self):
+        original_button = self.page.button
+        replaced = []
+        def button(selectors):
+            found = original_button(selectors)
+            if found and selectors == ("#qr_submit_id",) and not replaced:
+                self.js("""
+                  const old=el('qr_submit_id'), fresh=old.cloneNode(true);
+                  fresh.onclick=old.onclick;
+                  old.replaceWith(fresh);
+                """)
+                replaced.append(True)
+            return found
+        self.page.button = button
+        result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
+
     def test_priced_seat_and_official_train_station_suffixes_submit_once(self):
         self.js("""
           el('ticket_info').innerText='2026-09-10（周四） G101次 北京站（09:29开）—上海站（19:00到）';
@@ -269,7 +392,7 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
         self.assertTrue(any("仍完成本次确认" in message for message in messages))
 
-    def test_unconfirmed_dialog_keeps_page_and_requests_manual_confirm(self):
+    def test_swallowed_native_click_dispatches_confirmation_automatically(self):
         self.js("fixture.mode='normal'")
         original_poll = self.page.poll
         self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
@@ -284,11 +407,25 @@ class OrderBrowserTests(unittest.TestCase):
         self.page.button = button
         self.page.reconcile = Mock()
         result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
-        self.assertEqual(result.status, "verification")
-        self.assertIn("确认", result.reason)
-        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 0])
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
         self.assertIn("orders.html", self.driver.current_url)
         self.page.reconcile.assert_not_called()
+
+    def test_delivered_click_without_order_is_not_dispatched_again(self):
+        self.js("""
+          const submit=el('submitOrder_id').onclick;
+          el('submitOrder_id').onclick=()=>{
+            submit();
+            el('qr_submit_id').onclick=()=>{fixture.confirmClicks++;};
+          };
+        """)
+        original_poll = self.page.poll
+        self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
+            predicate, min(timeout, 0.2), ignore_stop=ignore_stop)
+        result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+        self.assertEqual(result.status, "verification")
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
 
     def test_relative_deadline_selects_offered_equivalent_and_reads_back(self):
         self.js("document.querySelector('#date_box li').innerText='开车前1小时'")
