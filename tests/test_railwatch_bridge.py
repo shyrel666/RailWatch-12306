@@ -1166,8 +1166,10 @@ class DriverLaunchRecoveryTests(unittest.TestCase):
 function Get-CimInstance { param($ClassName, $Filter) $items = $env:RAILWATCH_TEST_PROCESSES | ConvertFrom-Json; foreach ($item in $items) { $item } }
 function Stop-Process { param($Id, [switch]$Force, $ErrorAction) Write-Output "matched:$Id" }
 '''
+            # Include Windows PowerShell startup time on shared CI runners.
+            # Keep a finite test deadline without changing the runtime timeout.
             result = subprocess.run(command[:-1] + [prelude + command[-1]],
-                                    capture_output=True, text=True, timeout=15,
+                                    capture_output=True, text=True, timeout=60,
                                     env={**options["env"], "RAILWATCH_CLEANUP_PROFILE": profile,
                                          "RAILWATCH_TEST_PROCESSES": fake_processes},
                                     creationflags=subprocess.CREATE_NO_WINDOW)
