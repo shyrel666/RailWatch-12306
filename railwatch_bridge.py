@@ -26,7 +26,14 @@ from railwatch_config_contract import (
     validate_config as contract_validate_config,
 )
 from railwatch_notify import NotificationService
-from railwatch_preferences import load_theme_preference, save_theme_preference, normalize_theme
+from railwatch_preferences import (
+    atomic_write_json,
+    load_theme_preference,
+    normalize_theme,
+    protect_local_secret,
+    save_theme_preference,
+    unprotect_local_secret,
+)
 from railwatch_dates import expand_travel_dates, eligible_travel_dates, beijing_now, PRESALE_WINDOW_DAYS
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, AppPhase, RailWatchState, TicketHit
 from railwatch_system import get_app_version, inspect_data_dir, probe_connectivity
@@ -95,6 +102,16 @@ MAX_LOG_ENTRIES = 1000
 MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
 MONITOR_PREWARM_INTERVAL_SECONDS = 30.0
 NOTIFICATION_SETTINGS_FILE = "notification_settings.json"
+NOTIFICATION_SECRET_FIELDS = ("server_chan_key", "email_password", "wecom_webhook_url")
+
+
+def public_notification_settings(settings: dict) -> dict:
+    """Return editable notification settings without crossing secret boundaries."""
+    public = merge_notification_settings(settings)
+    for field in NOTIFICATION_SECRET_FIELDS:
+        public[f"{field}_configured"] = bool(public.get(field))
+        public[field] = ""
+    return public
 
 # 用户可以在应用之外关掉受控的 Chrome 窗口。此时缓存的 WebDriver 句柄看上去仍然可用，
 # 只有真正发一条命令才会发现 ChromeDriver 已经不认识这个会话（invalid session id）。
@@ -243,6 +260,7 @@ class RailWatchBridge:
         self.worker_threads: List[threading.Thread] = []
         self.log_entries: List[Dict[str, str]] = []
         self._log_lock = threading.RLock()
+        self._settings_lock = threading.RLock()
         self.query_results: List[dict] = []
         self.config_manager = ConfigManager(self.data_dir) if CORE_AVAILABLE and ConfigManager else None
         self.chromedriver_path = CHROMEDRIVER_PATH
@@ -369,7 +387,7 @@ class RailWatchBridge:
             "automation_route": AUTOMATION_ROUTE,
             "server_time_offset_seconds": round(self.server_time_sync.offset_seconds, 3),
             "server_time_last_error": self.server_time_sync.last_error,
-            "notification_settings": self.notification_service.settings,
+            "notification_settings": public_notification_settings(self.notification_service.settings),
             "date_policy": {"presale_window_days": PRESALE_WINDOW_DAYS, "timezone": "Asia/Shanghai"},
             "state": state_to_payload(self.state),
         }
@@ -381,6 +399,8 @@ class RailWatchBridge:
             if saved:
                 config.update(saved.to_dict())
                 self.log("已加载保存的设置。", "SUCCESS")
+            elif self.config_manager.last_error:
+                self.log(f"保存的设置无法读取，已使用安全默认值: {self.config_manager.last_error}", "WARN")
         if not self.is_monitoring:
             self.state = self.state.with_safety(bool(config["auto_submit"]), bool(config["auto_alternate"]))
         self.emit_state()
@@ -858,18 +878,29 @@ class RailWatchBridge:
     def load_preferences(self) -> dict:
         return {
             "theme": load_theme_preference(self.data_dir),
-            "notification_settings": self._load_notification_settings(),
+            "notification_settings": public_notification_settings(self.notification_service.settings),
         }
 
     def save_preferences(self, theme: str, notification_settings: Optional[dict] = None) -> dict:
         selected = normalize_theme(theme)
         save_theme_preference(self.data_dir, selected)
         if notification_settings is not None:
-            self._save_notification_settings(notification_settings)
-            self.notification_service.update_settings(notification_settings)
+            incoming = dict(notification_settings)
+            current = self.notification_service.settings
+            # A redacted empty string means "unchanged". Explicit null remains
+            # available to callers that intentionally clear a saved secret.
+            for field in NOTIFICATION_SECRET_FIELDS:
+                incoming.pop(f"{field}_configured", None)
+                if incoming.get(field, object()) == "":
+                    incoming.pop(field)
+                elif field in incoming and incoming[field] is None:
+                    incoming[field] = ""
+            merged = merge_notification_settings({**current, **incoming})
+            self._save_notification_settings(merged)
+            self.notification_service.update_settings(merged)
         return {
             "theme": selected,
-            "notification_settings": self.notification_service.settings,
+            "notification_settings": public_notification_settings(self.notification_service.settings),
         }
 
     def sync_server_time(self) -> dict:
@@ -890,16 +921,31 @@ class RailWatchBridge:
         if not os.path.exists(path):
             return merge_notification_settings()
         try:
-            with open(path, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-            return merge_notification_settings(payload if isinstance(payload, dict) else {})
-        except (OSError, json.JSONDecodeError):
+            with self._settings_lock:
+                with open(path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                payload = payload if isinstance(payload, dict) else {}
+                legacy_plaintext = os.name == "nt" and any(
+                    payload.get(field) and not str(payload[field]).startswith("dpapi:")
+                    for field in NOTIFICATION_SECRET_FIELDS
+                )
+                for field in NOTIFICATION_SECRET_FIELDS:
+                    payload[field] = unprotect_local_secret(payload.get(field, ""))
+                settings = merge_notification_settings(payload)
+                if legacy_plaintext:
+                    self._save_notification_settings(settings)
+                return settings
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            self.log(f"通知设置无法读取，已禁用外部通知通道: {exc}", "WARN")
             return merge_notification_settings()
 
     def _save_notification_settings(self, settings: dict) -> None:
         path = self._notification_settings_path()
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(merge_notification_settings(settings), handle, ensure_ascii=False, indent=2)
+        persisted = merge_notification_settings(settings)
+        for field in NOTIFICATION_SECRET_FIELDS:
+            persisted[field] = protect_local_secret(persisted.get(field, ""))
+        with self._settings_lock:
+            atomic_write_json(path, persisted)
 
     def _monitor_worker(self, config: dict, task=None) -> None:
         task = task or self._task or MonitorTask(config)
@@ -976,6 +1022,10 @@ class RailWatchBridge:
                 self.state = self.state.with_error(f"监控失败: {exc}")
                 self._transition(task, "error")
         finally:
+            try:
+                self.order_journal.flush_telemetry()
+            except Exception as exc:
+                self.log(f"查询遥测写入失败: {exc}", "WARN")
             task.done.set()
             if task.thread is None:
                 self._finish_task(task)

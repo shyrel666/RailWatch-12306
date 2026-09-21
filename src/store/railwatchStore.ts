@@ -101,6 +101,7 @@ export type RailWatchStore = {
   logPaused: boolean;
   eventPanelVisible: boolean;
   applyRuntimeInfo: (runtime: RuntimeInfo) => void;
+  applyRuntimeMetadata: (runtime: RuntimeInfo) => void;
   applyRuntimeLabels: (patch: Partial<Pick<RuntimeInfo, "chromedriver_path" | "chrome_version">>) => void;
   applyState: (status: RailWatchStatus) => void;
   applyLog: (entry: LogEntry) => void;
@@ -148,11 +149,18 @@ export function createRailWatchStore() {
     logPaused: false,
     eventPanelVisible: false,
     applyRuntimeInfo: (runtime) => {
-      set({
-        runtime,
-        status: runtime.state,
-        hits: runtime.state.hits,
-      });
+      const current = get().status;
+      if (current.task?.run_id && !runtime.state.task?.run_id) {
+        set({ runtime: { ...runtime, state: current } });
+        return;
+      }
+      set({ runtime });
+      get().applyState(runtime.state);
+    },
+    applyRuntimeMetadata: (runtime) => {
+      // Periodic health requests can complete after a newer state event. Keep
+      // that event as the authority and refresh only runtime metadata here.
+      set({ runtime: { ...runtime, state: get().status } });
     },
     applyRuntimeLabels: (patch) => {
       set({ runtime: { ...get().runtime, ...patch } });

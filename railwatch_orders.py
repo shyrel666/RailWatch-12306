@@ -21,6 +21,7 @@ STAGES = {
     "dismissed": "已结束本地核对",
 }
 TERMINAL = {"sold_out", "not_submitted", "fulfilled", "cancelled", "expired", "failed", "dismissed"}
+QUERY_TELEMETRY_STAGES = frozenset({"query_click", "query_result"})
 
 
 @dataclass(frozen=True)
@@ -70,10 +71,14 @@ class OrderJournal:
     Connections are short lived so shutdown, export and Windows temporary-directory
     cleanup never depend on GC. SQLite's write lock also protects two app processes.
     """
-    def __init__(self, filename):
+    def __init__(self, filename, *, telemetry_batch_size=64, telemetry_limit=20_000):
         self.filename = str(filename)
         self._resume_guard = threading.RLock()
         self._resume_owner = None
+        self._telemetry_guard = threading.RLock()
+        self._telemetry_batch = []
+        self._telemetry_batch_size = max(1, int(telemetry_batch_size))
+        self._telemetry_limit = max(self._telemetry_batch_size, int(telemetry_limit))
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.executescript("""
@@ -85,7 +90,10 @@ class OrderJournal:
                 CREATE TABLE IF NOT EXISTS order_events (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, intent_id TEXT,
                     stage TEXT NOT NULL, at REAL NOT NULL, monotonic REAL NOT NULL, detail TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS order_events_intent_stage ON order_events(intent_id,stage);
+                CREATE INDEX IF NOT EXISTS order_events_stage_sequence ON order_events(stage,sequence DESC);
             """)
+            self._prune_telemetry(db)
         # An OS lock survives threads but is released on process exit. Only its
         # next owner may retire a crashed recovery claim; submission markers stay.
         lease = self._try_resume_lease()
@@ -227,6 +235,14 @@ class OrderJournal:
                 self._resume_owner = None
 
     def mark(self, run_id, stage, intent_id="", detail=None):
+        # Keep durable transaction markers ordered after any buffered query
+        # telemetry without forcing every query click through SQLite.
+        try:
+            self.flush_telemetry()
+        except sqlite3.Error:
+            # Non-critical diagnostics must never prevent a durable submission
+            # marker from making its own write attempt.
+            pass
         with self.connection() as db:
             if stage in ("regular_submit", "alternate_submit"):
                 db.execute("BEGIN IMMEDIATE")
@@ -237,3 +253,52 @@ class OrderJournal:
             cursor = db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
                                 (run_id, intent_id, stage, time.time(), time.monotonic(), json.dumps(detail or {}, ensure_ascii=False)))
             return cursor.lastrowid
+
+    def record_telemetry(self, run_id, stage, intent_id="", detail=None):
+        """Buffer non-critical query timing events and persist them in batches."""
+        if stage not in QUERY_TELEMETRY_STAGES:
+            raise ValueError("仅查询遥测事件可以批量写入")
+        event = (run_id, intent_id, stage, time.time(), time.monotonic(),
+                 json.dumps(detail or {}, ensure_ascii=False))
+        should_flush = False
+        with self._telemetry_guard:
+            self._telemetry_batch.append(event)
+            if len(self._telemetry_batch) > self._telemetry_limit:
+                self._telemetry_batch = self._telemetry_batch[-self._telemetry_limit:]
+            should_flush = len(self._telemetry_batch) >= self._telemetry_batch_size
+        if should_flush:
+            try:
+                self.flush_telemetry()
+            except sqlite3.Error:
+                return False
+        return True
+
+    def flush_telemetry(self):
+        with self._telemetry_guard:
+            if not self._telemetry_batch:
+                return 0
+            batch, self._telemetry_batch = self._telemetry_batch, []
+        try:
+            with self.connection() as db:
+                db.executemany(
+                    "INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
+                    batch,
+                )
+                self._prune_telemetry(db)
+        except Exception:
+            with self._telemetry_guard:
+                self._telemetry_batch = batch + self._telemetry_batch
+            raise
+        return len(batch)
+
+    def _prune_telemetry(self, db):
+        db.execute(
+            """DELETE FROM order_events
+               WHERE stage IN ('query_click','query_result')
+                 AND sequence <= COALESCE((
+                   SELECT sequence FROM order_events
+                   WHERE stage IN ('query_click','query_result')
+                   ORDER BY sequence DESC LIMIT 1 OFFSET ?
+                 ), -1)""",
+            (self._telemetry_limit,),
+        )

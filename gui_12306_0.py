@@ -20,6 +20,7 @@ import os
 import json
 import urllib.request
 import random
+import threading
 from typing import Optional, List, Dict, Callable, Tuple, Any
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -41,6 +42,7 @@ from railwatch_config_contract import parse_passenger_names
 from railwatch_order_page import OrderPage
 from railwatch_time import ServerTimeSync, get_server_time_sync
 from railwatch_verification import VerificationDetector
+from railwatch_preferences import atomic_write_json
 
 
 def _safe_print(title: str, msg: str) -> None:
@@ -246,25 +248,33 @@ class ConfigManager:
     
     def __init__(self, base_dir: str):
         self.config_path = os.path.join(base_dir, USER_CONFIG_FILE)
+        self._lock = threading.RLock()
+        self.last_error = ""
     
     def save(self, config: QueryConfig) -> bool:
         """保存配置"""
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(config.to_dict(), f, ensure_ascii=False, indent=2)
+            with self._lock:
+                atomic_write_json(self.config_path, config.to_dict())
+            self.last_error = ""
             return True
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             return False
     
     def load(self) -> Optional[QueryConfig]:
         """加载配置"""
         if not os.path.exists(self.config_path):
+            self.last_error = ""
             return None
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            with self._lock:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            self.last_error = ""
             return QueryConfig.from_dict(data)
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             return None
 
 
@@ -630,7 +640,8 @@ class TicketMonitor(BaseHandler):
 
     def _mark(self, stage, detail=None):
         if self.order_journal:
-            self.order_journal.mark(self.run_id, stage, getattr(self, "_intent_id", ""), detail)
+            marker = self.order_journal.record_telemetry if stage in ("query_click", "query_result") else self.order_journal.mark
+            marker(self.run_id, stage, getattr(self, "_intent_id", ""), detail)
 
     def _execute_order(self, hit):
         train, seat, _, row, button, action = hit

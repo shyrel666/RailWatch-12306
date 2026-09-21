@@ -314,7 +314,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         .command<RuntimeInfo>("getRuntimeInfo")
         .then((runtimeInfo) => {
           if (runtimeInfo) {
-            railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
+            railwatchStore.getState().applyRuntimeMetadata(runtimeInfo);
           }
         })
         .catch(() => undefined);

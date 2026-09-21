@@ -9,6 +9,34 @@ from unittest.mock import Mock, patch
 
 
 class RailWatchBridgeContractTests(unittest.TestCase):
+    def test_notification_secrets_are_protected_on_disk_and_redacted_from_renderer(self):
+        from railwatch_bridge import RailWatchBridge
+
+        protect = lambda value: f"protected:{str(value)[::-1]}" if value else ""
+        unprotect = lambda value: str(value).removeprefix("protected:")[::-1]
+        with tempfile.TemporaryDirectory() as temp_dir, \
+            patch("railwatch_bridge.protect_local_secret", side_effect=protect), \
+            patch("railwatch_bridge.unprotect_local_secret", side_effect=unprotect):
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            result = bridge.save_preferences("dark", {
+                "server_chan_enabled": True,
+                "server_chan_key": "send-key",
+                "email_password": "mail-password",
+                "wecom_webhook_url": "https://qyapi.example/secret-hook",
+            })
+            with open(os.path.join(temp_dir, "notification_settings.json"), encoding="utf-8") as handle:
+                persisted = handle.read()
+            self.assertNotIn("mail-password", persisted)
+            self.assertNotIn("secret-hook", persisted)
+            self.assertEqual(result["notification_settings"]["server_chan_key"], "")
+            self.assertTrue(result["notification_settings"]["server_chan_key_configured"])
+
+            bridge.save_preferences("dark", {"server_chan_key": ""})
+            self.assertEqual(bridge.notification_service.settings["server_chan_key"], "send-key")
+            restored = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            self.assertEqual(restored.notification_service.settings["email_password"], "mail-password")
+            self.assertEqual(restored.load_preferences()["notification_settings"]["email_password"], "")
+
     def test_default_config_uses_reliability_strategy_and_preserves_trip_defaults(self):
         from railwatch_bridge import default_config
 

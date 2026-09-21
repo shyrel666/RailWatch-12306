@@ -226,4 +226,43 @@ describe("railwatchStore", () => {
     expect(store.getState().status.hits).toEqual([backendHit]);
     expect(store.getState().hits).toEqual([backendHit]);
   });
+
+  test("periodic runtime metadata cannot roll back a newer monitor state", () => {
+    const store = createRailWatchStore();
+    const active = {
+      ...store.getState().status,
+      monitoring: true,
+      phase: "monitoring" as const,
+      status_message: "第 9 次查询",
+      task: { run_id: "new-run", status: "querying", sequence: 9 },
+    };
+    store.getState().applyState(active);
+
+    store.getState().applyRuntimeMetadata({
+      ...store.getState().runtime,
+      state: {
+        ...store.getState().status,
+        monitoring: false,
+        phase: "idle",
+        status_message: "过期快照",
+        task: undefined,
+      },
+    });
+
+    expect(store.getState().status).toEqual(active);
+    expect(store.getState().runtime.state).toEqual(active);
+
+    store.getState().applyRuntimeInfo({
+      ...store.getState().runtime,
+      state: {
+        ...store.getState().status,
+        monitoring: false,
+        phase: "idle",
+        status_message: "另一份过期快照",
+        task: undefined,
+      },
+    });
+    expect(store.getState().status).toEqual(active);
+    expect(store.getState().runtime.state).toEqual(active);
+  });
 });

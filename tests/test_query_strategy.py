@@ -69,6 +69,17 @@ class QueryStrategyTests(unittest.TestCase):
             with self.subTest(patch_config=patch_config), self.assertRaises(ValueError):
                 validate_config(patch_config)
 
+    def test_config_atomic_write_keeps_last_good_value_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ConfigManager(directory)
+            original = QueryConfig.from_dict(default_config())
+            self.assertTrue(manager.save(original))
+            changed = QueryConfig.from_dict({**default_config(), "from_station_cn": "广州"})
+            with patch("railwatch_preferences.json.dump", side_effect=OSError("disk full")):
+                self.assertFalse(manager.save(changed))
+            self.assertIn("disk full", manager.last_error)
+            self.assertEqual(manager.load().from_station_cn, original.from_station_cn)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -315,6 +315,17 @@ class OrderBrowserTests(unittest.TestCase):
         for changed in [replace(self.intent, seat="一等座"), replace(self.intent, train_code="G102"), replace(self.intent, passengers=("李四",)), replace(self.intent, date="2026-09-11")]:
             self.assertEqual(self.page.result(changed).status, "unknown")
 
+    def test_numeric_train_code_is_read_from_the_train_marker_not_the_fare(self):
+        selected = replace(self.intent, train_code="1461")
+        self.js("""document.getElementById('records').innerHTML=`
+          <div class="order-item"><div class="order-item-hd">订单号：E123456
+          <span class="order-status">待支付</span></div>
+          <p>1462次 2026年9月10日 北京 上海 二等座 ¥1461.0元</p>
+          <div class="passenger-name"><strong title="张三">张三</strong></div></div>`""")
+        self.assertEqual(self.page.result(selected).status, "unknown")
+        self.js("document.querySelector('.order-item p').textContent='1461次 2026年9月10日 北京 上海 二等座 ¥88.0元'")
+        self.assertEqual(self.page.result(selected).status, "pending_payment")
+
     def test_accepted_confirmation_then_transport_failure_still_reads_order_without_retry(self):
         original_button = self.page.button
         def button(selectors):

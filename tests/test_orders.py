@@ -2,6 +2,7 @@
 import tempfile
 import threading
 import unittest
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -95,6 +96,23 @@ class OrderEvidenceTests(unittest.TestCase):
         for changed in (replace(selected, train_code='G130'), replace(selected, from_station='北京'),
                         replace(selected, to_station='成都'), replace(selected, seat='一等座')):
             self.assertEqual(read_with(record['text'], changed).status, 'unknown')
+
+    def test_numeric_train_code_cannot_match_a_fare(self):
+        selected = replace(intent(), train_code="1461")
+        wrong_train = snapshot()
+        wrong_train["orders"][0]["text"] = "1462次 2026-09-10 北京 上海 二等座 张三 ¥1461.0元"
+        self.assertEqual(self.read(wrong_train, selected).status, "unknown")
+
+        matching_train = snapshot()
+        matching_train["orders"][0]["text"] = "1461次 2026-09-10 北京 上海 二等座 张三 ¥88.0元"
+        self.assertEqual(self.read(matching_train, selected).status, "pending_payment")
+
+        structured = snapshot()
+        structured["orders"][0].update({
+            "train_code": "1462",
+            "text": "2026-09-10 北京 上海 二等座 张三 ¥1461.0元",
+        })
+        self.assertEqual(self.read(structured, selected).status, "unknown")
 
     def read(self, value, selected=None, **kwargs):
         driver = Mock()
@@ -229,6 +247,34 @@ class JournalTests(unittest.TestCase):
         for thread in threads: thread.start()
         for thread in threads: thread.join()
         self.assertEqual(len(successes), 1)
+
+    def test_query_telemetry_is_batched_and_bounded_without_pruning_order_evidence(self):
+        journal = OrderJournal(self.path, telemetry_batch_size=3, telemetry_limit=4)
+        journal.record_telemetry("run", "query_click")
+        journal.record_telemetry("run", "query_result")
+        with journal.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM order_events").fetchone()[0], 0)
+        for index in range(5):
+            journal.record_telemetry("run", "query_click", detail={"index": index})
+        journal.flush_telemetry()
+        journal.mark("run", "verification")
+        with journal.connection() as db:
+            telemetry = db.execute(
+                "SELECT COUNT(*) FROM order_events WHERE stage IN ('query_click','query_result')"
+            ).fetchone()[0]
+            evidence = db.execute(
+                "SELECT COUNT(*) FROM order_events WHERE stage='verification'"
+            ).fetchone()[0]
+        self.assertEqual(telemetry, 4)
+        self.assertEqual(evidence, 1)
+
+    def test_telemetry_write_failure_does_not_interrupt_the_query_path(self):
+        journal = OrderJournal(self.path, telemetry_batch_size=1)
+        with patch.object(journal, "flush_telemetry", side_effect=sqlite3.OperationalError("busy")):
+            self.assertFalse(journal.record_telemetry("run", "query_click"))
+            journal.mark("run", "verification")
+        with journal.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM order_events WHERE stage='verification'").fetchone()[0], 1)
 
     def test_bridge_restores_pending_state_without_browser_or_order_replay(self):
         original = intent("alternate")

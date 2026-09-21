@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_submodules
 # selenium >= 4.44 lazy-loads every browser submodule (chrome.options, edge.service, ...)
 # through module __getattr__, so static import analysis never sees them and the frozen
 # app only fails at runtime when the browser is first launched. Force-collect them.
-hiddenimports = collect_submodules("selenium")
+hiddenimports = collect_submodules("selenium") + ["win32crypt"]
 
 
 # The CLI evaluates this spec before adding its directory to the module search

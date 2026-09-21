@@ -2,8 +2,15 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from railwatch_preferences import UI_PREFERENCES_FILE, load_theme_preference, save_theme_preference
+from railwatch_preferences import (
+    UI_PREFERENCES_FILE,
+    load_theme_preference,
+    protect_local_secret,
+    save_theme_preference,
+    unprotect_local_secret,
+)
 
 
 class RailWatchPreferencesTests(unittest.TestCase):
@@ -46,6 +53,21 @@ class RailWatchPreferencesTests(unittest.TestCase):
                 json.dump({"theme": "solarized"}, handle)
 
             self.assertEqual(load_theme_preference(temp_dir), "system")
+
+    def test_failed_atomic_write_preserves_the_previous_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            save_theme_preference(temp_dir, "dark")
+            with patch("railwatch_preferences.json.dump", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    save_theme_preference(temp_dir, "light")
+            self.assertEqual(load_theme_preference(temp_dir), "dark")
+
+    @unittest.skipUnless(os.name == "nt", "DPAPI is available on Windows")
+    def test_windows_dpapi_round_trip_does_not_store_plaintext(self):
+        protected = protect_local_secret("test-secret")
+        self.assertTrue(protected.startswith("dpapi:"))
+        self.assertNotIn("test-secret", protected)
+        self.assertEqual(unprotect_local_secret(protected), "test-secret")
 
 
 if __name__ == "__main__":

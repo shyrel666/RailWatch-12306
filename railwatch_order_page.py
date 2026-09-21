@@ -19,6 +19,12 @@ const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).vi
 const txt = e => (e?.innerText || '').replace(/\s+/g,' ').trim();
 const all = (s,r=document) => [...r.querySelectorAll(s)].filter(visible);
 const val = (s,r=document) => {const e=r.querySelector(s);return e?.value || txt(e);};
+function trainCode(root,fallback='') {
+  const node=root?.querySelector?.('[data-train-code],.train-num,.train-number,.ticket-number');
+  const source=(node?.getAttribute?.('data-train-code')||txt(node)||fallback).trim();
+  return source.match(/(?:^|[^0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})\s*次(?:$|[^0-9A-Za-z])/)?.[1]?.toUpperCase()||
+    source.match(/^([GDCZTKYSL]\d{1,5}|\d{1,5})$/)?.[1]?.toUpperCase()||'';
+}
 function passengers(root) {
   const named=all('.passenger-name strong[title],.name-yichu[title],.passenger-info .name[title]',root).map(e=>e.getAttribute('title').trim());
   if(named.length) return named;
@@ -54,7 +60,8 @@ const orders=all('.order-item').map(root=>{
    if(visible(node.parentElement) && !node.parentElement.closest('.order-item-hd,.order-item-ft')) body.push(node.textContent);
  }
  return {order_id:orderId,kind:header.includes('候补单号')?'alternate':'regular',
-   text:body.join(' ').replace(/\s+/g,' ').trim(),state,payment,passengers:passengers(root)};
+   text:body.join(' ').replace(/\s+/g,' ').trim(),state,payment,passengers:passengers(root),
+   train_code:trainCode(root,body.join(' '))};
 });
 // The immediate payment page uses a legacy ticket table, not .order-item cards.
 const paymentTitle = document.querySelector('#show_title_ticket');
@@ -69,6 +76,7 @@ if (!orders.length && visible(paymentTitle) && visible(paymentRows) && visible(d
   if (ids.length === 1 && paymentTable && seats.length) orders.push({
     order_id:ids[0], kind:'regular', checkout:true, text:txt(paymentTitle),
     state:'待支付', payment:true, passengers:passengers(paymentTable), seat_names:seats,
+    train_code:trainCode(paymentTable,txt(paymentTitle)),
   });
 }
 const dialogs=all('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up-box').map(txt).filter(Boolean);
@@ -197,11 +205,24 @@ def form_token(text, token, suffix):
 def record_matches(record, intent):
     text = record.get("text", "")
     dates = {normalized_date(m[0]) for m in re.finditer(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}", text)}
-    trains = set(re.findall(r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})(?![0-9A-Za-z])",
-                            re.sub(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}(?:日)?|\d{1,2}:\d{2}", "", text)))
-    # Prefixed train codes must form one combination. Plain numbers elsewhere in
-    # an order (fares, coach numbers) are not additional train codes.
-    trains = {value for value in trains if value[0].isalpha() or value == intent.train_code}
+    clean_text = re.sub(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}(?:日)?|\d{1,2}:\d{2}", "", text)
+    structured = str(record.get("train_code", "")).strip().upper()
+    suffixed = {value.upper() for value in re.findall(
+        r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})\s*次(?![0-9A-Za-z])", clean_text, re.I
+    )}
+    if structured:
+        trains = {structured}
+    elif suffixed:
+        trains = suffixed
+    elif intent.train_code[:1].isalpha():
+        # Letter-prefixed codes cannot be confused with fares or carriage/seat
+        # numbers, so old order layouts without a dedicated train field remain
+        # compatible. Numeric-only services fail closed unless marked with 次.
+        trains = {value.upper() for value in re.findall(
+            r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5})(?![0-9A-Za-z])", clean_text, re.I
+        )}
+    else:
+        trains = set()
     if record.get("checkout"):
         return (record.get("kind") == intent.kind == "regular" and train_token(text, intent.train_code)
                 and trains == {intent.train_code} and dates == {intent.date}

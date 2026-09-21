@@ -48,14 +48,17 @@ export type NotificationSettings = {
   sound_loop: boolean;
   server_chan_enabled: boolean;
   server_chan_key: string;
+  server_chan_key_configured?: boolean;
   email_enabled: boolean;
   email_smtp_host: string;
   email_smtp_port: number;
   email_user: string;
   email_password: string;
+  email_password_configured?: boolean;
   email_to: string;
   wecom_webhook_enabled: boolean;
   wecom_webhook_url: string;
+  wecom_webhook_url_configured?: boolean;
 };
 
 export type TicketHit = {

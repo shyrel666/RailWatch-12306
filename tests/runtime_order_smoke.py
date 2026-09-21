@@ -26,6 +26,9 @@ def main():
         requests = [
             {"id": "state", "command": "stopMonitor"},
             {"id": "config", "command": "loadConfig"},
+            {"id": "prefs", "command": "savePreferences", "payload": {
+                "theme": "dark", "notification_settings": {"email_password": "runtime-secret"}
+            }},
             {"id": "start", "command": "startMonitor", "payload": {"config": config, "confirmed": True}},
             {"id": "clear", "command": "clearLocalData", "payload": {"confirmed": True}},
         ]
@@ -46,10 +49,15 @@ def main():
             assert responses["config"]["ok"] is True
             assert responses["config"]["result"]["request_mode"] == "conservative"
             assert responses["config"]["result"]["query_priority"] == "reliability"
+            assert responses["prefs"]["ok"] is True
+            assert responses["prefs"]["result"]["notification_settings"]["email_password"] == ""
+            assert responses["prefs"]["result"]["notification_settings"]["email_password_configured"] is True
+            stored_preferences = (directory / "notification_settings.json").read_text(encoding="utf-8")
+            assert "runtime-secret" not in stored_preferences and "dpapi:" in stored_preferences
             assert responses["start"]["ok"] is False and responses["clear"]["ok"] is False
             assert not (directory / "chrome_profile_12306").exists()
             assert journal.pending()["result"]["order_id"] == "TEST123"
-    print("Packaged runtime: two restarts, SQLite recovery, duplicate-start and clear-data guards passed; no browser/network actions.")
+    print("Packaged runtime: two restarts, SQLite recovery, DPAPI secret protection, duplicate-start and clear-data guards passed; no browser/network actions.")
 
 
 if __name__ == "__main__":
