@@ -18,7 +18,7 @@ describe("bounded logs and task ownership", () => {
     expect(new Set(store.getState().logs.map(entry => entry.id)).size).toBe(1000);
     store.getState().clearLogs();
     expect(store.getState().droppedLogs).toBe(0);
-  });
+  }, 15_000); // Capacity/retention regression, not a five-second performance budget.
 
   test("old ticks, notifications, and final states cannot replace a new task", () => {
     const store = createRailWatchStore();

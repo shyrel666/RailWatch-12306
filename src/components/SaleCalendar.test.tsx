@@ -53,7 +53,10 @@ describe("SaleCalendar", () => {
     render(<SaleCalendar {...props} tripDate="2026-12-31" />);
     await screen.findByText("10:00");
     expect(screen.getByText("乘车日期 · 2026-12-31 · 当前行程")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "刷新起售时间" }));
+    const refresh = screen.getByRole("button", { name: "刷新起售时间" });
+    // The time can render before Ant Design clears its internal loading state.
+    await waitFor(() => expect(refresh.classList.contains("ant-btn-loading")).toBe(false));
+    fireEvent.click(refresh);
     await waitFor(() => expect(railwatchApi.command).toHaveBeenLastCalledWith("stationSaleTimes", { station: "北京", force: true }));
   });
   test("renders failures with an official lookup and no invented sale time", async () => {
