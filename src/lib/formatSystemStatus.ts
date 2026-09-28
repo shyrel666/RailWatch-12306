@@ -40,6 +40,7 @@ const phaseLabels: Record<string, string> = {
 };
 
 export function formatRuntimePhaseLabel(statusMessage: string, phase: string) {
+  if (phase === "order") return statusMessage && statusMessage.length <= 8 ? statusMessage : "订单待核对";
   if (phase === "error") {
     return "需处理";
   }

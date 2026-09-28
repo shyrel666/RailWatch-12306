@@ -37,23 +37,32 @@ class RailWatchRuntime:
     def _write(self, payload: dict) -> None:
         self.writer(payload)
 
-    def handle_line(self, line: str) -> "Future":
+    def _protocol_error(self, request_id=None) -> Future:
+        error = {"message": "无效请求：需要 UTF-8 JSON 对象及有效的 id、command、payload", "class": "ProtocolError"}
+        if isinstance(request_id, str) and 0 < len(request_id) <= 128:
+            self._write({"type": "response", "id": request_id, "ok": False, "error": error})
+        else:
+            self.emit_event({"event": "protocolError", "payload": error})
+        future = Future()
+        future.set_result(None)
+        return future
+
+    def handle_line(self, line: str | bytes) -> "Future":
         try:
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", errors="strict")
             request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            self.emit_event(
-                {
-                    "event": "runtimeError",
-                    "payload": {
-                        "message": f"无效 JSON 输入：{exc}",
-                        "class": exc.__class__.__name__,
-                    },
-                }
-            )
-            return self._executor.submit(lambda: None)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError):
+            return self._protocol_error()
+        if not isinstance(request, dict):
+            return self._protocol_error()
         request_id = request.get("id")
         command = request.get("command")
-        payload = request.get("payload") or {}
+        payload = request.get("payload", {})
+        if (not isinstance(request_id, str) or not 0 < len(request_id) <= 128
+                or not isinstance(command, str) or not 0 < len(command) <= 80
+                or not isinstance(payload, dict)):
+            return self._protocol_error(request_id)
         return self._executor.submit(self._run_command, request_id, command, payload)
 
     def _run_command(self, request_id, command: str, payload: dict) -> None:
@@ -75,28 +84,45 @@ class RailWatchRuntime:
             "getRuntimeInfo": lambda: self.bridge.get_runtime_info(),
             "loadConfig": lambda: self.bridge.load_config(),
             "saveConfig": lambda: self.bridge.save_config(payload.get("config") or payload),
+            "loadTripState": lambda: self.bridge.load_trip_state(),
+            "saveTripDraft": lambda: self.bridge.save_trip_draft(payload.get("config"), payload.get("revision")),
+            "searchStations": lambda: self.bridge.search_stations(payload.get("query"), payload.get("limit", 12)),
+            "refreshStations": lambda: self.bridge.refresh_stations(),
+            "stationSaleTimes": lambda: self.bridge.station_sale_times(payload.get("station"), payload.get("force", False)),
+            "loadTripChoices": lambda: self.bridge.load_trip_choices(),
+            "saveTrainFavorites": lambda: self.bridge.save_train_favorites(payload.get("from_station"), payload.get("to_station"), payload.get("trains")),
+            "readPassengers": lambda: self.bridge.read_passengers(),
             "checkEnvironment": lambda: self.bridge.check_environment(),
             "downloadChromeDriver": lambda: self.bridge.download_chromedriver(),
             "openLogin": lambda: self.bridge.open_login(),
             "checkLogin": lambda: self.bridge.check_login(),
-            "analyzeQuery": lambda: self.bridge.analyze_query(payload.get("config") or payload),
+            "analyzeQuery": lambda: self.bridge.analyze_query(payload.get("config") or payload, request_id=payload.get("request_id")),
             "startMonitor": lambda: self.bridge.start_monitor(
                 payload.get("config") or payload,
                 confirmed=bool(payload.get("confirmed", False)),
+                expected_dates=payload.get("expected_dates"),
             ),
-            "continueOrder": lambda: self.bridge.continue_order(),
+            "continueOrder": lambda: self.bridge.continue_order(payload.get("intent_id")),
+            "orderHistory": lambda: self.bridge.order_history(payload.get("limit", 20), payload.get("cursor"), payload.get("status")),
+            "orderDetail": lambda: self.bridge.order_detail(payload.get("intent_id")),
             "dismissOrder": lambda: self.bridge.dismiss_order(str(payload.get("intent_id", "")), confirmed=payload.get("confirmed") is True),
             "systemResumed": lambda: self.bridge.system_resumed(),
             "stopMonitor": lambda: self.bridge.stop_monitor(),
+            "taskActivity": lambda: self.bridge.task_activity(),
+            "prepareShutdown": lambda: self.bridge.prepare_shutdown(payload.get("purpose")),
+            "cancelShutdown": lambda: self.bridge.cancel_shutdown(),
             "closeBrowser": lambda: self.bridge.close_browser(confirmed=bool(payload.get("confirmed", False))),
             "clearLocalData": lambda: self.bridge.clear_local_data(confirmed=bool(payload.get("confirmed", False))),
             "exportLog": lambda: self.bridge.export_log(payload.get("path"), entries=payload.get("entries")),
             "clearLog": lambda: self.bridge.clear_log(),
             "loadPreferences": lambda: self.bridge.load_preferences(),
             "savePreferences": lambda: self.bridge.save_preferences(
-                str(payload.get("theme", "system")),
+                payload.get("theme"),
                 payload.get("notification_settings"),
+                close_to_tray=payload.get("close_to_tray"),
             ),
+            "notificationStatus": lambda: self.bridge.notification_status(),
+            "testNotification": lambda: self.bridge.test_notification(),
             "syncServerTime": lambda: self.bridge.sync_server_time(),
         }
         if command not in handlers:
@@ -116,7 +142,7 @@ def main() -> int:
     configure_stdio()
     runtime = RailWatchRuntime()
     try:
-        for line in sys.stdin:
+        for line in getattr(sys.stdin, "buffer", sys.stdin):
             line = line.strip()
             if not line:
                 continue

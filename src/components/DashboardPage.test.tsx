@@ -71,6 +71,8 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
     expect(screen.getByText("北京")).toBeTruthy();
     expect(screen.queryByText("广州")).toBeNull();
+    expect(screen.getByText("北京 · 出发站")).toBeTruthy();
+    expect(screen.queryByText("广州 · 出发站")).toBeNull();
     expect(screen.getByText("查询次数").parentElement?.textContent).toContain(
       "9",
     );
@@ -182,6 +184,6 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     expect(screen.queryByText(/出发日期已过去/)).toBeNull();
-    expect(screen.queryByText(/预售期/)).toBeNull();
+    expect(screen.queryByText(/超出预售期/)).toBeNull();
   });
 });

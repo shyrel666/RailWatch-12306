@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Tooltip } from "antd";
 import { Eraser, Pause, Play, FileDown } from "lucide-react";
-import { countEventsByFilter, presentEventLogs } from "../lib/formatEventLog";
+import { summarizeEventLogs, filterPresentedEvents } from "../lib/formatEventLog";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { CommandRunner } from "./componentTypes";
 
@@ -35,17 +35,8 @@ export function EventPanel({
     }
   };
   const droppedLogs = useRailWatchStore((state) => state.droppedLogs);
-  const visibleLogs = useMemo(
-    () => presentEventLogs(logs, filter),
-    [logs, filter],
-  );
-  const counts = useMemo(
-    () =>
-      Object.fromEntries(
-        filterLabels.map((label) => [label, countEventsByFilter(logs, label)]),
-      ),
-    [logs],
-  );
+  const { entries, counts } = useMemo(() => summarizeEventLogs(logs), [logs]);
+  const visibleLogs = useMemo(() => filterPresentedEvents(entries, filter), [entries, filter]);
   const listClassName = [
     "event-list",
     logPaused ? "paused" : "",

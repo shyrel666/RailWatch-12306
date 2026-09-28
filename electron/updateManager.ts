@@ -57,13 +57,13 @@ export function shouldEnableAutoUpdate(env: AutoUpdateEnvironment): boolean {
   return true;
 }
 
-export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: UpdaterInfo): UpdateCheckSuccess {
+export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: UpdaterInfo, hasUpdate: boolean): UpdateCheckSuccess {
   const latestVersion = info.version;
   return {
     ok: true,
     currentVersion,
     latestVersion,
-    hasUpdate: currentVersion !== latestVersion,
+    hasUpdate,
     releaseName: info.releaseName || latestVersion,
     releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
     publishedAt: info.releaseDate || "",
@@ -107,7 +107,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       currentVersion,
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
-      result: mapUpdateInfoToCheckSuccess(currentVersion, info),
+      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true),
     });
   });
 
@@ -146,7 +146,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
       downloadPercent: 100,
-      result: mapUpdateInfoToCheckSuccess(currentVersion, info),
+      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true),
     });
     onUpdateDownloaded?.(info);
   });
@@ -165,8 +165,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
     getState(): UpdateRuntimeState {
       return state;
     },
-    async checkForUpdates(checkOptions: { force?: boolean } = {}): Promise<UpdateCheckResult> {
-      void checkOptions.force;
+    async checkForUpdates(): Promise<UpdateCheckResult> {
       if (!enabled) {
         const failure = buildFailure(currentVersion, "当前为开发环境，自动更新不可用。");
         publish({ ...state, phase: "error", error: failure.error, result: failure });
@@ -194,7 +193,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
         return mapUpdateInfoToCheckSuccess(currentVersion, {
           version: state.latestVersion,
           releaseNotes: state.releaseNotes,
-        });
+        }, true);
       }
 
       if (state.phase === "not-available" && state.latestVersion) {

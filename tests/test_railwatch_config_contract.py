@@ -88,9 +88,11 @@ class RailWatchConfigContractTests(unittest.TestCase):
             "railwatch_submit_flow",
             "railwatch_system",
             "railwatch_time",
-            "railwatch_verification",
+            "railwatch_sale_times",
         ):
             self.assertIn(f'"{module_name}"', content)
+        for module in pyproject.parent.glob("railwatch_*.py"):
+            self.assertIn(f'"{module.stem}"', content)
 
 
 if __name__ == "__main__":

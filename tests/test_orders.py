@@ -43,10 +43,14 @@ class OrderEvidenceTests(unittest.TestCase):
     def test_regular_form_requires_exact_route_train_and_seat(self):
         selected = replace(intent(), from_station='北京丰台', to_station='成都东')
         data = {'regular': '2026-09-10（周四） G101次 北京丰台站（09:29开）—成都东站（19:00到）',
-                'passengers': ['张三'], 'seats': ['二等座（927.0元）']}
+                'passengers': ['张三'], 'seats': ['二等座（927.0元）'], 'ticketTypes': ['成人票']}
         page = OrderPage(Mock())
         page.snapshot = lambda: data
         self.assertTrue(page.verify_form(selected))
+        for ticket_type in ([], ["学生票"], ["儿童票"]):
+            page.snapshot = lambda ticket_type=ticket_type: {**data, "ticketTypes": ticket_type}
+            self.assertFalse(page.verify_form(selected))
+        page.snapshot = lambda: data
         for changed in (replace(selected, from_station='北京'), replace(selected, to_station='成都'),
                         replace(selected, train_code='G10'), replace(selected, seat='一等座'),
                         replace(selected, from_station='成都东', to_station='北京丰台')):
@@ -57,7 +61,7 @@ class OrderEvidenceTests(unittest.TestCase):
         # 2026-09-12（周六）G1307次北京丰台站（09:29开）—成都东站（19:00到）
         selected = replace(intent(), from_station='北京丰台', to_station='成都东', train_code='G1307')
         data = {'regular': '2026-09-10（周四）G1307次北京丰台站（09:29开）—成都东站（19:00到）',
-                'passengers': ['张三'], 'seats': ['二等座（¥927.0元）']}
+                'passengers': ['张三'], 'seats': ['二等座（¥927.0元）'], 'ticketTypes': ['成人票']}
         page = OrderPage(Mock())
         page.snapshot = lambda: data
         self.assertTrue(page.verify_form(selected))
@@ -148,6 +152,34 @@ class OrderEvidenceTests(unittest.TestCase):
             value["orders"][0].update(change)
             self.assertEqual(self.read(value).status, "unknown")
 
+    def test_structured_and_textual_train_evidence_must_agree(self):
+        for fields in [
+            {"train_code": "G101", "text": "G101次 G102次"},
+            {"train_codes": ["G101", "G102"], "text": "G101"},
+            {"train_codes": ["G102"], "text": "G101次"},
+            {"train_code": "G101", "text": "G101次 G102"},
+            {"train_code": "G101", "text": "G101 1461次"},
+        ]:
+            with self.subTest(fields=fields):
+                value = snapshot()
+                value["orders"][0].update(fields)
+                value["orders"][0]["text"] += " 2026-09-10 北京 上海 二等座 张三"
+                self.assertEqual(self.read(value).status, "unknown")
+
+    def test_numeric_structured_train_evidence_ignores_fares_but_not_conflicting_trains(self):
+        selected = replace(intent(), train_code="1461")
+        for codes, text, expected in [
+            (["1461"], "1461 ¥1462.0元", "pending_payment"),
+            (["1461", "1461"], "1461 ¥1462.0元", "pending_payment"),
+            ([], "¥1461.0元", "unknown"),
+            (["1461", "1462"], "1461", "unknown"),
+            (["1461"], "1461 G102", "unknown"),
+        ]:
+            with self.subTest(codes=codes, text=text):
+                value = snapshot()
+                value["orders"][0].update(train_codes=codes, text=text + " 2026-09-10 北京 上海 二等座 张三")
+                self.assertEqual(self.read(value, selected).status, expected)
+
     def test_generic_success_url_and_untrusted_origin_are_not_evidence(self):
         self.assertEqual(self.read(snapshot(orders=[], url="https://kyfw.12306.cn/otn/queryMyOrderNoComplete", dialogs=["提交成功"])).status, "verification")
         self.assertEqual(self.read(snapshot(url="https://other.example/order")).status, "unknown")
@@ -167,10 +199,10 @@ class OrderEvidenceTests(unittest.TestCase):
 
     def test_empty_pending_view_cannot_erase_known_order(self):
         data = snapshot(orders=[], pendingEmpty=True)
-        self.assertTrue(self.read(data).no_order)
+        self.assertFalse(self.read(data).no_order)
         self.assertEqual(self.read(data, known_id="E123456").status, "unknown")
         self.assertEqual(self.read(data, submitted=True).status, "unknown")
-        self.assertTrue(self.read(data, submitted=True, allow_empty=True).no_order)
+        self.assertFalse(self.read(data, submitted=True, allow_empty=True).no_order)
 
     def test_deadline_requires_date_and_exact_time(self):
         self.assertTrue(OrderPage.deadline_matches("2026年9月10日 18:00", "18:00", "2026-09-10"))
@@ -320,6 +352,15 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual((pending['intent']['from_station'], pending['intent']['to_station']), ('北京丰台', '上海虹桥'))
         self.assertEqual(pending['config']['from_station_cn'], '北京')
         self.assertEqual(self.monitor.submit_flow.try_auto_submit.call_args.kwargs['intent'].to_station, '上海虹桥')
+
+    def test_post_submit_sold_out_cannot_navigate_or_enable_fallback(self):
+        self.monitor.submit_flow.try_auto_submit = Mock(
+            return_value=OrderResult("unknown", "官方提示余票不足"))
+        self.monitor.order_page.reconcile = Mock(return_value=OrderResult("unknown"))
+        self.assertTrue(self.monitor._execute_order(self.hit))
+        self.assertIs(self.monitor.order_page.reconcile.call_args.kwargs["navigate"], False)
+        self.assertFalse(self.monitor._prefer_alternate)
+        self.assertIsNotNone(self.journal.pending())
 
     def test_regular_rejection_routes_to_houbu_without_sleep(self):
         self.monitor.submit_flow.try_auto_submit = Mock(return_value=OrderResult("sold_out", no_order=True))
@@ -522,6 +563,7 @@ class RegularConfirmationTests(unittest.TestCase):
 
     def test_unknown_after_confirmation_reconciles_official_order_page(self):
         page = self._page()
+        page.driver.execute_script.return_value = True  # DOM receipt, not a transport acknowledgement.
         page.button = lambda selectors: Mock()
         page.snapshot = lambda: {"formReady": True}
         page.reconcile = Mock(return_value=OrderResult("pending_payment", order_id="E123456",

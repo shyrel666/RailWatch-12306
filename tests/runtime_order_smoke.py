@@ -57,7 +57,32 @@ def main():
             assert responses["start"]["ok"] is False and responses["clear"]["ok"] is False
             assert not (directory / "chrome_profile_12306").exists()
             assert journal.pending()["result"]["order_id"] == "TEST123"
-    print("Packaged runtime: two restarts, SQLite recovery, DPAPI secret protection, duplicate-start and clear-data guards passed; no browser/network actions.")
+
+        # A corrupt DPAPI blob must disable notifications without preventing
+        # startup or hiding the durable order that still needs reconciliation.
+        preferences_path = directory / "notification_settings.json"
+        damaged = json.loads(preferences_path.read_text(encoding="utf-8"))
+        damaged.update(email_enabled=True, email_password="dpapi:YWJj")
+        preferences_path.write_text(json.dumps(damaged), encoding="utf-8")
+        recovery_stdin = "\n".join(json.dumps(request) for request in [
+            {"id": "state", "command": "stopMonitor"},
+            {"id": "prefs", "command": "loadPreferences"},
+        ]) + "\n"
+        completed = subprocess.run([str(executable)], input=recovery_stdin, text=True, encoding="utf-8",
+                                   capture_output=True, timeout=40, env=environment,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        assert completed.returncode == 0, completed.stderr
+        messages = [json.loads(line) for line in completed.stdout.splitlines() if line.strip().startswith("{")]
+        responses = {message["id"]: message for message in messages if message.get("type") == "response"}
+        assert responses["state"]["ok"] is True and responses["prefs"]["ok"] is True
+        assert responses["state"]["result"]["order"]["order_id"] == "TEST123"
+        assert responses["state"]["result"]["order"]["recovery_required"] is True
+        assert responses["prefs"]["result"]["notification_settings"]["email_enabled"] is False
+        assert responses["prefs"]["result"]["notification_settings"]["email_password_configured"] is False
+        assert any(message.get("event") == "log" and message["payload"].get("level") == "WARN"
+                   and "通知设置无法读取" in message["payload"].get("message", "") for message in messages)
+        assert json.loads(preferences_path.read_text(encoding="utf-8")) == damaged
+    print("Packaged runtime: restart recovery, DPAPI protection and corrupt-secret fallback, duplicate-start and clear-data guards passed; no browser/network actions.")
 
 
 if __name__ == "__main__":

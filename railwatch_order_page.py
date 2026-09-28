@@ -8,10 +8,17 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from enum import Enum
 from urllib.parse import urlparse
 from selenium.common.exceptions import ElementClickInterceptedException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from railwatch_orders import OrderResult
+
+
+class ConfirmationOutcome(Enum):
+    REJECTED = "rejected_before_dispatch"
+    DISPATCHED = "dispatched"
+    UNKNOWN = "unknown"
 
 
 SNAPSHOT_JS = r"""
@@ -19,11 +26,15 @@ const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).vi
 const txt = e => (e?.innerText || '').replace(/\s+/g,' ').trim();
 const all = (s,r=document) => [...r.querySelectorAll(s)].filter(visible);
 const val = (s,r=document) => {const e=r.querySelector(s);return e?.value || txt(e);};
-function trainCode(root,fallback='') {
-  const node=root?.querySelector?.('[data-train-code],.train-num,.train-number,.ticket-number');
-  const source=(node?.getAttribute?.('data-train-code')||txt(node)||fallback).trim();
-  return source.match(/(?:^|[^0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})\s*次(?:$|[^0-9A-Za-z])/)?.[1]?.toUpperCase()||
-    source.match(/^([GDCZTKYSL]\d{1,5}|\d{1,5})$/)?.[1]?.toUpperCase()||'';
+function trainCodes(root) {
+  // Keep every visible structured value, including conflicting attributes and
+  // labels. Free text is checked separately in record_matches, never promoted
+  // to a single authoritative train code here.
+  const sources=all('[data-train-code],.train-num,.train-number,.ticket-number',root)
+    .flatMap(node=>[node.getAttribute('data-train-code')||'',txt(node)]);
+  return [...new Set(sources.flatMap(source=>[...source.matchAll(
+    /(?:^|[^0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})(?![0-9A-Za-z])/gi
+  )].map(match=>match[1].toUpperCase())))];
 }
 function passengers(root) {
   const named=all('.passenger-name strong[title],.name-yichu[title],.passenger-info .name[title]',root).map(e=>e.getAttribute('title').trim());
@@ -61,7 +72,7 @@ const orders=all('.order-item').map(root=>{
  }
  return {order_id:orderId,kind:header.includes('候补单号')?'alternate':'regular',
    text:body.join(' ').replace(/\s+/g,' ').trim(),state,payment,passengers:passengers(root),
-   train_code:trainCode(root,body.join(' '))};
+   train_codes:trainCodes(root)};
 });
 // The immediate payment page uses a legacy ticket table, not .order-item cards.
 const paymentTitle = document.querySelector('#show_title_ticket');
@@ -76,7 +87,7 @@ if (!orders.length && visible(paymentTitle) && visible(paymentRows) && visible(d
   if (ids.length === 1 && paymentTable && seats.length) orders.push({
     order_id:ids[0], kind:'regular', checkout:true, text:txt(paymentTitle),
     state:'待支付', payment:true, passengers:passengers(paymentTable), seat_names:seats,
-    train_code:trainCode(paymentTable,txt(paymentTitle)),
+    train_codes:trainCodes(paymentTable),
   });
 }
 const dialogs=all('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up-box').map(txt).filter(Boolean);
@@ -87,6 +98,7 @@ const officialProgress = all('#orderResultInfo_id .tit').some(e =>
 return {url:location.href, orders, dialogs, details,
  regular:txt(document.querySelector('#ticket_info')||document.querySelector('#ticket_tit_id')), passengers:passengers(document),
  seats:all('select[id^="seatType_"]').map(e=>e.selectedOptions[0]?.textContent.trim()||''),
+ ticketTypes:all('select[id^="ticketType_"]').filter(visible).map(e=>e.selectedOptions[0]?.textContent.trim()||''),
  deadline:val('#dafaultTime')||val('#deadline_time')||val('input.deadline-time'),
  extra:all('#planList .group-ticket').length,
  addedTrain:!!document.querySelector('#addTrainInput:checked'),
@@ -104,13 +116,31 @@ const visible=e=>!!(e&&e.getClientRects().length);
 const inputs=[...document.querySelectorAll('#normal_passenger_id input[type="checkbox"],#passenge_list input.chose-pass-dom')].filter(visible);
 const name=e=> {const l=e.closest('label')||document.querySelector('label[for="'+e.id+'"]');
  return (l?.getAttribute('title') || (l?.innerText||'').replace(/（(?:学生|儿童|成人)）/g,'')).trim();};
-if(!wanted.length || wanted.some(n=>inputs.filter(e=>name(e)===n).length!==1)) return false;
+const adult=e=> {const l=e.closest('label')||document.querySelector('label[for="'+e.id+'"]');
+ const type=(e.dataset.ticketType||l?.dataset.ticketType||l?.innerText||'').trim();
+ return /成人/.test(type) && !/学生|儿童/.test(type);};
+if(!wanted.length || wanted.some(n=>inputs.filter(e=>name(e)===n).length!==1 ||
+ !adult(inputs.find(e=>name(e)===n)))) return false;
 for(const input of inputs) {
  const select=wanted.includes(name(input));
  if(input.checked!==select) {if(input.disabled)return false;input.click();}
 }
 const actual=inputs.filter(e=>e.checked).map(name);
 return actual.length===wanted.length && wanted.every(n=>actual.includes(n));
+"""
+
+READ_PASSENGER_CANDIDATES_JS = r"""
+const visible=e=>!!(e&&e.getClientRects().length);
+const inputs=[...document.querySelectorAll('#normal_passenger_id input[type="checkbox"],#passenge_list input.chose-pass-dom')].filter(visible);
+const mask=value=>{const text=(value||'').trim();return text.length>5?text.slice(0,2)+'***'+text.slice(-2):'';};
+return inputs.slice(0,100).map(input=>{
+ const label=input.closest('label')||document.querySelector('label[for="'+input.id+'"]');
+ const text=(label?.innerText||'').trim();
+ const name=(label?.getAttribute('title')||text.replace(/（(?:学生|儿童|成人)）/g,'')).trim();
+ const type=/学生/.test(text)?'student':/儿童/.test(text)?'child':/成人/.test(text)?'adult':'unknown';
+ const identity=mask(label?.dataset.identity||input.dataset.identity||'');
+ return {name,ticket_type:type,identity_hint:identity};
+});
 """
 
 SEAT_PREFERENCE_JS = r"""
@@ -159,9 +189,8 @@ if (action === 'dispatch' && !receipt.delivered && button.isConnected &&
     button.getClientRects().length && getComputedStyle(button).visibility === 'visible' &&
     button.classList.contains('btn92s') && !button.classList.contains('btn92') &&
     !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
-  receipt.delivered = true;
   HTMLElement.prototype.click.call(button);
-  return true;
+  return receipt.delivered;
 }
 return null;
 """
@@ -206,23 +235,18 @@ def record_matches(record, intent):
     text = record.get("text", "")
     dates = {normalized_date(m[0]) for m in re.finditer(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}", text)}
     clean_text = re.sub(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}(?:日)?|\d{1,2}:\d{2}", "", text)
-    structured = str(record.get("train_code", "")).strip().upper()
+    structured = {str(value).strip().upper()
+                  for value in [record.get("train_code", ""), *record.get("train_codes", [])]
+                  if str(value).strip()}
     suffixed = {value.upper() for value in re.findall(
         r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})\s*次(?![0-9A-Za-z])", clean_text, re.I
     )}
-    if structured:
-        trains = {structured}
-    elif suffixed:
-        trains = suffixed
-    elif intent.train_code[:1].isalpha():
-        # Letter-prefixed codes cannot be confused with fares or carriage/seat
-        # numbers, so old order layouts without a dedicated train field remain
-        # compatible. Numeric-only services fail closed unless marked with 次.
-        trains = {value.upper() for value in re.findall(
-            r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5})(?![0-9A-Za-z])", clean_text, re.I
-        )}
-    else:
-        trains = set()
+    # Combine independent evidence instead of letting one field hide a second
+    # train. Bare numbers outside dedicated train fields may still be fares.
+    prefixed = {value.upper() for value in re.findall(
+        r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5})(?![0-9A-Za-z])", clean_text, re.I
+    )}
+    trains = structured | suffixed | prefixed
     if record.get("checkout"):
         return (record.get("kind") == intent.kind == "regular" and train_token(text, intent.train_code)
                 and trains == {intent.train_code} and dates == {intent.date}
@@ -295,8 +319,8 @@ class OrderPage:
                                no_order=not submitted)
         if dialogs and not snap.get("confirmation"):
             return OrderResult("verification", "存在未识别的订单提示，请在官方页面检查")
-        if snap.get("pendingEmpty") and not known_id and (not submitted or allow_empty):
-            return OrderResult("not_submitted", "官方待支付订单列表明确为空", no_order=True)
+        # An empty view cannot prove that an in-flight or externally created
+        # order does not exist. Only a known pre-submit failure releases ownership.
         return OrderResult("unknown", "未获得匹配的订单证据，请打开官方订单详情核对")
 
     def poll(self, predicate, timeout=10, ignore_stop=False):
@@ -351,6 +375,10 @@ class OrderPage:
             ("席别", "、".join([intent.seat] * len(intent.passengers)),
              "、".join(seat_label(value) for value in snap.get("seats", [])) or "未读到",
              [seat_label(value) for value in snap.get("seats", [])] == [intent.seat] * len(intent.passengers)),
+            ("票种", "成人", "、".join(snap.get("ticketTypes", [])) or "未读到",
+             len(snap.get("ticketTypes", [])) == len(intent.passengers) and
+             all("成人" in value and "学生" not in value and "儿童" not in value
+                 for value in snap.get("ticketTypes", []))),
         ]
         failed = "；".join(f"{name}：期望 {want}，实际 {got}" for name, want, got, matches in fields if not matches)
         if (form_token(text, intent.from_station, "站") and form_token(text, intent.to_station, "站")
@@ -377,6 +405,9 @@ class OrderPage:
         return (train_token(text, intent.train_code) and normalized_date(text) == intent.date
                 and form_token(text, intent.from_station, "站") and form_token(text, intent.to_station, "站")
                 and text.index(intent.from_station) < text.index(intent.to_station)
+                and len(snap.get("ticketTypes", [])) == len(intent.passengers)
+                and all("成人" in value and "学生" not in value and "儿童" not in value
+                        for value in snap.get("ticketTypes", []))
                 and [seat_label(value) for value in snap.get("seats", [])] == [intent.seat] * len(intent.passengers))
 
     def select_regular_seats(self, intent):
@@ -467,7 +498,7 @@ class OrderPage:
                 return None
             except Exception:
                 self.log("确认购买点击回执异常，将等待并核对订单结果，不自动重复确认。")
-                return True
+                return ConfirmationOutcome.UNKNOWN
             if observed:
                 try:
                     delivered = self.driver.execute_script(CONFIRM_RECEIPT_JS, token, "read")
@@ -480,11 +511,13 @@ class OrderPage:
                     if delivered is True:
                         self.mark("regular_confirm_dispatched")
                         self.log("确认按钮点击事件已触发，正在等待官方订单结果。")
+                        return ConfirmationOutcome.DISPATCHED
                 except Exception:
                     self.log("确认按钮事件回读失败，将核对订单结果，不重复点击。")
-            return True
+            self.log("确认点击结果未知，将保留当前页面并核对订单，不重复点击。")
+            return ConfirmationOutcome.UNKNOWN
 
-        return click() or self.poll(click, timeout=5, ignore_stop=True)
+        return click() or self.poll(click, timeout=5, ignore_stop=True) or ConfirmationOutcome.REJECTED
 
     def _post_submit(self, intent, confirmed_clicked):
         """Resolve the outcome after the official submit/confirm step.
@@ -499,7 +532,7 @@ class OrderPage:
             return result
         if self.snapshot().get("confirmation"):
             return OrderResult("verification",
-                               "官方确认弹窗仍在等待：请在官方页面点击“确认”，然后回到监控页点击“继续处理”核对订单")
+                               "官方确认流程尚未结束，请保留当前页面核对官方订单，再点击“继续处理”；请勿重复提交。")
         if self.snapshot().get("processing"):
             return result  # Do not navigate away while the official queue is active.
         if confirmed_clicked and not self.stop():
@@ -586,7 +619,7 @@ class OrderPage:
                 confirmation = self._click_regular_confirmation(confirm, intent)
                 if isinstance(confirmation, OrderResult):
                     return confirmation
-                confirmed_clicked = confirmation is True
+                confirmed_clicked = confirmation is ConfirmationOutcome.DISPATCHED
             return self._post_submit(intent, confirmed_clicked)
         except Exception as exc:
             # Exception text can contain passenger data and browser internals.

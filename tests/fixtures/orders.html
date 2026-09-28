@@ -3,7 +3,7 @@
 <button id="book">预订</button><button id="candidate">候补</button>
 <div id="regular" class="hidden">
   <div id="ticket_info">G101 2026年9月10日 北京 → 上海</div>
-  <div id="normal_passenger_id"><label title="张三"><input type="checkbox">张三</label><label title="李四"><input type="checkbox">李四</label></div>
+  <div id="normal_passenger_id"><label title="张三"><input type="checkbox">张三（成人）</label><label title="李四"><input type="checkbox">李四（成人）</label></div>
   <div id="normal-selected"></div><button id="submitOrder_id">提交订单</button>
 </div>
 <div id="candidate-form" class="hidden">
@@ -13,7 +13,7 @@
     <div class="ticket-station-end"><div class="ticket-station-name" title="上海">上海</div></div>
     <div class="ticket-info-txt"><span>二等座</span></div>
   </div></div>
-  <div id="passenge_list"><label title="张三"><input class="chose-pass-dom" type="checkbox">张三</label><label title="李四"><input class="chose-pass-dom" type="checkbox">李四</label></div>
+  <div id="passenge_list"><label title="张三"><input class="chose-pass-dom" type="checkbox">张三（成人）</label><label title="李四"><input class="chose-pass-dom" type="checkbox">李四（成人）</label></div>
   <div id="candidate-selected"></div>
   <div id="dafaultTime">2026年9月10日 18:00</div>
   <ul id="date_box" class="hidden"><li>2026年9月10日 18:00</li><li>2026年9月9日 18:00</li></ul>
@@ -28,7 +28,7 @@ const show=id=>el(id).classList.remove('hidden');
 function people(area,target,regular){
  const names=[...el(area).querySelectorAll('input:checked')].map(e=>e.parentElement.title);
  el(target).innerHTML=names.map((name,i)=>`<input ${regular?`id="passenger_name_${i}"`:'class="name-input"'} readonly value="${name}">`+
-   (regular?`<select id="seatType_${i}"><option>一等座</option><option>二等座</option></select>`:'')).join('');
+   (regular?`<select id="seatType_${i}"><option>一等座</option><option>二等座</option></select><select id="ticketType_${i}"><option>成人票</option></select>`:'')).join('');
 }
 for(const input of el('normal_passenger_id').querySelectorAll('input'))input.onchange=()=>people('normal_passenger_id','normal-selected',true);
 for(const input of el('passenge_list').querySelectorAll('input'))input.onchange=()=>people('passenge_list','candidate-selected',false);
@@ -39,7 +39,7 @@ for(const item of el('date_box').children)item.onclick=()=>{el('dafaultTime').in
 function record(state='待支付'){
  el('regular').classList.add('hidden');el('candidate-form').classList.add('hidden');el('dialog').classList.add('hidden');
  el('records').innerHTML=`<div class="order-item"><div class="order-item-hd">${fixture.kind==='alternate'?'候补单号':'订单号'}：E123456 <span class="order-status">${state}</span></div>
- <p>G101 2026年9月10日 北京 上海 二等座</p><div class="passenger-name"><strong title="张三">张三</strong></div></div>`;
+ <p>G101 2026年9月10日 北京 上海 ${el('seatType_0')?.selectedOptions[0]?.textContent.trim()||'二等座'}</p><div class="passenger-name"><strong title="张三">张三</strong></div></div>`;
 }
 fixture.record=record;
 el('submitOrder_id').onclick=()=>{

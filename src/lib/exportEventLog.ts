@@ -1,9 +1,9 @@
 import type { CommandRunner } from "../components/componentTypes";
 import { railwatchStore } from "../store/railwatchStore";
-import { railwatchApi } from "./railwatchApi";
 
-export async function exportEventLog(defaultPath: string | undefined, runCommand: CommandRunner) {
-  const path = await railwatchApi.showSaveDialog(defaultPath);
+export async function exportEventLog(defaultPath: string | undefined, runCommand: CommandRunner,
+  choosePath: (defaultPath?: string) => Promise<string | null>) {
+  const path = await choosePath(defaultPath);
   if (!path) return;
 
   const { logs, pausedLogs } = railwatchStore.getState();

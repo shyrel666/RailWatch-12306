@@ -2,8 +2,32 @@
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 import math
+import re
 import time
 import uuid
+
+
+def query_conditions(config):
+    split = lambda value: list(dict.fromkeys(item for item in re.split(r"[,，、;；\s]+", str(value or "").strip()) if item))
+    return {"from_station": config.get("from_station_cn", ""), "to_station": config.get("to_station_cn", ""),
+            "date": config.get("date", ""), "train_codes": split(str(config.get("train_code", "")).upper()),
+            "seat_types": split(config.get("seat_keyword", ""))}
+
+
+def query_snapshot(config, rows, *, run_id=None, query_id=None, sequence=0, error=None, fetched_at=None):
+    """Public per-date read model, separate from the executor's DOM conditions."""
+    completed_at = time.time()
+    conditions = query_conditions(config)
+    public_rows = []
+    if error is None:
+        for row in rows:
+            public_rows.append({"train": row["train"], "date": conditions["date"], "raw": row.get("raw", ""),
+                                "seats": row.get("seats", {}),
+                                **{field: row.get(field) for field in ("from_station", "to_station", "departure_time", "arrival_time", "arrival_day_offset")}})
+    return {"schema_version": 1, "run_id": run_id or None, "query_id": query_id or uuid.uuid4().hex,
+            "sequence": sequence, "conditions": conditions, "completed_at": completed_at,
+            "fetched_at": None if error is not None else fetched_at if fetched_at is not None else completed_at,
+            "status": "error" if error is not None else "success", "error": error, "rows": public_rows}
 
 
 @dataclass(frozen=True)
@@ -201,6 +225,16 @@ return {status:completed && rows.length ? 'ok' : completed && empty ? 'empty' : 
 """
 
 
+# One atomic page observation avoids three WebDriver round trips and keeps
+# form ownership, verification dialogs, and response freshness in one read.
+QUERY_OBSERVATION_JS = (
+    "const form=(function(){" + FORM_SNAPSHOT_JS + "}).call(null,arguments[1]);"
+    "const dialog=(function(){" + DIALOG_INSPECT_JS + "})();"
+    "const status=(function(){" + QUERY_STATUS_JS + "}).call(null,arguments[0]);"
+    "return {form,dialog,status};"
+)
+
+
 class QueryExecutor:
     def __init__(self, driver, stop_check=lambda: False, wait=None, tick=lambda: None):
         self.driver = driver
@@ -218,13 +252,22 @@ class QueryExecutor:
     def snapshot_form(self):
         return self.driver.execute_script(FORM_SNAPSHOT_JS, uuid.uuid4().hex)
 
-    def current(self):
-        if self.stop_check() or self.snapshot_form() != self.snapshot:
+    def current(self, *, accept_revision=False):
+        if self.stop_check():
             return False
-        if self.inspect_dialog()["kind"] != "none":
+        observation = self.observe()
+        if observation.get("form") != self.snapshot or observation.get("dialog", {}).get("kind") != "none":
             return False
-        status = self.driver.execute_script(QUERY_STATUS_JS, self.token)
-        return isinstance(status, dict) and status.get("status") in ("ok", "empty") and status.get("revision") == self.revision
+        status = observation.get("status")
+        if not isinstance(status, dict) or status.get("status") not in ("ok", "empty"):
+            return False
+        if accept_revision:
+            self.revision = status.get("revision")
+        return status.get("revision") == self.revision
+
+    def observe(self):
+        value = self.driver.execute_script(QUERY_OBSERVATION_JS, self.token, uuid.uuid4().hex)
+        return value if isinstance(value, dict) else {}
 
     def execute(self, click, timeout):
         self.token = uuid.uuid4().hex
@@ -246,12 +289,13 @@ class QueryExecutor:
             self.tick()
             if self.stop_check():
                 return {"status": "cancelled"}
-            if self.snapshot_form() != self.snapshot:
+            observation = self.observe()
+            if observation.get("form") != self.snapshot:
                 return {"status": "invalid", "reason": "页面或查询条件已改变"}
-            dialog = self.inspect_dialog()
+            dialog = observation.get("dialog") or {"kind": "unknown", "text": "无法确认页面状态"}
             if dialog["kind"] != "none":
                 return {"status": dialog["kind"], "reason": dialog["text"]}
-            result = self.driver.execute_script(QUERY_STATUS_JS, self.token)
+            result = observation.get("status")
             if isinstance(result, dict) and result.get("status") == "invalid":
                 http_status = result.get("http_status")
                 retry_after = parse_retry_after(result.get("retry_after"), result.get("response_date"))

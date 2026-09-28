@@ -7,7 +7,6 @@ import {
   checkForUpdates,
   compareVersions,
   createDefaultUpdateConfig,
-  downloadUpdateAsset,
   fetchLatestVersionViaRedirect,
   isAllowedDownloadUrl,
   parseGitHubRelease,
@@ -264,40 +263,4 @@ describe("updateChecker", () => {
     expect(result.hasUpdate).toBe(true);
   });
 
-  test("downloads update assets and verifies sha256 when provided", async () => {
-    const payload = Buffer.from("installer-bytes");
-    const sha256 = "2c26b46b68ffc68ff99b453c1d30413408e30a8c8c2a8b8b8b8b8b8b8b8b8b8b";
-    const fetchImpl = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(payload);
-          controller.close();
-        },
-      }),
-    })) as unknown as typeof fetch;
-
-    const asset: UpdateAsset = {
-      name: "RailWatch 12306-1.2.0-x64.exe",
-      url: "https://github.com/railwatch/railwatch-12306/releases/download/v1.2.0/app.exe",
-      size: payload.length,
-      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    };
-
-    const result = await downloadUpdateAsset(asset, tempDir, fetchImpl);
-    expect(result.ok).toBe(false);
-    if (result.ok) {
-      return;
-    }
-    expect(result.code).toBe("hash-mismatch");
-
-    const validAsset = { ...asset, sha256: "204676736cea68d6411da9d3aa3fab0a5e70b023ba30cd560cfa9c8e7250f4df" };
-    const validResult = await downloadUpdateAsset(validAsset, tempDir, fetchImpl);
-    expect(validResult.ok).toBe(true);
-    if (!validResult.ok) {
-      return;
-    }
-    expect(validResult.fileName).toBe(asset.name);
-  });
 });

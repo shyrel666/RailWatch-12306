@@ -13,11 +13,17 @@ fs.mkdirSync(output, { recursive: true });
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     window.__commands = [];
+    window.__pendingConfirm = new Map();
     window.railwatch = {
       command: async (command, payload) => {
         window.__commands.push({ command, payload });
         if (command === "loadPreferences") return { theme: "light" };
         if (command === "savePreferences") return { theme: payload.theme };
+        if (command === "loadTripState") return { saved_config: await window.railwatch.command("loadConfig"),
+          saved_at: Date.now() / 1000, draft: { status: "missing", draft: null, warning: null } };
+        if (command === "loadTripChoices") return { recent_routes: [], favorites: [] };
+        if (command === "searchStations") return { items: [], warning: null };
+        if (command === "orderHistory") return { items: [], next_cursor: null };
         if (command === "loadConfig")
           return {
             from_station_cn: "北京",
@@ -49,13 +55,14 @@ fs.mkdirSync(output, { recursive: true });
         if (command === "getRuntimeInfo")
           return {
             app_display_name: "RailWatch 12306",
-            app_version: "0.3.5",
+            app_version: "0.4.2",
             data_dir: "C:/Users/Demo/AppData/Local/railwatch-12306",
             data_dir_writable: true,
             data_dir_free_bytes: 28250000000,
             chrome_version: "Chrome 148",
             chromedriver_path: "C:/RailWatch/driver/chromedriver.exe",
             core_available: true,
+            seat_capabilities: [{ name: "二等座", query: true, regular: true, alternate: true }],
             selenium_available: true,
             chromedriver_manager_available: true,
             network_ok: true,
@@ -81,26 +88,46 @@ fs.mkdirSync(output, { recursive: true });
         return {};
       },
       onEvent: () => () => {},
+      onConfirmRequest: (callback) => { window.__confirmRequest = callback; return () => { window.__confirmRequest = null; }; },
+      respondConfirmation: (id, accepted) => {
+        window.__commands.push({ command: "respondConfirmation", id, accepted });
+        window.__pendingConfirm.get(id)?.(accepted);
+        window.__pendingConfirm.delete(id);
+      },
+      stageDraft: () => {},
       onUpdateState: () => () => {},
       stopUrgentAlert: () => {},
       getUpdateState: async () => ({
         phase: "not-available",
-        currentVersion: "0.3.5",
+        currentVersion: "0.4.2",
       }),
       checkUpdate: async () => ({
         ok: true,
-        currentVersion: "0.3.5",
-        latestVersion: "0.3.5",
+        currentVersion: "0.4.2",
+        latestVersion: "0.4.2",
         hasUpdate: false,
       }),
       getAppInfo: async () => ({
         electronVersion: "39.2.7",
         chromeVersion: "142",
         nodeVersion: "22",
-        appVersion: "0.3.5",
+        appVersion: "0.4.2",
       }),
       openExternal: async () => ({ ok: true }),
-      showSaveDialog: async () => null,
+      getExportLocations: async () => ({ directory: "C:/RailWatch/logs", fileName: "railwatch-events.txt", shortcuts: [{ name: "下载", path: "C:/Downloads" }] }),
+      listExportDirectory: async directory => ({ directory, parent: "C:/", folders: [{ name: "历史记录", path: `${directory}/archive` }], files: ["previous-events.txt"] }),
+      prepareLogExport: async (directory, fileName) => {
+        if (fileName === "previous-events.txt") {
+          const accepted = await new Promise(resolve => {
+            window.__pendingConfirm.set("export-overwrite", resolve);
+            window.__confirmRequest({ id: "export-overwrite", title: "替换已有日志文件？",
+              message: `该文件已存在：\n${directory}/${fileName}\n\n替换后，原文件内容将被覆盖。`,
+              okText: "替换文件", cancelText: "保留原文件", danger: true });
+          });
+          if (!accepted) return null;
+        }
+        return `${directory}/${fileName}`;
+      },
     };
   });
   await page.goto(process.env.RAILWATCH_PREVIEW_URL || "http://127.0.0.1:5173");
@@ -133,6 +160,7 @@ fs.mkdirSync(output, { recursive: true });
         "仪表盘",
         "行程设置",
         "购票监控",
+        "订单中心",
         "系统设置",
         "关于",
       ]) {
@@ -172,6 +200,7 @@ fs.mkdirSync(output, { recursive: true });
                 仪表盘: "dashboard",
                 行程设置: "trip",
                 购票监控: "monitor",
+                订单中心: "orders",
                 系统设置: "settings",
                 关于: "about",
               }[name] +
@@ -327,7 +356,7 @@ fs.mkdirSync(output, { recursive: true });
         results: [{ train: "G101", raw: "详细查询结果 · ".repeat(50) }],
       });
     });
-    for (const name of ["仪表盘", "行程设置", "购票监控", "系统设置"]) {
+    for (const name of ["仪表盘", "行程设置", "购票监控", "订单中心", "系统设置"]) {
       await page.getByRole("button", { name, exact: true }).click();
       if (name === "行程设置") {
         for (const id of ["trip-query", "trip-timer", "trip-automation"]) {
@@ -358,6 +387,7 @@ fs.mkdirSync(output, { recursive: true });
               仪表盘: "dashboard",
               行程设置: "trip",
               购票监控: "monitor",
+              订单中心: "orders",
               系统设置: "settings",
             }[name] +
             ".png",
@@ -365,6 +395,52 @@ fs.mkdirSync(output, { recursive: true });
       });
     }
   }
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  let nativeDialogs = 0;
+  page.on("dialog", async dialog => { nativeDialogs++; await dialog.dismiss(); });
+  for (const theme of ["明亮", "深色"]) {
+    await switchTheme(theme);
+    const suffix = theme === "明亮" ? "light" : "dark";
+    await page.evaluate(() => window.__confirmRequest({ id: "exit-check", title: "无法安全退出",
+      message: "退出未完成：任务停止超时。\n\n强制退出将终止本应用运行时，任务最终状态无法确认。退出不会取消官方订单，请在官方页面核对和支付。",
+      okText: "强制退出", cancelText: "取消", danger: true }));
+    let dialog = page.getByRole("dialog");
+    await dialog.waitFor();
+    await page.waitForTimeout(300);
+    if (!(await page.evaluate(() => document.activeElement?.textContent?.replace(/\s/g, "").includes("取消"))))
+      throw new Error("Exit prompt must default to cancellation");
+    await page.screenshot({ path: path.join(output, `exit-dialog-${suffix}.png`) });
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    if (!(await page.evaluate(() => window.__commands.some(item => item.id === "exit-check" && item.accepted === false))))
+      throw new Error("Escape did not decline the exit");
+    await page.evaluate(() => window.__confirmRequest({ id: "tray-check", title: "已启用关闭到托盘",
+      message: "关闭窗口后 RailWatch 会在托盘继续运行。\n双击托盘图标可重新打开。", kind: "info", okText: "知道了" }));
+    dialog = page.getByRole("dialog");
+    await dialog.waitFor();
+    if (await dialog.getByRole("button", { name: /取\s*消/ }).count()) throw new Error("Tray notice should only have acknowledgement");
+    await dialog.getByRole("button", { name: "知道了" }).click();
+    await dialog.waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "显示事件日志" }).click();
+    await page.getByRole("button", { name: "导出日志", exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "导出事件日志" });
+    await picker.waitFor();
+    await picker.getByRole("button", { name: /历史记录/ }).click();
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: path.join(output, `export-dialog-${suffix}.png`) });
+    await picker.getByRole("button", { name: /previous-events.txt/ }).click();
+    await picker.getByRole("button", { name: "导出日志", exact: true }).click();
+    const overwrite = page.getByRole("dialog", { name: "替换已有日志文件？" });
+    await overwrite.waitFor();
+    await overwrite.getByRole("button", { name: "保留原文件" }).click();
+    await overwrite.waitFor({ state: "hidden" });
+    await picker.getByRole("button", { name: /取\s*消/ }).click();
+    await picker.waitFor({ state: "hidden" });
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "hidden" });
+  }
+  if (nativeDialogs) throw new Error("A native browser dialog was opened");
 
   const commands = await page.evaluate(() => window.__commands);
   fs.writeFileSync(

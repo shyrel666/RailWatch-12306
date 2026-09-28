@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Alert, Button, Switch } from "antd";
 import { useClock } from "../lib/useClock";
 import { hasUnresolvedOrder } from "../lib/dashboardState";
@@ -7,7 +8,6 @@ import {
   BellRing,
   Clock3,
   Lock,
-  MonitorPlay,
   Play,
   Radar,
   RefreshCw,
@@ -16,14 +16,17 @@ import {
   TrainFront,
 } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
+import { railwatchStore, tripFingerprint } from "../store/railwatchStore";
 import { displayedConfig, taskLabels } from "../lib/taskDisplay";
 import {
   executionReference,
   getDateRangeStatus,
   useBeijingToday,
 } from "../lib/tripDate";
-import type { QueryResultRow, TicketHit } from "../types";
+import type { TicketHit } from "../types";
 import type { CommandRunner } from "./componentTypes";
+import { QueryResults } from "./QueryResults";
+import { queryTargets, selectableQueryTrains } from "../lib/queryResults";
 
 function formatTripDate(date: string) {
   if (!date) return "—";
@@ -33,32 +36,6 @@ function formatTripDate(date: string) {
     parsed.getDay()
   ];
   return `${parsed.getMonth() + 1}月${parsed.getDate()}日 ${weekday}`;
-}
-
-function ResultRow({ row, index }: { row: QueryResultRow; index: number }) {
-  const hasTicket = row.raw.includes("有") || row.raw.includes("张");
-  const isSoldOut = row.raw.includes("无") || row.raw.includes("候补");
-  return (
-    <div
-      className={`dispatch-row ${hasTicket ? "has-ticket" : isSoldOut ? "sold-out" : ""}`}
-      style={{ animationDelay: `${index * 40}ms` }}
-    >
-      <div className="dispatch-train-code">
-        <TrainFront size={14} />
-        <strong>{row.train}</strong>
-      </div>
-      <div className="dispatch-raw">{row.raw}</div>
-      <div className="dispatch-status-dot">
-        {hasTicket ? (
-          <span className="dot-available" />
-        ) : isSoldOut ? (
-          <span className="dot-sold" />
-        ) : (
-          <span className="dot-unknown" />
-        )}
-      </div>
-    </div>
-  );
 }
 
 function HitCard({ hit }: { hit: TicketHit }) {
@@ -86,12 +63,21 @@ export function MonitorPage({
   busy: string | null;
   runCommand: CommandRunner;
 }) {
+  const [startError, setStartError] = useState("");
+  const [selectionError, setSelectionError] = useState("");
   const draftConfig = useRailWatchStore((state) => state.config);
+  const editRevision = useRailWatchStore((state) => state.editRevision);
   const status = useRailWatchStore((state) => state.status);
   const results = useRailWatchStore((state) => state.results);
+  const queryViews = useRailWatchStore((state) => state.queryViews);
+  const activeQuery = useRailWatchStore((state) => state.activeQuery);
+  const queryConfig = useRailWatchStore((state) => state.queryConfig);
+  const setConfig = useRailWatchStore((state) => state.setConfig);
+  const setActivePage = useRailWatchStore((state) => state.setActivePage);
+  const manualPending = useRailWatchStore((state) => state.manualQueryPending);
+  const manualError = useRailWatchStore((state) => state.manualQueryError);
   const hits = useRailWatchStore((state) => state.hits);
   const monitorLoops = useRailWatchStore((state) => state.monitorLoops);
-  const setConfig = useRailWatchStore((state) => state.setConfig);
   const lastHumanAction = useRailWatchStore((state) => state.lastHumanAction);
   const clearHumanAction = useRailWatchStore((state) => state.clearHumanAction);
 
@@ -145,6 +131,13 @@ export function MonitorPage({
   );
   const canStop = status.monitoring;
 
+  const startWithSummary = async () => {
+    const snapshot = structuredClone(draftConfig);
+    const dates = [...dateRange.valid];
+    setStartError("");
+    await runCommand("startMonitor", { config: snapshot, expected_dates: dates });
+  };
+
   return (
     <div className="signal-tower">
       {/* ── Command Header ── */}
@@ -190,13 +183,12 @@ export function MonitorPage({
             disabled={!canStart}
             icon={<Play size={15} />}
             loading={busy === "startMonitor"}
-            onClick={() =>
-              void runCommand("startMonitor", { config: draftConfig })
-            }
+            onClick={() => void startWithSummary()}
             type="primary"
           >
             启动监控
           </Button>
+          {startError ? <span role="alert">{startError}</span> : null}
           <Button
             className="st-btn-stop"
             disabled={!canStop}
@@ -328,34 +320,27 @@ export function MonitorPage({
       </section>
 
       {/* ── Two-Column Body ── */}
+      {status.monitoring && tripFingerprint(draftConfig) !== tripFingerprint(config) ? <div className="st-running-draft-note" role="status">
+        本次执行：{config.date} · {config.from_station_cn} → {config.to_station_cn} · {config.train_code || "不限车次"}；
+        当前草稿：{draftConfig.date} · {draftConfig.from_station_cn} → {draftConfig.to_station_cn} · {draftConfig.train_code || "不限车次"}。草稿修改仅在下一次任务生效。
+      </div> : null}
+      {selectionError ? <p role="alert">{selectionError}</p> : null}
       <div className="st-body">
         {/* Left: Results */}
-        <section className="st-results-panel">
-          <div className="st-panel-head">
-            <h3>
-              <MonitorPlay size={15} />
-              查询结果
-            </h3>
-            <span className="st-result-count">{results.length} 条</span>
-          </div>
-          {results.length === 0 ? (
-            <div className="st-empty-results">
-              <Radar size={32} />
-              <strong>暂无查询结果</strong>
-              <span>启动监控后将在此显示实时查询数据</span>
-            </div>
-          ) : (
-            <div className="st-dispatch-board">
-              {results.map((row, index) => (
-                <ResultRow
-                  key={`${row.train}-${index}`}
-                  row={row}
-                  index={index}
-                />
-              ))}
-            </div>
-          )}
-        </section>
+        <QueryResults views={queryViews} rows={results} config={queryConfig ?? config} editableRoute={draftConfig}
+          onSelectTrains={trains => {
+            const state = railwatchStore.getState();
+            const allowed = selectableQueryTrains(state.queryViews, state.config);
+            if (state.editRevision !== editRevision || !trains.length || trains.some(train => !allowed.has(train))) {
+              setSelectionError("草稿或查询结果已变化，请重新选择当前路线的车次。");
+              return;
+            }
+            const current = queryTargets(state.config.train_code.toUpperCase());
+            setConfig({ train_code: [...new Set([...current, ...trains])].join(", ") });
+            setSelectionError("");
+            setActivePage("行程设置");
+          }} status={status}
+          now={now / 1000} pending={manualPending} error={manualError} activeQuery={activeQuery} />
 
         {/* Right: Hits + Config */}
         <aside className="st-side-panel">

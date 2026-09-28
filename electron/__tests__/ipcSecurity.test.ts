@@ -14,6 +14,7 @@ describe("ipcSecurity", () => {
   test("accepts only known RailWatch runtime commands", () => {
     expect(isRailWatchCommand("getRuntimeInfo")).toBe(true);
     expect(isRailWatchCommand("checkLogin")).toBe(true);
+    expect(isRailWatchCommand("stationSaleTimes")).toBe(true);
     expect(isRailWatchCommand("clearLocalData")).toBe(true);
     expect(isRailWatchCommand("shell")).toBe(false);
   });
@@ -36,12 +37,19 @@ describe("ipcSecurity", () => {
     expect(isAllowedExternalUrl(42)).toBe(false);
   });
 
+  test("allows only the specific official sale-time page", () => {
+    expect(isAllowedExternalUrl("https://kyfw.12306.cn/index/view/infos/sale_time.html")).toBe(true);
+    expect(isAllowedExternalUrl("https://kyfw.12306.cn/otn/login/init")).toBe(false);
+    expect(isAllowedExternalUrl("https://kyfw.12306.cn/index/view/infos/sale_time.html?url=evil")).toBe(false);
+    expect(isAllowedExternalUrl("https://kyfw.12306.cn.evil.example/index/view/infos/sale_time.html")).toBe(false);
+  });
+
   test("requires main-process confirmation for destructive or automated commands", () => {
     expect(getCommandConfirmation("clearLocalData", {})).toMatchObject({ title: "清除本地数据" });
     expect(getCommandConfirmation("closeBrowser", {})).toMatchObject({ title: "关闭浏览器" });
-    expect(getCommandConfirmation("startMonitor", { config: { auto_submit: true } })).toMatchObject({ title: "确认自动化" });
-    expect(getCommandConfirmation("startMonitor", { config: { auto_alternate: true } })).toMatchObject({ title: "确认自动化" });
-    expect(getCommandConfirmation("startMonitor", { config: { auto_submit: false, auto_alternate: false } })).toBeNull();
+    expect(getCommandConfirmation("startMonitor", { config: { auto_submit: true } })).toMatchObject({ title: "核对本次监控" });
+    expect(getCommandConfirmation("startMonitor", { config: { auto_alternate: true } })).toMatchObject({ title: "核对本次监控" });
+    expect(getCommandConfirmation("startMonitor", { confirmed: true, config: { auto_submit: false, auto_alternate: false } })).toMatchObject({ title: "核对本次监控" });
   });
 
   test("allows export paths only after the save dialog granted them", () => {

@@ -90,7 +90,8 @@ class MonitorRiskReviewTests(unittest.TestCase):
                 monitor = self.make_monitor()
                 monitor.query_executor = Mock()
                 monitor.query_executor.execute.return_value = {"status": "ok"}
-                monitor.query_executor.current.side_effect = [True] * checkpoint + [False]
+                checks = iter([True] * checkpoint + [False])
+                monitor.query_executor.current.side_effect = lambda **kwargs: next(checks, False)
                 monitor.row_parser.snapshot_rows = Mock(return_value=[])
                 monitor._find_hit_row = Mock(return_value=("G101", "二等座", "有", Mock(), Mock(), "book"))
                 monitor._is_burst_mode = Mock(return_value=False)

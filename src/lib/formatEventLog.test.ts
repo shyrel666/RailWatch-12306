@@ -1,6 +1,21 @@
 import { describe, expect, test } from "vitest";
 import type { LogEntry } from "../types";
-import { countEventsByFilter, presentEventLogs } from "./formatEventLog";
+import { countEventsByFilter, presentEventLogs, summarizeEventLogs, filterPresentedEvents } from "./formatEventLog";
+
+test("one presentation preserves every filter and merged-entry count", () => {
+  const logs: LogEntry[] = [
+    { time: "12:00", level: "INFO", message: "环境检查" },
+    { time: "12:01", level: "INFO", message: "Python 3.10.8" },
+    { time: "12:02", level: "WARN", message: "需要核验" },
+    { time: "12:03", level: "ERROR", message: "连接失败" },
+    { time: "12:04", level: "SUCCESS", message: "已完成" },
+  ];
+  const summary = summarizeEventLogs(logs);
+  for (const filter of ["全部", "信息", "警告", "错误"]) {
+    expect(filterPresentedEvents(summary.entries, filter)).toEqual(presentEventLogs(logs, filter));
+    expect(summary.counts[filter]).toBe(countEventsByFilter(logs, filter));
+  }
+});
 
 const envCheckLogs: LogEntry[] = [
   { time: "19:54:17", level: "INFO", message: "正在检查 Python、Selenium 和 ChromeDriver..." },

@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   defaultRuntimeInfo,
   defaultStatus,
@@ -17,6 +17,7 @@ import {
 import { EventPanel } from "./EventPanel";
 import { RAILWATCH_PAGES, ShellLayout, SidebarNav } from "./Shell";
 afterEach(cleanup);
+beforeEach(() => localStorage.clear());
 
 test("keeps page navigation while moving technical data out of the sidebar", async () => {
   const onPageChange = vi.fn();
@@ -31,6 +32,7 @@ test("keeps page navigation while moving technical data out of the sidebar", asy
     "仪表盘",
     "行程设置",
     "购票监控",
+    "订单中心",
     "系统设置",
     "关于",
   ]);

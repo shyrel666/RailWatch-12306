@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntApp, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
+import { CircleHelp, Info, TriangleAlert } from "lucide-react";
+import { useExportLogDialog } from "./components/ExportLogDialog";
 import { useThemePreference } from "./lib/useThemePreference";
 import { ThemeContext } from "./components/ThemeControl";
 import { AboutPage } from "./components/AboutPage";
 import { DashboardPage } from "./components/DashboardPage";
 import { EventPanel } from "./components/EventPanel";
 import { MonitorPage } from "./components/MonitorPage";
+import { OrderCenterPage } from "./components/OrderCenterPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { ShellLayout } from "./components/Shell";
 import { TripSetupPage } from "./components/TripSetupPage";
@@ -17,7 +20,7 @@ import {
   useUpdateReadyPrompt,
   type ThemedDialog,
 } from "./lib/useThemedDialogs";
-import { railwatchStore } from "./store/railwatchStore";
+import { railwatchStore, tripFingerprint } from "./store/railwatchStore";
 import { useRailWatchStore } from "./store/useRailWatchStore";
 import type {
   BridgeEvent,
@@ -30,6 +33,8 @@ import type {
   RailWatchStatus,
   RuntimeInfo,
   TicketHit,
+  TripDraft,
+  TripState,
 } from "./types";
 
 function isConfirmation(value: unknown): value is ConfirmationRequest {
@@ -76,7 +81,14 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     (state) => state.setEventPanelVisible,
   );
   const { modal, message, notification } = AntApp.useApp();
+  const { choosePath, dialog: exportDialog } = useExportLogDialog();
+  const exportingRef = useRef(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const editRevision = useRailWatchStore(state => state.editRevision);
+  const tripInitialized = useRailWatchStore(state => state.tripInitialized);
+  const savedConfig = useRailWatchStore(state => state.savedConfig);
+  const draftRevisionBase = useRef(0);
+  const draftWriteChain = useRef<Promise<void>>(Promise.resolve());
 
   const applyEvent = useCallback(
     (event: BridgeEvent) => {
@@ -89,6 +101,9 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       )
         return;
       switch (event.event) {
+        case "queryStarted":
+          state.applyQueryStarted(event.payload as import("./types").QueryAttempt);
+          break;
         case "log":
           state.applyLog(event.payload as LogEntry);
           break;
@@ -142,8 +157,12 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
           });
           break;
         }
+        case "protocolError":
+          notification.warning({ message: "请求格式错误", description: "已忽略无效请求，当前任务继续运行。" });
+          break;
         case "runtimeError":
         case "runtimeExit":
+        case "runtimeUnavailable":
           state.applyState({
             ...state.status,
             monitoring: false,
@@ -153,14 +172,18 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
             error_message: "运行时中断",
           });
           notification.error({
+            key: "runtime-state",
             message: "Python 运行时异常",
-            description:
-              (event.payload as { message?: string }).message || "请稍后重试。",
+            description: <span>{(event.payload as { message?: string }).message || "请稍后重试。"}
+              {event.event === "runtimeUnavailable" ? <button type="button" onClick={() => {
+                void railwatchApi.command("retryRuntime").catch(() => undefined);
+              }}>重试运行时</button> : null}</span>,
             placement: "topRight",
             duration: 0,
           });
           break;
         case "runtimeRestarted":
+          notification.destroy("runtime-state");
           void railwatchApi
             .command<RuntimeInfo>("getRuntimeInfo")
             .then((info) => railwatchStore.getState().applyRuntimeInfo(info))
@@ -196,14 +219,23 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   );
 
   const showThemedDialog = useCallback<ThemedDialog>(
-    ({ title, content, okText, cancelText }) =>
+    ({ title, content, okText, cancelText, kind, danger }) =>
       new Promise<boolean>((resolve) => {
         modal.confirm({
           title,
-          content,
+          content: <div className="dialog-copy">{content}</div>,
+          icon: kind === "info" ? <Info className="dialog-symbol" size={20} /> : danger
+            ? <TriangleAlert className="dialog-symbol danger" size={20} /> : <CircleHelp className="dialog-symbol" size={20} />,
           okText,
           cancelText,
           centered: true,
+          className: "railwatch-dialog",
+          width: 480,
+          zIndex: 1200,
+          okCancel: kind !== "info",
+          okButtonProps: { danger, style: danger ? { color: "var(--surface)" } : undefined },
+          focusable: { autoFocusButton: kind === "info" ? "ok" : "cancel" },
+          mask: { closable: false },
           onOk: () => resolve(true),
           onCancel: () => resolve(false),
         });
@@ -227,6 +259,11 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       successText?: string,
     ): Promise<T | undefined> => {
       setBusy(command);
+      const queryRequestId = command === "analyzeQuery" ? crypto.randomUUID() : null;
+      if (queryRequestId) {
+        railwatchStore.getState().beginManualQuery(queryRequestId, (payload.config ?? railwatchStore.getState().config) as RailWatchConfig);
+        payload = { ...payload, request_id: queryRequestId };
+      }
       try {
         const result = await railwatchApi.command<
           T | ConfirmationRequest | { cancelled?: boolean }
@@ -259,14 +296,32 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         if (isStatusPayload(result)) {
           railwatchStore.getState().applyState(result);
         }
+        if (command === "saveConfig" && result) {
+          const saved = structuredClone((payload.config ?? railwatchStore.getState().config) as RailWatchConfig);
+          railwatchStore.getState().markConfigSaved(saved, Date.now() / 1000);
+          const revision = ++draftRevisionBase.current;
+          railwatchApi.stageDraft({ config: saved, revision });
+          draftWriteChain.current = draftWriteChain.current.then(async () => {
+            try {
+              const draft = await railwatchApi.command<TripDraft>("saveTripDraft", { config: saved, revision });
+              railwatchStore.getState().markDraftSaved(railwatchStore.getState().editRevision, draft.revision, draft.saved_at);
+            } catch (error) {
+              railwatchStore.getState().markDraftError(railwatchStore.getState().editRevision,
+                error instanceof Error ? error.message : String(error));
+            }
+          });
+        }
         if (successText) {
           message.success(successText);
         }
         return result as T;
       } catch (error) {
+        if (command === "saveConfig") railwatchStore.getState().markConfigSaveError(error instanceof Error ? error.message : String(error));
+        if (queryRequestId) railwatchStore.getState().endManualQuery(queryRequestId, error instanceof Error ? error.message : String(error));
         message.error(error instanceof Error ? error.message : String(error));
         return undefined;
       } finally {
+        if (queryRequestId && railwatchStore.getState().manualQueryPending) railwatchStore.getState().endManualQuery(queryRequestId);
         setBusy(null);
       }
     },
@@ -275,9 +330,10 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
 
   const saveTheme = async (
     mode: Parameters<typeof appearance.saveTheme>[0],
+    origin?: Parameters<typeof appearance.saveTheme>[1],
   ) => {
     try {
-      await appearance.saveTheme(mode);
+      await appearance.saveTheme(mode, origin);
     } catch (error) {
       message.error(
         error instanceof Error ? error.message : "主题保存失败，请重试。",
@@ -286,15 +342,19 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   };
 
   const exportLog = useCallback(async () => {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
     const defaultPath = runtime.data_dir
       ? `${runtime.data_dir}/railwatch-events.txt`
       : undefined;
     try {
-      await exportEventLog(defaultPath, runCommand);
+      await exportEventLog(defaultPath, runCommand, choosePath);
     } catch (error) {
       message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      exportingRef.current = false;
     }
-  }, [message, runCommand, runtime.data_dir]);
+  }, [message, runCommand, runtime.data_dir, choosePath]);
 
   useEffect(() => {
     const unsubscribe = railwatchApi.onEvent(applyEvent);
@@ -303,9 +363,14 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       if (runtimeInfo) {
         railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
       }
-      const config = await runCommand<RailWatchConfig>("loadConfig");
-      if (config) {
-        railwatchStore.getState().setConfig(config);
+      const trip = await runCommand<TripState>("loadTripState");
+      if (trip) {
+        const draft = trip.draft.status === "available" &&
+          (trip.draft.draft.saved_at <= (trip.saved_at ?? 0) ||
+           tripFingerprint({ ...trip.saved_config, ...trip.draft.draft.config }) === tripFingerprint(trip.saved_config))
+          ? { status: "missing" as const, draft: null, warning: null } : trip.draft;
+        railwatchStore.getState().initializeTrip(trip.saved_config, trip.saved_at, draft);
+        draftRevisionBase.current = trip.draft.status === "available" ? trip.draft.draft.revision : 0;
       }
     })();
 
@@ -326,6 +391,27 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     };
   }, [applyEvent, runCommand]);
 
+  useEffect(() => {
+    if (!tripInitialized || editRevision === 0) return;
+    const state = railwatchStore.getState();
+    const snapshot = structuredClone(state.config);
+    const revision = ++draftRevisionBase.current;
+    railwatchApi.stageDraft({ config: snapshot, revision });
+    const timer = window.setTimeout(() => {
+      draftWriteChain.current = draftWriteChain.current.then(async () => {
+        const current = railwatchStore.getState();
+        current.markDraftSaving(editRevision);
+        try {
+          const saved = await railwatchApi.command<TripDraft>("saveTripDraft", { config: snapshot, revision });
+          railwatchStore.getState().markDraftSaved(editRevision, saved.revision, saved.saved_at);
+        } catch (error) {
+          railwatchStore.getState().markDraftError(editRevision, error instanceof Error ? error.message : String(error));
+        }
+      });
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [editRevision, tripInitialized, savedConfig]);
+
   const content = useMemo(() => {
     if (activePage === "行程设置") {
       return (
@@ -334,6 +420,9 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     }
     if (activePage === "购票监控") {
       return <MonitorPage busy={busy} runCommand={runCommand} />;
+    }
+    if (activePage === "订单中心") {
+      return <OrderCenterPage busy={busy} runCommand={runCommand} />;
     }
     if (activePage === "系统设置") {
       return <SettingsPage busy={busy} runCommand={runCommand} />;
@@ -349,7 +438,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       value={{
         mode: appearance.mode,
         disabled: appearance.disabled,
-        onChange: (mode) => void saveTheme(mode),
+        onChange: (mode, origin) => void saveTheme(mode, origin),
       }}
     >
       <ShellLayout
@@ -371,6 +460,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       >
         {content}
       </ShellLayout>
+      {exportDialog}
     </ThemeContext.Provider>
   );
 }

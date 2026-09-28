@@ -1,9 +1,19 @@
 import path from "node:path";
+import type { ConfirmationPrompt } from "./confirmationBridge";
 
 export const RAILWATCH_COMMANDS = [
+  "retryRuntime",
   "getRuntimeInfo",
   "loadConfig",
   "saveConfig",
+  "loadTripState",
+  "saveTripDraft",
+  "searchStations",
+  "refreshStations",
+  "stationSaleTimes",
+  "loadTripChoices",
+  "saveTrainFavorites",
+  "readPassengers",
   "checkEnvironment",
   "downloadChromeDriver",
   "openLogin",
@@ -11,7 +21,10 @@ export const RAILWATCH_COMMANDS = [
   "analyzeQuery",
   "startMonitor",
   "stopMonitor",
+  "taskActivity",
   "continueOrder",
+  "orderHistory",
+  "orderDetail",
   "dismissOrder",
   "closeBrowser",
   "clearLocalData",
@@ -19,15 +32,14 @@ export const RAILWATCH_COMMANDS = [
   "clearLog",
   "loadPreferences",
   "savePreferences",
+  "notificationStatus",
+  "testNotification",
   "syncServerTime",
 ] as const;
 
 export type RailWatchCommandName = (typeof RAILWATCH_COMMANDS)[number];
 
-export type ConfirmationPrompt = {
-  title: string;
-  message: string;
-};
+export type { ConfirmationPrompt } from "./confirmationBridge";
 
 const commandSet = new Set<string>(RAILWATCH_COMMANDS);
 
@@ -60,6 +72,8 @@ export function isAllowedExternalUrl(value: unknown): value is string {
   }
   try {
     const url = new URL(value);
+    if (url.origin === "https://kyfw.12306.cn" && url.pathname === "/index/view/infos/sale_time.html"
+        && !url.username && !url.password && !url.search && !url.hash) return true;
     return url.protocol === "https:" && ALLOWED_EXTERNAL_HOSTS.has(url.hostname.toLowerCase());
   } catch {
     return false;
@@ -76,6 +90,7 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
   if (command === "clearLocalData") {
     return {
       title: "清除本地数据",
+      okText: "清除数据", danger: true,
       message: "此操作将删除本地 RailWatch 配置、日志和 Chrome 配置。是否继续？",
     };
   }
@@ -87,12 +102,20 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
   }
   if (command === "startMonitor") {
     const config = isRecord(payload.config) ? payload.config : payload;
-    if (Boolean(config.auto_submit) || Boolean(config.auto_alternate)) {
-      return {
-        title: "确认自动化",
-        message: "你已启用自动提交或自动候补。请确认是否允许本次自动化操作。",
-      };
-    }
+    const dates = Array.isArray(payload.expected_dates) ? payload.expected_dates.join("、") : String(config.date || "未指定");
+    return {
+      title: "核对本次监控",
+      message: [
+        `执行日期：${dates}`,
+        `路线：${config.from_station_cn || "未指定"} → ${config.to_station_cn || "未指定"}`,
+        `车次优先顺序：${config.train_code || "不限"}`,
+        `席别优先顺序：${config.seat_keyword || "不限"}`,
+        `乘客：${config.passengers || "未指定"}`,
+        `起售时刻：${config.timer_enabled ? config.sale_at || "未设置" : "未启用定时"}`,
+        `自动提交：${config.auto_submit ? "开" : "关"}；自动候补：${config.auto_alternate ? "开" : "关"}`,
+        "确认后按上述配置启动。核验和支付仍需在官方页面完成。",
+      ].join("\n"),
+    };
   }
   return null;
 }

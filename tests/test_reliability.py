@@ -147,7 +147,7 @@ class ReliabilityTests(unittest.TestCase):
             self.assertTrue(bridge._task.cancel.is_set())
             self.assertNotIn("已失效", bridge.state.status_message)
             self.assertIn("无法确认", bridge.state.status_message)
-            bridge.notification_service.notify.assert_called_once()
+            bridge.notification_service.enqueue.assert_called_once()
 
     def test_wait_checks_login_without_repeated_navigation(self):
         with tempfile.TemporaryDirectory() as tmp:

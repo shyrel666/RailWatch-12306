@@ -1,8 +1,5 @@
-import { createHash } from "node:crypto";
-import { createWriteStream, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
 
 export type UpdateAsset = {
   name: string;
@@ -35,10 +32,6 @@ export type UpdateCheckFailure = {
 };
 
 export type UpdateCheckResult = UpdateCheckSuccess | UpdateCheckFailure;
-
-export type UpdateDownloadResult =
-  | { ok: true; filePath: string; fileName: string }
-  | { ok: false; error: string; code: "network" | "hash-mismatch" | "no-asset" | "unknown" };
 
 export type UpdateCheckerConfig = {
   owner: string;
@@ -524,62 +517,6 @@ export function getLastSuccessfulCheck(): UpdateCheckSuccess | null {
 
 export function resetLastSuccessfulCheck(): void {
   lastSuccessfulCheck = null;
-}
-
-async function verifySha256(filePath: string, expectedSha256: string): Promise<boolean> {
-  const hash = createHash("sha256");
-  const data = await fs.readFile(filePath);
-  hash.update(data);
-  return hash.digest("hex").toLowerCase() === expectedSha256.toLowerCase();
-}
-
-export async function downloadUpdateAsset(
-  asset: UpdateAsset,
-  downloadDir: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<UpdateDownloadResult> {
-  if (!isAllowedDownloadUrl(asset.url)) {
-    return { ok: false, error: "Download URL is not allowed.", code: "unknown" };
-  }
-
-  await fs.mkdir(downloadDir, { recursive: true });
-  const tempPath = path.join(downloadDir, `${asset.name}.download`);
-  const finalPath = path.join(downloadDir, asset.name);
-
-  try {
-    const response = await fetchImpl(asset.url, {
-      headers: { "User-Agent": "RailWatch-12306-Updater" },
-    });
-    if (!response.ok || !response.body) {
-      return {
-        ok: false,
-        error: `Download failed with status ${response.status}.`,
-        code: "network",
-      };
-    }
-
-    const nodeStream = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream);
-    await pipeline(nodeStream, createWriteStream(tempPath));
-
-    if (asset.sha256) {
-      const valid = await verifySha256(tempPath, asset.sha256);
-      if (!valid) {
-        await fs.rm(tempPath, { force: true });
-        return { ok: false, error: "Downloaded file failed SHA-256 verification.", code: "hash-mismatch" };
-      }
-    }
-
-    await fs.rm(finalPath, { force: true });
-    await fs.rename(tempPath, finalPath);
-    return { ok: true, filePath: finalPath, fileName: asset.name };
-  } catch (error) {
-    await fs.rm(tempPath, { force: true });
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Download failed.",
-      code: "network",
-    };
-  }
 }
 
 export function createDefaultUpdateConfig(currentVersion: string, userDataPath: string): UpdateCheckerConfig {

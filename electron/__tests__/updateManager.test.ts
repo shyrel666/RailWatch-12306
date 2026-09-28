@@ -30,7 +30,7 @@ describe("updateManager", () => {
       releaseName: "RailWatch 1.2.0",
       releaseNotes: "New features",
       releaseDate: "2026-06-01T00:00:00.000Z",
-    });
+    }, true);
 
     expect(mapped).toEqual({
       ok: true,
@@ -56,7 +56,7 @@ describe("updateManager", () => {
       onStateChange: (state) => states.push(state.phase),
     });
 
-    await manager.checkForUpdates({ force: true });
+    await manager.checkForUpdates();
     expect(states).toContain("checking");
 
     updater.emit("update-available", { version: "1.2.0", releaseNotes: "Notes" });
@@ -88,7 +88,7 @@ describe("updateManager", () => {
       enabled: true,
     });
 
-    const result = await manager.checkForUpdates({ force: true });
+    const result = await manager.checkForUpdates();
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.hasUpdate).toBe(false);
@@ -105,7 +105,7 @@ describe("updateManager", () => {
       enabled: false,
     });
 
-    const result = await manager.checkForUpdates({ force: true });
+    const result = await manager.checkForUpdates();
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.code).toBe("unknown");
@@ -126,7 +126,7 @@ describe("updateManager", () => {
       enabled: true,
     });
 
-    const result = await manager.checkForUpdates({ force: true });
+    const result = await manager.checkForUpdates();
 
     expect(result.ok).toBe(false);
     if (!result.ok) {

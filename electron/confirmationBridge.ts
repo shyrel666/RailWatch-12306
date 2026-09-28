@@ -1,6 +1,10 @@
 export type ConfirmationPrompt = {
   title: string;
   message: string;
+  okText?: string;
+  cancelText?: string;
+  kind?: "confirm" | "info";
+  danger?: boolean;
 };
 
 export type ConfirmationRequestPayload = ConfirmationPrompt & {
@@ -43,7 +47,7 @@ export class ConfirmationBridge {
       }, this.timeoutMs);
       this.pending.set(id, { resolve, timer });
       try {
-        this.options.sendRequest({ id, title: prompt.title, message: prompt.message });
+        this.options.sendRequest({ ...prompt, id });
       } catch {
         this.settle(id, false);
       }
@@ -52,6 +56,10 @@ export class ConfirmationBridge {
 
   respond(id: string, accepted: boolean): void {
     this.settle(id, accepted === true);
+  }
+
+  isPending(id: string): boolean {
+    return this.pending.has(id);
   }
 
   /** Decline every pending confirmation, e.g. when the window goes away. */

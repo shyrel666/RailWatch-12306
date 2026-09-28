@@ -31,6 +31,7 @@ beforeEach(() => {
     updateCaptor = callback;
     return () => undefined;
   });
+  vi.spyOn(railwatchApi, "command").mockImplementation(async () => ({ state: "idle", run_id: null, operation: null, unresolved_order: false, checked_at: 1 }) as never);
   vi.spyOn(railwatchApi, "installUpdate").mockImplementation(async () => {
     installed.push(1);
     return { ok: true };
@@ -96,6 +97,18 @@ test("queues concurrent confirmations and answers them one by one", async () => 
   );
 });
 
+test("uses explicit exit actions and a single acknowledgement for tray notices", async () => {
+  renderHook(() => useConfirmationBridge(showDialog));
+  await act(async () => {
+    confirmCaptor?.({ id: "exit", title: "无法安全退出", message: "任务尚未结束", okText: "强制退出", cancelText: "保留任务", danger: true });
+  });
+  expect(showDialog).toHaveBeenCalledWith({ title: "无法安全退出", content: "任务尚未结束", okText: "强制退出", cancelText: "保留任务", danger: true });
+  await act(async () => {
+    confirmCaptor?.({ id: "tray", title: "关闭到托盘", message: "后台继续运行", kind: "info", okText: "知道了" });
+  });
+  expect(showDialog).toHaveBeenLastCalledWith({ title: "关闭到托盘", content: "后台继续运行", kind: "info", okText: "知道了", cancelText: "取消" });
+});
+
 test("declines the active confirmation when the hook unmounts mid-dialog", async () => {
   showDialog.mockImplementationOnce(
     () => new Promise<boolean>(() => undefined),
@@ -145,5 +158,13 @@ test("does not install again when the user chooses to wait", async () => {
     updateCaptor?.({ phase: "downloaded", currentVersion: "0.3.6", latestVersion: "0.3.7" });
   });
   await waitFor(() => expect(showDialog).toHaveBeenCalledTimes(1));
+  expect(installed).toHaveLength(0);
+});
+
+test("defers update prompt while a task is active", async () => {
+  vi.spyOn(railwatchApi, "command").mockImplementation(async () => ({ state: "busy", run_id: "run", operation: "submitting", unresolved_order: false, checked_at: 1 }) as never);
+  renderHook(() => useUpdateReadyPrompt(showDialog));
+  await act(async () => { updateCaptor?.({ phase: "downloaded", currentVersion: "0.4.1", latestVersion: "0.4.2" }); });
+  expect(showDialog).not.toHaveBeenCalled();
   expect(installed).toHaveLength(0);
 });

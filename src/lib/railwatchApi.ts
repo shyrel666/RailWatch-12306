@@ -3,6 +3,9 @@ import type { AppInfo, BridgeEvent, ConfirmRequestPayload, UpdateCheckResult, Up
 const missingElectronMessage = "Electron bridge is not available.";
 
 export const railwatchApi = {
+  stageDraft(draft: { config: Record<string, unknown>; revision: number } | null) {
+    window.railwatch?.stageDraft(draft);
+  },
   command<T>(command: string, payload: Record<string, unknown> = {}) {
     if (!window.railwatch) {
       return Promise.reject(new Error(missingElectronMessage));
@@ -15,11 +18,17 @@ export const railwatchApi = {
     }
     return window.railwatch.onEvent(callback);
   },
-  showSaveDialog(defaultPath?: string) {
-    if (!window.railwatch) {
-      return Promise.resolve(null);
-    }
-    return window.railwatch.showSaveDialog(defaultPath);
+  getExportLocations(defaultPath?: string) {
+    if (!window.railwatch) return Promise.reject(new Error(missingElectronMessage));
+    return window.railwatch.getExportLocations(defaultPath);
+  },
+  listExportDirectory(directory: string) {
+    if (!window.railwatch) return Promise.reject(new Error(missingElectronMessage));
+    return window.railwatch.listExportDirectory(directory);
+  },
+  prepareLogExport(directory: string, fileName: string) {
+    if (!window.railwatch) return Promise.reject(new Error(missingElectronMessage));
+    return window.railwatch.prepareLogExport(directory, fileName);
   },
   stopUrgentAlert() {
     window.railwatch?.stopUrgentAlert();
@@ -33,11 +42,11 @@ export const railwatchApi = {
   respondConfirmation(id: string, accepted: boolean) {
     window.railwatch?.respondConfirmation(id, accepted);
   },
-  checkUpdate(options: { force?: boolean } = {}) {
+  checkUpdate() {
     if (!window.railwatch) {
       return Promise.reject(new Error(missingElectronMessage));
     }
-    return window.railwatch.checkUpdate(options) as Promise<UpdateCheckResult>;
+    return window.railwatch.checkUpdate() as Promise<UpdateCheckResult>;
   },
   getUpdateState() {
     if (!window.railwatch) {
@@ -70,4 +79,4 @@ export const railwatchApi = {
     return window.railwatch.getAppInfo() as Promise<AppInfo>;
   },
 };
-
+

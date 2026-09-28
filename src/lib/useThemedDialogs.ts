@@ -7,6 +7,8 @@ export type ThemedDialogOptions = {
   content: string;
   okText: string;
   cancelText: string;
+  kind?: "confirm" | "info";
+  danger?: boolean;
 };
 
 export type ThemedDialog = (options: ThemedDialogOptions) => Promise<boolean>;
@@ -36,8 +38,10 @@ export function useConfirmationBridge(showDialog: ThemedDialog): void {
     void showDialog({
       title: active.title,
       content: active.message,
-      okText: "确认",
-      cancelText: "取消",
+      okText: active.okText ?? "确认",
+      cancelText: active.cancelText ?? "取消",
+      ...(active.kind ? { kind: active.kind } : {}),
+      ...(active.danger !== undefined ? { danger: active.danger } : {}),
     })
       .then((accepted) => {
         settled = true;
@@ -75,19 +79,23 @@ export function useUpdateReadyPrompt(showDialog: ThemedDialog): void {
       if (promptedVersionRef.current === payload.latestVersion) {
         return;
       }
-      promptedVersionRef.current = payload.latestVersion;
-      void showDialog({
+      void railwatchApi.command<import("../types").TaskActivity>("taskActivity").then((activity) => {
+        if (activity.state !== "idle" || activity.unresolved_order || promptedVersionRef.current === payload.latestVersion) return;
+        promptedVersionRef.current = payload.latestVersion!;
+        return showDialog({
         title: "发现新版本",
         content: `RailWatch 12306 ${payload.latestVersion} 已下载完成。是否立即重启安装更新？`,
         okText: "立即重启安装",
         cancelText: "稍后",
-      })
-        .then((accepted) => {
+        }).then(async (accepted) => {
           if (accepted) {
-            void railwatchApi.installUpdate();
+            const result = await railwatchApi.installUpdate();
+            if (!result.ok) {
+              await showDialog({ title: "更新已推迟", content: result.error || "当前无法安装更新。", okText: "知道了", cancelText: "关闭" });
+            }
           }
-        })
-        .catch(() => undefined);
+        });
+      }).catch(() => undefined);
     });
   }, [showDialog]);
 }

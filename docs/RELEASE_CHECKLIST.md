@@ -12,15 +12,19 @@ Use this checklist before publishing a source release or packaged Electron build
 ## Automated Verification
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+python -X utf8 -m unittest discover -s tests -p "test_*.py"
 python -m py_compile railwatch_state.py gui_12306_0.py anti_detect.py chromedriver_manager.py railwatch_preferences.py railwatch_bridge.py railwatch_runtime.py
 npm run test
 npm run build
 python -X utf8 tests/browser_smoke.py
-.\package-windows.cmd 0.2.0
+python -X utf8 tests/order_browser_smoke.py
+python -X utf8 tests/query_ui_smoke.py
+python -X utf8 tests/notification_ui_smoke.py
+python -X utf8 tests/trip_order_ui_smoke.py
+.\package-windows.cmd 0.4.2
 ```
 
-Use `.\package-windows.cmd 0.2.0 --install-deps` only when Node or Python packaging dependencies need to be reinstalled. Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
+Use `.\package-windows.cmd 0.4.2 --install-deps` only when Node or Python packaging dependencies need to be reinstalled. Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
 
 Upload only matching assets from the same build to the GitHub Release:
 
@@ -33,7 +37,7 @@ Upload only matching assets from the same build to the GitHub Release:
 - Run `python -X utf8 tests/packaged_smoke.py` with matching ChromeDriver installed for the browser fixture suite.
 - Start `release/win-unpacked/RailWatch 12306.exe`.
 - Confirm the Electron window loads `RailWatch 12306`.
-- Confirm the renderer shows the four pages: `Dashboard`, `Trip Setup`, `Monitor`, `Settings`.
+- Confirm the renderer shows five functional pages: `Dashboard`, `Trip Setup`, `Monitor`, `Order Center`, `Settings`, plus `About`.
 - Confirm the Python runtime process starts and exits with the app.
 - Confirm no `RailWatch 12306.exe` or `railwatch_runtime.exe` processes remain after exit.
 

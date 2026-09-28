@@ -308,7 +308,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         )
         monitor.click_query_button = lambda: True
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
-        monitor._find_hit_row = lambda indices: None
+        monitor._find_hit_row = lambda indices=None: None
         monitor.row_parser.snapshot_rows = Mock(return_value=[])
 
         with patch("gui_12306_0.time.sleep", lambda seconds: None):
@@ -349,7 +349,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         )
         monitor.click_query_button = lambda: True
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
-        monitor._find_hit_row = lambda indices: ("G101", "二等座", "有", object(), None, "book")
+        monitor._find_hit_row = lambda indices=None: ("G101", "二等座", "有", object(), None, "book")
         monitor._focus_and_highlight = lambda row, btn: None
         monitor.row_parser.snapshot_rows = Mock(return_value=[{"train":"G101", "raw":"G101 北京 上海 二等座 有", "seats":{}, "element":Row("G101")}])
 
@@ -358,7 +358,10 @@ class TicketMonitorLogicTests(unittest.TestCase):
 
         self.assertTrue(hit)
         self.assertEqual(progress_events[0]["loop"], 1)
-        self.assertEqual(progress_events[0]["rows"], [{"train": "G101", "raw": "G101 北京 上海 二等座 有"}])
+        self.assertEqual(progress_events[0]["rows"][0]["train"], "G101")
+        self.assertEqual(progress_events[0]["rows"][0]["raw"], "G101 北京 上海 二等座 有")
+        self.assertEqual(progress_events[0]["snapshot"]["status"], "success")
+        self.assertNotIn("element", progress_events[0]["rows"][0])
         self.assertEqual(hit_events[0]["train_code"], "G101")
         self.assertEqual(hit_events[0]["seat_type"], "二等座")
         self.assertEqual(hit_events[0]["status"], "有")
@@ -538,7 +541,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         from railwatch_orders import OrderResult
         from test_orders import intent, CONFIG
         button = Mock()
-        flow = AlternateFlow(Mock(), CONFIG, Mock(), find_alternate_button=lambda row, seat: button)
+        flow = AlternateFlow(Mock(), CONFIG, find_alternate_button=lambda row, seat: button)
         flow.order_page = Mock()
         expected = OrderResult("pending_payment", order_id="E123")
         flow.order_page.alternate.return_value = expected
@@ -556,27 +559,11 @@ class TicketMonitorLogicTests(unittest.TestCase):
     def test_alternate_submit_reports_not_submitted_when_button_missing(self):
         from railwatch_alternate_flow import AlternateFlow
         from test_orders import CONFIG, intent
-        flow = AlternateFlow(Mock(), CONFIG, Mock(), find_alternate_button=lambda *args: None)
+        flow = AlternateFlow(Mock(), CONFIG, find_alternate_button=lambda *args: None)
         result = flow.try_alternate_order(Mock(), "G101", "二等座", intent("alternate"))
         self.assertEqual(result.status, "not_submitted")
         self.assertTrue(result.no_order)
 
-    def test_alternate_success_present_reflects_driver_result_and_is_safe(self):
-        class Driver:
-            def __init__(self, value):
-                self.value = value
-
-            def execute_script(self, script, *args):
-                return self.value
-
-        self.assertFalse(TicketMonitor(Driver(True), {}, log_callback=lambda m: None).verification.alternate_success_present())
-        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None).verification.alternate_success_present())
-
-        class BadDriver:
-            def execute_script(self, script, *args):
-                raise RuntimeError("boom")
-
-        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None).verification.alternate_success_present())
 
     def test_alternate_submit_hands_off_on_verification(self):
         from test_orders import snapshot, intent
@@ -649,22 +636,6 @@ class TicketMonitorLogicTests(unittest.TestCase):
             self.assertEqual(hits, [])
             self.assertEqual(len(humans), 1)
 
-    def test_verification_present_reflects_driver_result_and_is_safe(self):
-        class Driver:
-            def __init__(self, value):
-                self.value = value
-
-            def execute_script(self, script, *args):
-                return self.value
-
-        self.assertTrue(TicketMonitor(Driver(True), {}, log_callback=lambda m: None).verification.verification_present())
-        self.assertFalse(TicketMonitor(Driver(False), {}, log_callback=lambda m: None).verification.verification_present())
-
-        class BadDriver:
-            def execute_script(self, script, *args):
-                raise RuntimeError("boom")
-
-        self.assertFalse(TicketMonitor(BadDriver(), {}, log_callback=lambda m: None).verification.verification_present())
 
     def test_unknown_burst_timeout_preserves_timeout_and_backoff(self):
         # 定时爆发期：单轮等待压缩到秒级，失败立即关弹窗重试，避免一次空等耗尽爆发窗口
@@ -758,7 +729,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         monitor.row_parser.snapshot_rows = Mock(return_value=[])
         monitor.click_query_button = lambda: True
         monitor.wait_for_rows = lambda timeout=40, stop_check=None: True
-        monitor._find_hit_row = lambda indices: None
+        monitor._find_hit_row = lambda indices=None: None
 
         with patch("gui_12306_0.time.sleep", lambda seconds: None):
             monitor._run_single_loop(1, 1)

@@ -10,7 +10,8 @@ class RailWatchRuntimeTests(unittest.TestCase):
         events = []
         runtime = RailWatchRuntime(bridge=Mock(), writer=lambda payload: events.append(payload))
         runtime.handle_line("not-json").result()
-        self.assertTrue(any(item.get("event") == "runtimeError" for item in events))
+        self.assertTrue(any(item.get("event") == "protocolError" for item in events))
+        runtime.shutdown()
 
     def test_sync_server_time_command_is_registered(self):
         bridge = Mock()

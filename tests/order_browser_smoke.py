@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from railwatch_bridge import CHROMEDRIVER_PATH
-from railwatch_order_page import OrderPage
+from railwatch_order_page import OrderPage, ConfirmationOutcome
 from railwatch_orders import OrderIntent
 from railwatch_submit_flow import SubmitFlow
 
@@ -39,12 +39,56 @@ class OrderBrowserTests(unittest.TestCase):
     def js(self, script, *args):
         return self.driver.execute_script(script, *args)
 
+    def test_delivered_confirmation_losing_its_dom_receipt_never_replays(self):
+        self.driver.find_element("id", "book").click()
+        self.driver.find_element("id", "submitOrder_id").click()
+        self.js("""el('qr_submit_id').onclick=()=>{
+          fixture.confirmClicks++;
+          const old=el('qr_submit_id'); old.replaceWith(old.cloneNode(true));
+          setTimeout(()=>record(),400);
+        };""")
+        outcome = self.page._click_regular_confirmation(self.driver.find_element("id", "qr_submit_id"), self.intent)
+        self.assertIs(outcome, ConfirmationOutcome.UNKNOWN)
+        self.page.reconcile = Mock()
+        result = self.page._post_submit(self.intent, False)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return fixture.confirmClicks"), 1)
+        self.page.reconcile.assert_not_called()
+
+    def test_delayed_empty_order_view_never_authorizes_resubmission(self):
+        self.js("""document.body.innerHTML='<div id="J-order-payment">您没有待支付订单</div>';
+          setTimeout(()=>document.querySelector('#J-order-payment').innerHTML=
+            '<div class="order-item"><div class="order-item-hd">订单号：E123456 <span class="order-status">待支付</span></div><p>G101 2026-09-10 北京 上海 二等座</p><div class="passenger-name"><strong title="张三">张三</strong></div><a>去支付</a></div>',1200);""")
+        for _ in range(2):
+            self.assertFalse(self.page.result(self.intent, submitted=True, allow_empty=True).no_order)
+            self.page.wait(0.35)
+        self.assertEqual(self.page.wait_result(self.intent, timeout=3).status, "pending_payment")
+        self.js("document.querySelector('.order-item').className='changed-row'")
+        self.assertEqual(self.page.result(self.intent, submitted=True, allow_empty=True).status, "unknown")
+        self.js("document.querySelector('#J-order-payment').prepend(document.createTextNode('您没有待支付订单'))")
+        self.assertFalse(self.page.result(self.intent, submitted=True, allow_empty=True).no_order)
+
     def test_regular_order_verified_once_then_payment_observed(self):
         result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
         self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
         self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
         self.js("fixture.record('已支付')")
         self.assertEqual(self.page.result(self.intent, known_id="E123456").status, "fulfilled")
+
+    def test_verified_regular_seat_options_are_read_back_before_submit(self):
+        for seat in ("一等座", "硬座", "软座", "硬卧", "软卧"):
+            with self.subTest(seat=seat):
+                self.setUp()
+                self.js("""const previous=people, seat=arguments[0];
+                  people=(...args)=>{previous(...args);
+                    document.querySelectorAll('select[id^="seatType_"]').forEach(select=>{
+                      if (![...select.options].some(option=>option.text===seat))
+                        select.add(new Option(seat,seat));
+                    });
+                  };""", seat)
+                result = self.page.regular(self.driver.find_element("id", "book"), replace(self.intent, seat=seat))
+                self.assertEqual(result.status, "pending_payment")
+                self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
 
     def test_official_processing_dialog_waits_for_matching_order(self):
         self.js("""
@@ -295,6 +339,15 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(result.status, "verification")
         self.assertEqual(self.js("return fixture.regularClicks"), 0)
 
+    def test_unknown_or_nonadult_passenger_never_reaches_submit(self):
+        for label in ("张三", "张三（学生）", "张三（儿童）"):
+            with self.subTest(label=label):
+                self.setUp()
+                self.js("document.querySelector('#normal_passenger_id label').lastChild.textContent=arguments[0]", label)
+                result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+                self.assertEqual(result.status, "verification")
+                self.assertEqual(self.js("return fixture.regularClicks"), 0)
+
     def test_sold_out_before_submission_can_fallback(self):
         self.js("fixture.mode='sold_out'")
         self.assertTrue(self.page.regular(self.driver.find_element("id", "book"), self.intent).can_fallback)
@@ -325,6 +378,44 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(self.page.result(selected).status, "unknown")
         self.js("document.querySelector('.order-item p').textContent='1461次 2026年9月10日 北京 上海 二等座 ¥88.0元'")
         self.assertEqual(self.page.result(selected).status, "pending_payment")
+
+    def test_all_visible_train_evidence_must_match_one_train(self):
+        for code, markup, expected in [
+            ("G101", "G101次 G102次", "unknown"),
+            ("G101", '<span class="train-num">G101</span><span class="train-num">G102</span>', "unknown"),
+            ("G101", '<span class="train-num">G101</span> G102次', "unknown"),
+            ("G101", '<span data-train-code="G101">G102</span> G101', "unknown"),
+            ("1461", "1461次 G102次", "unknown"),
+            ("1461", '<span class="train-num">1461 1462</span>', "unknown"),
+            ("1461", '<span class="train-num">1461</span> ¥1462.0元', "pending_payment"),
+            ("1461", "¥1461.0元", "unknown"),
+            ("G101", '<span class="train-num hidden">G102</span><span class="train-num">G101</span>', "pending_payment"),
+            ("G101", '<span data-train-code="G101">G101次</span>', "pending_payment"),
+        ]:
+            for kind in ("regular", "alternate"):
+                with self.subTest(code=code, markup=markup, kind=kind):
+                    header = "候补单号" if kind == "alternate" else "订单号"
+                    self.js("""document.getElementById('records').innerHTML=
+                      `<div class="order-item"><div class="order-item-hd">${arguments[0]}：E123456
+                      <span class="order-status">待支付</span></div>
+                      <p>${arguments[1]} 2026年9月10日 北京 上海 二等座</p>
+                      <div class="passenger-name"><strong title="张三">张三</strong></div></div>`""", header, markup)
+                    self.assertEqual(self.page.result(replace(self.intent, train_code=code, kind=kind)).status, expected)
+
+    def test_payment_table_rejects_conflicting_train_evidence(self):
+        for trains, structured, expected in [
+            ("G101次", "", "pending_payment"),
+            ("G101次 G102次", "", "unknown"),
+            ("G101次", 'data-train-code="G102"', "unknown"),
+        ]:
+            with self.subTest(trains=trains, structured=structured):
+                self.js("""document.getElementById('records').innerHTML=
+                  `<p>订单号：E123456</p>
+                  <div id="show_title_ticket">2026-09-10 ${arguments[0]} 北京站—上海站</div>
+                  <table><thead><tr><th>姓名</th><th>席别</th></tr></thead>
+                  <tbody id="show_ticket_message"><tr><td ${arguments[1]}>张三</td><td>二等座</td></tr></tbody></table>
+                  <a id="payButton">网上支付</a>`""", trains, structured)
+                self.assertEqual(self.page.result(self.intent).status, expected)
 
     def test_accepted_confirmation_then_transport_failure_still_reads_order_without_retry(self):
         original_button = self.page.button

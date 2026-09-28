@@ -13,7 +13,7 @@ export function getUpdateStatusLabel(state: UpdateRuntimeState): string {
         ? `正在下载更新 ${Math.round(state.downloadPercent)}%`
         : "正在下载更新...";
     case "downloaded":
-      return state.latestVersion ? `新版本 ${state.latestVersion} 已下载，等待重启安装` : "更新已下载，等待重启安装";
+      return state.error || (state.latestVersion ? `新版本 ${state.latestVersion} 已下载，等待重启安装` : "更新已下载，等待重启安装");
     case "not-available":
       return "已是最新版本";
     case "error":
@@ -64,10 +64,10 @@ export function useAppUpdate(currentVersion: string) {
     };
   }, [currentVersion]);
 
-  const handleCheckUpdate = useCallback(async (force = false) => {
+  const handleCheckUpdate = useCallback(async () => {
     setChecking(true);
     try {
-      const result = await railwatchApi.checkUpdate({ force });
+      const result = await railwatchApi.checkUpdate();
       setUpdateState((current) => ({
         ...current,
         result,
@@ -94,9 +94,10 @@ export function useAppUpdate(currentVersion: string) {
 
   const handleInstallUpdate = useCallback(async () => {
     try {
-      await railwatchApi.installUpdate();
-    } catch {
-      // Restart is handled by the main process when installation starts.
+      const result = await railwatchApi.installUpdate();
+      if (!result.ok) setUpdateState((current) => ({ ...current, error: result.error || "当前无法安装更新。" }));
+    } catch (error) {
+      setUpdateState((current) => ({ ...current, error: error instanceof Error ? error.message : "当前无法安装更新。" }));
     }
   }, []);
 
@@ -110,7 +111,7 @@ export function useAppUpdate(currentVersion: string) {
       await handleInstallUpdate();
       return;
     }
-    await handleCheckUpdate(true);
+    await handleCheckUpdate();
   }, [hasDownloadedUpdate, handleCheckUpdate, handleInstallUpdate]);
 
   return {

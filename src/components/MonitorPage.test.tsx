@@ -6,6 +6,7 @@ import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from
 import { MonitorPage } from "./MonitorPage";
 import { todayIso } from "../lib/tripDate";
 import type { CommandRunner } from "./componentTypes";
+import { queryConfig, querySnapshot } from "../test/queryFixtures";
 
 function resetStore() {
   railwatchStore.setState({
@@ -14,6 +15,12 @@ function resetStore() {
     config: { ...defaultConfig, train_code: "G101" },
     logs: [],
     results: [],
+    queryViews: {},
+    queryConfig: null,
+    activeQuery: null,
+    manualQueryPending: false,
+    manualQueryError: null,
+    editRevision: 0,
     monitorLoops: 0,
     hits: [],
     notifications: [],
@@ -27,6 +34,33 @@ function resetStore() {
 describe("MonitorPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
+
+  test("running route results cannot be applied to a different next-run draft route", () => {
+    const snapshot = querySnapshot();
+    const draft = { ...queryConfig, from_station_cn: "广州", to_station_cn: "深圳", train_code: "G6001" };
+    railwatchStore.setState({ config: draft,
+      status: { ...defaultStatus, monitoring: true, current_config: queryConfig },
+      queryConfig, queryViews: { first: { owner: "run", latest: snapshot, success: snapshot } }, results: snapshot.rows,
+    });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.queryByRole("checkbox", { name: /选择.*G101/ })).toBeNull();
+    expect(screen.getByText(/部分查询结果与当前草稿的路线或日期不一致/)).toBeTruthy();
+    expect(railwatchStore.getState().config).toEqual(draft);
+  });
+
+  test("applying matching running results preserves the draft's train priority", async () => {
+    const snapshot = querySnapshot();
+    railwatchStore.setState({ config: { ...queryConfig, train_code: "G202" },
+      status: { ...defaultStatus, monitoring: true, current_config: queryConfig },
+      queryConfig, queryViews: { first: { owner: "run", latest: snapshot, success: snapshot } }, results: snapshot.rows,
+    });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("checkbox", { name: /选择.*G101/ }));
+    await user.click(screen.getByRole("button", { name: /将选中车次加入行程/ }));
+    expect(railwatchStore.getState().config.train_code).toBe("G202, G101");
+    expect(railwatchStore.getState().status.current_config.train_code).toBe("G101");
+  });
 
   test("keeps monitor controls gated by query and monitoring state", async () => {
     const user = userEvent.setup();
@@ -46,7 +80,9 @@ describe("MonitorPage", () => {
 
     await user.click(screen.getByRole("button", { name: /启动监控/ }));
 
-    expect(runCommand).toHaveBeenCalledWith("startMonitor", { config: expect.objectContaining({ train_code: "G101" }) });
+    expect(runCommand).toHaveBeenCalledWith("startMonitor", expect.objectContaining({
+      config: expect.objectContaining({ train_code: "G101" }), expected_dates: expect.arrayContaining([todayIso()]),
+    }));
 
     act(() => {
       railwatchStore.setState({
@@ -59,6 +95,16 @@ describe("MonitorPage", () => {
     await user.click(screen.getByRole("button", { name: /停止/ }));
 
     expect(runCommand).toHaveBeenCalledWith("stopMonitor");
+  });
+
+  test("start sends an immutable snapshot for the main-process confirmation", async () => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ config: { ...defaultConfig, date: todayIso(), train_code: "G101", seat_keyword: "二等座" }, editRevision: 1 });
+    render(<MonitorPage busy={null} runCommand={runCommand} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: /启动监控/ }));
+    act(() => railwatchStore.getState().setConfig({ train_code: "G102" }));
+    expect(runCommand).toHaveBeenCalledWith("startMonitor", expect.objectContaining({ config: expect.objectContaining({ train_code: "G101" }) }));
+    expect(vi.mocked(runCommand).mock.calls[0][1]).not.toHaveProperty("confirmed");
   });
 
   test("surfaces and dismisses a human-action handoff banner", async () => {

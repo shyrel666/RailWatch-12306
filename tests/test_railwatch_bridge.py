@@ -9,6 +9,67 @@ from unittest.mock import Mock, patch
 
 
 class RailWatchBridgeContractTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "DPAPI is available on Windows")
+    def test_legacy_secret_migration_failure_preserves_settings_and_allows_startup(self):
+        import pywintypes
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "notification_settings.json")
+            payload = {"email_enabled": True, "email_password": "legacy-secret"}
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            with patch("win32crypt.CryptProtectData", side_effect=pywintypes.error(5, "CryptProtectData", "access denied")):
+                bridge = RailWatchBridge(data_dir=temp_dir)
+            self.assertFalse(bridge.notification_service.settings["email_enabled"])
+            self.assertTrue(any(entry["level"] == "WARN" and "通知设置无法读取" in entry["message"]
+                                for entry in bridge.log_entries))
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), payload)
+
+    @unittest.skipUnless(os.name == "nt", "DPAPI is available on Windows")
+    def test_secret_encryption_failure_keeps_previous_saved_and_active_settings(self):
+        import pywintypes
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = RailWatchBridge(data_dir=temp_dir)
+            bridge.save_preferences("dark", {"email_password": "previous-secret"})
+            path = os.path.join(temp_dir, "notification_settings.json")
+            with open(path, "rb") as handle:
+                previous = handle.read()
+            with patch("win32crypt.CryptProtectData", side_effect=pywintypes.error(5, "CryptProtectData", "access denied")):
+                with self.assertRaisesRegex(RuntimeError, "密钥保护失败"):
+                    bridge.save_preferences("dark", {"email_password": "new-secret"})
+            self.assertEqual(bridge.notification_service.settings["email_password"], "previous-secret")
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), previous)
+
+    @unittest.skipUnless(os.name == "nt", "DPAPI is available on Windows")
+    def test_unreadable_notification_secret_does_not_prevent_startup_or_order_recovery(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_orders import OrderIntent, OrderResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = RailWatchBridge(data_dir=temp_dir)
+            intent = OrderIntent("regular", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",), "18:00")
+            original.order_journal.begin("test-run", intent, {})
+            original.order_journal.record(intent, OrderResult("pending_payment", order_id="TEST123", evidence={"matched": True}))
+            path = os.path.join(temp_dir, "notification_settings.json")
+            payload = {"email_enabled": True, "email_password": "dpapi:YWJj"}
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+
+            restored = RailWatchBridge(data_dir=temp_dir)
+            self.assertFalse(restored.notification_service.settings["email_enabled"])
+            self.assertEqual(restored.state.order["order_id"], "TEST123")
+            self.assertTrue(restored.state.order["recovery_required"])
+            self.assertTrue(any(entry["level"] == "WARN" and "通知设置无法读取" in entry["message"]
+                                for entry in restored.log_entries))
+            self.assertFalse(restored.load_preferences()["notification_settings"]["email_password_configured"])
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), payload)
+
     def test_notification_secrets_are_protected_on_disk_and_redacted_from_renderer(self):
         from railwatch_bridge import RailWatchBridge
 

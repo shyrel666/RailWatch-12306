@@ -2,6 +2,18 @@ import { describe, expect, test, vi } from "vitest";
 import { ConfirmationBridge } from "../confirmationBridge";
 
 describe("ConfirmationBridge", () => {
+  test("preserves dialog actions and severity without changing the confirmation gate", async () => {
+    const sendRequest = vi.fn();
+    const bridge = new ConfirmationBridge({ sendRequest });
+    const prompt = { title: "无法安全退出", message: "任务未结束", okText: "强制退出", cancelText: "取消", danger: true };
+    const response = bridge.request(prompt);
+    const { id } = sendRequest.mock.calls[0][0];
+    expect(sendRequest).toHaveBeenCalledWith({ ...prompt, id });
+    expect(bridge.isPending(id)).toBe(true);
+    bridge.respond(id, false);
+    expect(bridge.isPending(id)).toBe(false);
+    await expect(response).resolves.toBe(false);
+  });
   test("sends the request to the renderer and resolves with the response", async () => {
     const sent: { id: string; title: string; message: string }[] = [];
     const bridge = new ConfirmationBridge({

@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { railwatchApi } from "./railwatchApi";
+import type { PreferencesPatch, RailWatchPreferences } from "../types";
 import { getTheme, normalizeTheme, type ThemeMode } from "./theme";
+import { transitionTheme, type ThemeOrigin } from "./themeTransition";
 
 const cacheKey = "railwatch.theme";
 function cachedTheme() {
@@ -38,7 +41,7 @@ export function useThemePreference() {
   useEffect(() => {
     let alive = true;
     void railwatchApi
-      .command<{ theme: ThemeMode }>("loadPreferences")
+      .command<RailWatchPreferences>("loadPreferences")
       .then((value) => {
         if (alive) {
           const next = normalizeTheme(value?.theme);
@@ -61,16 +64,22 @@ export function useThemePreference() {
     for (const [name, value] of Object.entries(design.variables))
       root.style.setProperty(name, value);
   }, [darkMode, design]);
-  async function saveTheme(next: ThemeMode) {
+  async function saveTheme(next: ThemeMode, origin?: ThemeOrigin) {
     if (!ready || savingRef.current || next === mode) return;
     const previous = mode;
     savingRef.current = true;
     setSaving(true);
-    setMode(next);
     try {
-      const result = await railwatchApi.command<{ theme: ThemeMode }>(
+      const nextDark = next === "dark" || (next === "system" && systemDark);
+      if (nextDark !== darkMode) {
+        await transitionTheme(() => flushSync(() => setMode(next)), origin);
+      } else {
+        setMode(next);
+      }
+      const patch: PreferencesPatch = { theme: next };
+      const result = await railwatchApi.command<RailWatchPreferences>(
         "savePreferences",
-        { theme: next },
+        patch,
       );
       const saved = normalizeTheme(result?.theme);
       if (saved !== next) throw new Error("主题偏好未保存，请重试。");

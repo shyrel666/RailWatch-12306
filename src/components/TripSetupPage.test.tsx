@@ -17,6 +17,16 @@ function resetStore() {
     runtime: { ...defaultRuntimeInfo, state: { ...defaultStatus } },
     status: { ...defaultStatus, query_ready: true },
     config: { ...defaultConfig, train_code: "" },
+    savedConfig: null,
+    savedAt: null,
+    configSaveError: null,
+    draftRead: { status: "missing", draft: null, warning: null },
+    tripInitialized: false,
+    editRevision: 0,
+    draftRevision: 0,
+    draftSaveState: "idle",
+    draftSavedAt: null,
+    draftError: null,
     logs: [],
     results: [],
     hits: [],
@@ -95,30 +105,63 @@ describe("TripSetupPage", () => {
       expect.stringContaining("自动提交"),
     );
     expect(railwatchStore.getState().config.auto_submit).toBe(false);
-    expect(runCommand).not.toHaveBeenCalled();
+    expect(vi.mocked(runCommand).mock.calls.some(([command]) => command === "startMonitor")).toBe(false);
   });
 
-  test("常用车次 merges every preset code", async () => {
+  test("route favorites use saved personal trains and preserve their order", async () => {
     const user = userEvent.setup();
     railwatchStore.setState({ config: { ...defaultConfig, train_code: "" } });
+    const runCommand = vi.fn(async (command: string) => command === "loadTripChoices" ? {
+      recent_routes: [], favorites: [{ from_station: "北京", to_station: "上海", trains: ["G101", "D21"] }],
+    } : undefined) as CommandRunner;
 
     render(
       <TripSetupPage
         busy={null}
         confirm={(async () => false) as ConfirmDialog}
-        runCommand={(async () => undefined) as CommandRunner}
+        runCommand={runCommand}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "常用车次" }));
+    await user.click(await screen.findByRole("button", { name: /应用 G101、D21/ }));
+    expect(railwatchStore.getState().config.train_code).toBe("G101, D21");
+    await user.click(screen.getByRole("button", { name: "上移 D21" }));
+    expect(railwatchStore.getState().config.train_code).toBe("D21, G101");
+    await user.click(screen.getByRole("button", { name: "交换出发站与到达站" }));
+    expect(screen.queryByRole("button", { name: /应用 G101、D21/ })).toBeNull();
+    expect(screen.getByText(/现有目标车次会保留/)).toBeTruthy();
+  });
 
-    const codes = railwatchStore
-      .getState()
-      .config.train_code.split(/[,，、\s]+/)
-      .filter(Boolean);
-    expect(codes).toEqual(
-      expect.arrayContaining(["G1", "G3", "G17", "D313", "D321"]),
-    );
+  test("official adult candidate can be selected while ambiguous and unsupported types stay disabled", async () => {
+    const user = userEvent.setup();
+    const runCommand = vi.fn(async (command: string) => command === "readPassengers" ? { items: [
+      { name: "张三", ticket_type: "adult", identity_hint: "11***22", ambiguous: false },
+      { name: "李四", ticket_type: "student", identity_hint: "33***44", ambiguous: false },
+      { name: "王五", ticket_type: "adult", identity_hint: "55***66", ambiguous: true },
+    ], warning: null } : undefined) as CommandRunner;
+    render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
+    await user.click(screen.getByRole("button", { name: "从官方当前页面读取乘客" }));
+    await user.click(await screen.findByRole("button", { name: /张三.*成人/ }));
+    expect(railwatchStore.getState().config.passengers).toBe("张三");
+    expect(railwatchStore.getState().config.passenger_selections).toEqual([
+      { name: "张三", ticket_type: "adult", identity_hint: "11***22" },
+    ]);
+    expect(screen.getByRole("button", { name: /李四.*票种不支持自动交易/ }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: /王五.*同名需人工核对/ }).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByText("张三 成人")).toBeNull();
+  });
+
+  test("draft recovery changes editing config without starting a task", async () => {
+    const user = userEvent.setup();
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ savedConfig: { ...defaultConfig }, tripInitialized: true,
+      draftRead: { status: "available", warning: null, draft: { schema_version: 1, revision: 4,
+        saved_at: Date.now() / 1000, config: { from_station_cn: "杭州", date: "bad-date", auto_submit: true } } } });
+    render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
+    await user.click(screen.getByRole("button", { name: "恢复草稿" }));
+    expect(railwatchStore.getState().config).toMatchObject({ from_station_cn: "杭州", date: "bad-date", auto_submit: true });
+    expect(screen.getByText("有未正式保存的修改")).toBeTruthy();
+    expect(vi.mocked(runCommand).mock.calls.some(([command]) => command === "startMonitor")).toBe(false);
   });
 
   test("groups all preferences without dashboard workflow", async () => {
@@ -149,7 +192,7 @@ describe("TripSetupPage", () => {
     expect(screen.queryByText("高级选项")).toBeNull();
     expect(screen.getByText("自动提交关闭")).toBeTruthy();
     expect(screen.getByText("候补排队关闭")).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "定时启动" })).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "开始方式" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "保持会话" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "智能轮询" })).toBeTruthy();
   });
@@ -206,7 +249,7 @@ describe("TripSetupPage", () => {
       todayIso(),
     );
     expect(screen.queryByText(/出发日期已过去/)).toBeNull();
-    expect(screen.queryByText(/预售期/)).toBeNull();
+    expect(screen.queryByText(/超出.*预售/)).toBeNull();
   });
 
   test("saving an expired departure date requires confirmation and respects a decline", async () => {
@@ -229,7 +272,7 @@ describe("TripSetupPage", () => {
       "出发日期已过期",
       expect.stringContaining("2020-01-01"),
     );
-    expect(runCommand).not.toHaveBeenCalled();
+    expect(vi.mocked(runCommand).mock.calls.some(([command]) => command === "saveConfig")).toBe(false);
   });
 
   test("saving an expired departure date proceeds after explicit confirmation", async () => {

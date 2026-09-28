@@ -88,4 +88,17 @@ describe("SettingsPage", () => {
     expect(clearLocalData).toBeTruthy();
     expect(clearLocalData.closest(".maintenance")).toBeTruthy();
   });
+
+  test("saves the tray preference as a patch", async () => {
+    const command = vi.spyOn(railwatchApi, "command").mockImplementation(async (_name, payload = {}) => ({
+      theme: "dark", close_to_tray: payload.close_to_tray === true,
+      notification_settings: {},
+    }) as never);
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const toggle = await screen.findByRole("switch", { name: "关闭到托盘" });
+    await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    await userEvent.click(toggle);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("savePreferences", { close_to_tray: true }));
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
 });

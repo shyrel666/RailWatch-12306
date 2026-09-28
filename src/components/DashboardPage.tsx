@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Button, Tooltip } from "antd";
 import {
   ArrowRight,
@@ -8,7 +9,7 @@ import {
   Clock3,
   Database,
   Lock,
-  Radar,
+  ScrollText,
   Search,
   TrainFront,
   UserRound,
@@ -22,10 +23,12 @@ import {
 } from "../lib/tripDate";
 import { displayedConfig } from "../lib/taskDisplay";
 import { dashboardAction } from "../lib/dashboardState";
+import { presentEventLogs } from "../lib/formatEventLog";
 import { useClock } from "../lib/useClock";
 import type { RailWatchStatus } from "../types";
 import type { WorkflowStep } from "./DisplayPrimitives";
 import { TripDateWarning } from "./DisplayPrimitives";
+import { SaleCalendar } from "./SaleCalendar";
 
 function formatTripDate(date: string) {
   if (!date) {
@@ -118,6 +121,9 @@ export function DashboardPage() {
       ? `${trains.slice(0, 3).join("、")} 等 ${trains.length} 个车次`
       : config.train_code || "车次不限";
   const hits = useRailWatchStore((state) => state.hits);
+  const logs = useRailWatchStore((state) => state.logs);
+  const openLogs = useRailWatchStore((state) => state.setEventPanelVisible);
+  const recentEvents = useMemo(() => presentEventLogs(logs, "全部").slice(0, 5), [logs]);
   const loops = useRailWatchStore((state) => state.monitorLoops);
   const human = useRailWatchStore((state) => state.lastHumanAction);
   const navigate = useRailWatchStore((state) => state.setActivePage);
@@ -160,19 +166,30 @@ export function DashboardPage() {
           <span className="eyebrow">
             {status.monitoring ? "运行中的行程" : "当前行程"}
           </span>
-          <Button
-            type="text"
-            icon={<ArrowUpRight size={16} />}
-            onClick={() => navigate("行程设置", "trip-basics")}
-          >
-            编辑行程
-          </Button>
+          <div className="button-row">
+            <Button
+              type="text"
+              aria-label="查看订单历史与核对时间线"
+              onClick={() => navigate("订单中心")}
+            >
+              订单历史 <ArrowUpRight size={14} />
+            </Button>
+            <Button
+              type="text"
+              icon={<ArrowUpRight size={16} />}
+              onClick={() => navigate("行程设置", "trip-basics")}
+            >
+              编辑行程
+            </Button>
+          </div>
         </div>
         <div className="journey-route">
           <strong>{config.from_station_cn || "出发站"}</strong>
           <ArrowRight size={24} />
           <strong>{config.to_station_cn || "到达站"}</strong>
-          <span className="route-caption">下一程 / NEXT JOURNEY</span>
+          <span className={"status-badge " + (status.monitoring ? "green" : "")}>
+            {status.monitoring ? "监控运行中" : "监控未运行"}
+          </span>
         </div>
         <div className="journey-facts">
           <span>
@@ -181,7 +198,7 @@ export function DashboardPage() {
           </span>
           <span>
             <UserRound size={16} />
-            成人 {config.passenger_count || 1}
+            乘客 {config.passengers.split(/[,，、]/).filter(Boolean).length || config.passenger_count || 1} 位 · 票种待官方页核对
           </span>
           <Tooltip title={trains.length > 3 ? config.train_code : undefined}>
             <span tabIndex={trains.length > 3 ? 0 : undefined}>
@@ -207,18 +224,14 @@ export function DashboardPage() {
           </span>
           <h2>{action.title}</h2>
           <p>{action.description}</p>
-          <Button
-            type="primary"
-            icon={<ArrowRight size={16} />}
-            onClick={() => navigate(action.page, action.section)}
-          >
-            {action.label}
-          </Button>
         </div>
-        <div className="next-action-symbol" aria-hidden="true">
-          <TrainFront size={56} strokeWidth={1} />
-          <span>每一步，都离出发更近。</span>
-        </div>
+        <Button
+          type="primary"
+          icon={<ArrowRight size={16} />}
+          onClick={() => navigate(action.page, action.section)}
+        >
+          {action.label}
+        </Button>
       </section>
       <ol className="workflow-stepper" aria-label="监控流程">
         {steps.map((step) => (
@@ -291,13 +304,35 @@ export function DashboardPage() {
             <div className="empty-inline">
               <Bell size={24} />
               <div>
-                <strong>静候一个好消息</strong>
-                <p>发现符合条件的车票后，会在这里提醒你。</p>
+                <strong>暂无命中记录</strong>
+                <p>符合行程条件的余票将在此显示。</p>
               </div>
             </div>
           )}
         </section>
       </div>
+      <SaleCalendar station={config.from_station_cn} tripDate={config.date} windowDays={windowDays} now={now} />
+      <section className="dashboard-events" aria-label="最近活动">
+        <div className="section-heading">
+          <h2><ScrollText size={15} /> 最近活动</h2>
+          <Button type="text" size="small" onClick={() => openLogs(true)}>
+            查看全部日志 <ArrowUpRight size={14} />
+          </Button>
+        </div>
+        {recentEvents.length ? (
+          <ol className="activity-list">
+            {recentEvents.map((entry) => (
+              <li key={entry.id}>
+                <time>{entry.time}</time>
+                <span className={`event-level ${entry.tone}`}>{entry.label}</span>
+                <span className="activity-message"><strong>{entry.title}</strong>{entry.detail ? <span>{entry.detail}</span> : null}</span>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <div className="activity-empty"><ScrollText size={19} /><span>暂无运行事件</span><small>环境检查、查询和订单动态将按时间记录。</small></div>
+        )}
+      </section>
       <section
         className={
           "automation-summary" + (autoSubmit || autoAlternate ? " enabled" : "")

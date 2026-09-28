@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
+import base64
+import binascii
 import json
 import sqlite3
 import os
@@ -22,6 +24,12 @@ STAGES = {
 }
 TERMINAL = {"sold_out", "not_submitted", "fulfilled", "cancelled", "expired", "failed", "dismissed"}
 QUERY_TELEMETRY_STAGES = frozenset({"query_click", "query_result"})
+OFFICIAL_STATUSES = frozenset({"pending_payment", "active", "fulfilled", "cancelled", "expired", "failed"})
+EVENT_LABELS = {"submitting": "订单意图已在本地保存", "regular_submit": "已点击普通订单提交",
+                "alternate_submit": "已点击候补订单提交", "resume_claimed": "开始恢复原订单",
+                "resume_released": "原订单恢复已结束", "dismissed": "用户结束本地核对；官方订单未取消",
+                "order_result": "订单页面核对结果", "pending_payment": "官方订单待支付",
+                "active": "官方候补已生效", "fulfilled": "官方订单已完成"}
 
 
 @dataclass(frozen=True)
@@ -54,7 +62,7 @@ class OrderResult:
     reason: str = ""
     order_id: str = ""
     evidence: dict = field(default_factory=dict)
-    # True only after an explicit pre-submit rejection or a completed empty pending-order view.
+    # True only after an explicit failure before submission was attempted.
     no_order: bool = False
 
     @property
@@ -76,6 +84,9 @@ class OrderJournal:
         self._resume_guard = threading.RLock()
         self._resume_owner = None
         self._telemetry_guard = threading.RLock()
+        self._checks_guard = threading.RLock()
+        self._pending_checks = {}
+        self._checks_flushed_at = 0.0
         self._telemetry_batch = []
         self._telemetry_batch_size = max(1, int(telemetry_batch_size))
         self._telemetry_limit = max(self._telemetry_batch_size, int(telemetry_limit))
@@ -87,11 +98,18 @@ class OrderJournal:
                     config TEXT NOT NULL, result TEXT NOT NULL, unresolved INTEGER NOT NULL,
                     updated_at REAL NOT NULL);
                 CREATE UNIQUE INDEX IF NOT EXISTS one_unresolved ON orders(unresolved) WHERE unresolved=1;
+                CREATE INDEX IF NOT EXISTS orders_history_sort ON orders(updated_at DESC,intent_id DESC);
+                CREATE INDEX IF NOT EXISTS orders_history_status_sort
+                    ON orders(json_extract(result,'$.status'),updated_at DESC,intent_id DESC);
                 CREATE TABLE IF NOT EXISTS order_events (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, intent_id TEXT,
                     stage TEXT NOT NULL, at REAL NOT NULL, monotonic REAL NOT NULL, detail TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS order_events_intent_stage ON order_events(intent_id,stage);
                 CREATE INDEX IF NOT EXISTS order_events_stage_sequence ON order_events(stage,sequence DESC);
+                CREATE INDEX IF NOT EXISTS order_events_official_latest ON order_events(intent_id,sequence DESC)
+                    WHERE stage='order_result' AND json_extract(detail,'$.official')=1;
+                CREATE TABLE IF NOT EXISTS order_checks (
+                    intent_id TEXT PRIMARY KEY, checked_at REAL NOT NULL, status TEXT NOT NULL);
             """)
             self._prune_telemetry(db)
         # An OS lock survives threads but is released on process exit. Only its
@@ -154,8 +172,14 @@ class OrderJournal:
             previous = json.loads(row[0])
             if result.status in ("pending_payment", "active", "fulfilled", "cancelled", "expired", "failed") and not (result.order_id and result.evidence.get("matched") is True):
                 result = OrderResult("unknown", "订单状态缺少匹配的订单号和页面证据")
-            if result.status in ("sold_out", "not_submitted") and (not result.no_order or previous.get("order_id")):
-                result = OrderResult("unknown", "尚未确认没有已创建的订单")
+            if result.status in ("sold_out", "not_submitted"):
+                attempted = db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN "
+                                       "('regular_submit','alternate_submit','regular_confirm_attempt','resume_claimed') LIMIT 1",
+                                       (intent.intent_id,)).fetchone()
+                if not result.no_order or previous.get("order_id") or attempted:
+                    result = OrderResult("unknown", "尚未确认没有已创建的订单")
+                else:
+                    result = replace(result, evidence={**result.evidence, "no_order_basis": "before_submission"})
             if result.status in ("unknown", "verification") and previous.get("order_id"):
                 result = replace(result, order_id=previous["order_id"], evidence=previous.get("evidence", {}))
             unresolved = result.status not in TERMINAL
@@ -163,7 +187,162 @@ class OrderJournal:
                 json.dumps(result.payload(), ensure_ascii=False), int(unresolved), time.time(), intent.intent_id))
             if updated.rowcount != 1:
                 raise RuntimeError("订单意图尚未持久化，不能确认结果")
+            official = result.status in OFFICIAL_STATUSES and bool(result.order_id and result.evidence.get("matched") is True)
+            db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) "
+                       "SELECT run_id,?,'order_result',?,?,? FROM orders WHERE intent_id=?", (
+                           intent.intent_id, time.time(), time.monotonic(),
+                           json.dumps({"status": result.status, "official": official}, ensure_ascii=False), intent.intent_id))
         return result
+
+    def note_check(self, intent_id, status):
+        """Track page reads independently from durable order-state transitions."""
+        if status not in STAGES and status != "error":
+            raise ValueError("未知核对结果")
+        with self._checks_guard:
+            self._pending_checks[intent_id] = (time.time(), status)
+            if time.monotonic() - self._checks_flushed_at >= 5:
+                try:
+                    self.flush_checks()
+                except sqlite3.Error:
+                    # Keep the latest observation in memory for retry; failure
+                    # of this timestamp must not interrupt order processing.
+                    pass
+
+    def flush_checks(self):
+        with self._checks_guard:
+            if not self._pending_checks:
+                return
+            with self.connection() as db:
+                for intent_id, (at, status) in self._pending_checks.items():
+                    db.execute("INSERT INTO order_checks(intent_id,checked_at,status) "
+                               "SELECT intent_id,?,? FROM orders WHERE intent_id=? "
+                               "ON CONFLICT(intent_id) DO UPDATE SET checked_at=excluded.checked_at,status=excluded.status "
+                               "WHERE excluded.checked_at >= order_checks.checked_at", (at, status, intent_id))
+            self._pending_checks.clear()
+            self._checks_flushed_at = time.monotonic()
+
+    @staticmethod
+    def _cursor_decode(cursor):
+        if cursor is None:
+            return None
+        if not isinstance(cursor, str) or len(cursor) > 256:
+            raise ValueError("订单游标无效。")
+        try:
+            value = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            if (not isinstance(value, list) or len(value) != 2 or type(value[0]) not in (int, float) or
+                    not isinstance(value[1], str) or len(value[1]) > 128 or not value[1]):
+                raise ValueError()
+            return value
+        except (ValueError, TypeError, UnicodeDecodeError, binascii.Error) as exc:
+            raise ValueError("订单游标无效。") from exc
+
+    @staticmethod
+    def _cursor_encode(updated_at, intent_id):
+        raw = json.dumps([updated_at, intent_id], separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    def _summaries(self, rows, db):
+        if not rows:
+            return []
+        # Fetch only this page's metadata. Indexed latest-event lookups avoid
+        # loading or aggregating every historical event for these orders.
+        # Pin the official-only index: before ANALYZE SQLite can otherwise
+        # prefer intent/stage and scan arbitrarily many later local results.
+        placeholders = ",".join("?" for _ in rows)
+        metadata = db.execute("""
+            SELECT o.intent_id,official.at,official.detail,latest.at,latest.detail,c.checked_at,c.status
+            FROM orders AS o
+            LEFT JOIN order_events AS official ON official.sequence=(
+                SELECT sequence FROM order_events INDEXED BY order_events_official_latest
+                WHERE intent_id=o.intent_id AND stage='order_result'
+                AND json_extract(detail,'$.official')=1 ORDER BY sequence DESC LIMIT 1)
+            LEFT JOIN order_events AS latest ON latest.sequence=(
+                SELECT sequence FROM order_events WHERE intent_id=o.intent_id AND stage='order_result'
+                ORDER BY sequence DESC LIMIT 1)
+            LEFT JOIN order_checks AS c ON c.intent_id=o.intent_id
+            WHERE o.intent_id IN (""" + placeholders + ")", [row[0] for row in rows]).fetchall()
+        by_id = {item[0]: item[1:] for item in metadata}
+        with self._checks_guard:
+            pending = {row[0]: self._pending_checks.get(row[0]) for row in rows}
+        return [self._summary(row, by_id.get(row[0], (None,) * 6), pending[row[0]]) for row in rows]
+
+    @staticmethod
+    def _summary(row, metadata, pending_check):
+        intent_id, intent_json, result_json, unresolved, updated_at = row
+        intent, result = json.loads(intent_json), json.loads(result_json)
+        official_at, official_detail, check_at, check_detail, stored_at, stored_status = metadata
+        official_status = None
+        official_verified_at = None
+        if official_detail is not None:
+            official_status = json.loads(official_detail).get("status")
+            official_verified_at = official_at
+        elif result.get("status") in OFFICIAL_STATUSES and result.get("order_id") and result.get("evidence", {}).get("matched") is True:
+            official_status = result["status"]
+        checks = [(check_at, json.loads(check_detail).get("status"))] if check_detail is not None else []
+        if stored_at is not None:
+            checks.append((stored_at, stored_status))
+        if pending_check is not None:
+            checks.append(pending_check)
+        checked, check_status = sorted(checks, key=lambda item: item[0])[-1] if checks else (None, None)
+        return {"intent_id": intent_id, "order_id": result.get("order_id") or None,
+                "kind": intent.get("kind", "regular"), "train_code": intent.get("train_code", ""),
+                "date": intent.get("date", ""), "from_station": intent.get("from_station", ""),
+                "to_station": intent.get("to_station", ""), "seat": intent.get("seat", ""),
+                "status": result.get("status", "unknown"), "official_status": official_status,
+                "official_verified_at": official_verified_at, "updated_at": updated_at,
+                "last_checked_at": checked, "last_check_status": check_status, "observing": False,
+                "recovery_required": bool(unresolved)}
+
+    def history_page(self, *, limit=20, cursor=None, status=None):
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("订单分页大小必须在 1 至 50 之间。")
+        if status is not None and (not isinstance(status, str) or status not in STAGES):
+            raise ValueError("订单状态筛选无效。")
+        position = self._cursor_decode(cursor)
+        clauses, params = [], []
+        if status:
+            clauses.append("json_extract(result,'$.status')=?")
+            params.append(status)
+        if position:
+            clauses.append("(updated_at,intent_id) < (?,?)")
+            params.extend(position)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.connection() as db:
+            rows = db.execute("SELECT intent_id,intent,result,unresolved,updated_at FROM orders" + where +
+                              " ORDER BY updated_at DESC,intent_id DESC LIMIT ?", (*params, limit + 1)).fetchall()
+            items = self._summaries(rows[:limit], db)
+        next_cursor = self._cursor_encode(rows[limit - 1][4], rows[limit - 1][0]) if len(rows) > limit else None
+        return {"items": items, "next_cursor": next_cursor}
+
+    def history_detail(self, intent_id):
+        if not isinstance(intent_id, str) or not 1 <= len(intent_id) <= 128 or not all(
+            char.isalnum() or char in "-_" for char in intent_id
+        ):
+            raise ValueError("订单标识无效。")
+        with self.connection() as db:
+            row = db.execute("SELECT intent_id,intent,result,unresolved,updated_at FROM orders WHERE intent_id=?", (intent_id,)).fetchone()
+            if row is None:
+                raise ValueError("订单记录不存在。")
+            summary = self._summaries([row], db)[0]
+            raw_events = db.execute("SELECT sequence,at,stage,detail FROM order_events WHERE intent_id=? "
+                                    "ORDER BY sequence DESC LIMIT 501", (intent_id,)).fetchall()
+            complete = all(db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage=? LIMIT 1",
+                                      (intent_id, stage)).fetchone() for stage in ("submitting", "order_result"))
+        truncated = len(raw_events) > 500
+        raw_events = raw_events[:500]
+        events = []
+        for sequence, at, stage, detail in reversed(raw_events):
+            try:
+                metadata = json.loads(detail)
+            except (ValueError, TypeError):
+                metadata = {}
+            official = stage == "order_result" and isinstance(metadata, dict) and metadata.get("official") is True
+            result_status = metadata.get("status") if isinstance(metadata, dict) else None
+            message = (STAGES.get(result_status, "订单页面核对结果") if stage == "order_result"
+                       else EVENT_LABELS.get(stage, STAGES.get(stage, "本地处理记录")))
+            events.append({"sequence": sequence, "at": at, "stage": stage,
+                           "scope": "official" if official else "local", "message": message})
+        return {"summary": summary, "events": events, "history_complete": complete, "events_truncated": truncated}
 
     def pending(self):
         with self.connection() as db:

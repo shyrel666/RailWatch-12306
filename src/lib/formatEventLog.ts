@@ -132,6 +132,22 @@ export function countEventsByFilter(logs: LogEntry[], filter: string) {
   return presentEventLogs(logs, filter).length;
 }
 
+export function summarizeEventLogs(logs: LogEntry[]) {
+  const entries = presentEventLogs(logs, "全部");
+  const counts: Record<string, number> = { 全部: entries.length, 信息: 0, 警告: 0, 错误: 0 };
+  for (const entry of entries) {
+    if (entry.level === "INFO" || entry.level === "SUCCESS") counts.信息++;
+    else if (entry.level === "WARN") counts.警告++;
+    else if (entry.level === "ERROR") counts.错误++;
+  }
+  return { entries, counts };
+}
+
+export function filterPresentedEvents(entries: PresentedEvent[], filter: string) {
+  const levels = filterLevels[filter];
+  return levels ? entries.filter(entry => levels.includes(entry.level)) : entries;
+}
+
 const entryIds = new WeakMap<object, number>();
 let fallbackEntryId = -1;
 

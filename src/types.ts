@@ -1,4 +1,4 @@
-export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "系统设置" | "关于";
+export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "订单中心" | "系统设置" | "关于";
 
 export type AppInfo = {
   appVersion: string;
@@ -27,6 +27,7 @@ export type RailWatchConfig = {
   prepare_time: number;
   keep_alive: boolean;
   passengers: string;
+  passenger_selections?: { name: string; ticket_type: "adult" | "student" | "child" | "unknown"; identity_hint: string }[];
   auto_alternate: boolean;
   alternate_deadline: string;
   date_range: string;
@@ -46,6 +47,7 @@ export type RailWatchConfig = {
 export type NotificationSettings = {
   desktop_urgent: boolean;
   sound_loop: boolean;
+  window_attention?: boolean;
   server_chan_enabled: boolean;
   server_chan_key: string;
   server_chan_key_configured?: boolean;
@@ -59,6 +61,78 @@ export type NotificationSettings = {
   wecom_webhook_enabled: boolean;
   wecom_webhook_url: string;
   wecom_webhook_url_configured?: boolean;
+  event_channels: Record<"hit" | "verification" | "payment" | "alternate_active" | "alternate_fulfilled" | "purchase_success", ("server_chan" | "email" | "wecom_webhook")[]>;
+};
+
+/** Empty/missing secrets retain their value; null explicitly clears a secret. */
+export type NotificationSettingsPatch = Partial<Omit<NotificationSettings,
+  "server_chan_key" | "email_password" | "wecom_webhook_url" |
+  "server_chan_key_configured" | "email_password_configured" | "wecom_webhook_url_configured"
+>> & {
+  server_chan_key?: string | null;
+  email_password?: string | null;
+  wecom_webhook_url?: string | null;
+};
+
+export type RailWatchPreferences = {
+  theme: "system" | "light" | "dark";
+  close_to_tray: boolean;
+  notification_settings: NotificationSettings;
+};
+
+/** Existing savePreferences command accepts a partial update, not a replacement. */
+export type PreferencesPatch = {
+  theme?: RailWatchPreferences["theme"];
+  close_to_tray?: boolean;
+  notification_settings?: NotificationSettingsPatch;
+};
+
+/** M4 will expose draft save/restore; reading a draft never authorizes execution. */
+export type TripDraft = {
+  schema_version: 1;
+  revision: number;
+  saved_at: number; // Unix seconds, as with query and order timestamps.
+  config: Partial<RailWatchConfig>;
+};
+
+export type TripDraftReadResult =
+  | { status: "available"; draft: TripDraft; warning: null }
+  | { status: "missing"; draft: null; warning: null }
+  | { status: "invalid"; draft: null; warning: string };
+export type TripState = { saved_config: RailWatchConfig; saved_at: number | null; draft: TripDraftReadResult };
+
+export type StationSuggestion = { name: string; code: string; pinyin: string; initials: string };
+export type StationSearchResult = { items: StationSuggestion[]; warning: string | null };
+export type StationSaleSchedule = {
+  station_name: string;
+  station_code: string;
+  sale_time: string;
+  start_date: string;
+  stop_date: string;
+};
+export type StationSaleTimes = {
+  station: string;
+  status: "available" | "not_found" | "stale" | "unavailable";
+  schedules: StationSaleSchedule[];
+  checked_at: number | null;
+  expires_at: number | null;
+  retry_at: number;
+  source_url: string;
+  warning: string | null;
+};
+export type TripRoute = { from_station: string; to_station: string };
+export type TrainFavorite = TripRoute & { trains: string[] };
+export type TripChoices = { recent_routes: TripRoute[]; favorites: TrainFavorite[] };
+export type PassengerCandidate = { name: string; ticket_type: "adult" | "student" | "child" | "unknown"; identity_hint: string; ambiguous: boolean };
+export type PassengerCandidates = { items: PassengerCandidate[]; warning: string | null };
+
+/** M2 contract: a display snapshot, never an authorization to quit/install. */
+export type TaskActivity = {
+  state: "idle" | "busy" | "unknown";
+  run_id: string | null;
+  operation: string | null;
+  unresolved_order: boolean | null;
+  checked_at: number;
 };
 
 export type TicketHit = {
@@ -71,6 +145,8 @@ export type TicketHit = {
 };
 
 export type RailWatchStatus = {
+  human_action?: HumanActionPayload | null;
+  activity?: TaskActivity;
   order?: OrderStage;
   task?: { run_id?: string; status?: string; sequence?: number; started_at?: number; target_at?: number | null; next_query_at?: number | null };
   run_id?: string;
@@ -96,13 +172,58 @@ export type OrderStage = {
   reason?: string;
   order_id?: string;
   updated_at?: number;
+  last_checked_at?: number | null;
+  observing?: boolean;
   recovery_required?: boolean;
   no_order?: boolean;
   intent?: { intent_id: string; kind: string; train_code: string; date: string; seat: string };
 };
 
+/** M5 read models. A missing official ID/time is null, not guessed from history. */
+export type OfficialOrderStatus = "pending_payment" | "active" | "fulfilled" | "cancelled" | "expired" | "failed";
+
+export type OrderHistorySummary = {
+  intent_id: string;
+  order_id: string | null;
+  kind: "regular" | "alternate";
+  train_code: string;
+  date: string;
+  from_station: string;
+  to_station: string;
+  seat: string;
+  status: string;
+  official_status: OfficialOrderStatus | null;
+  official_verified_at: number | null;
+  updated_at: number;
+  last_checked_at: number | null;
+  last_check_status?: string | null;
+  observing: boolean;
+  recovery_required: boolean;
+};
+
+export type OrderTimelineEvent = {
+  sequence: number;
+  at: number;
+  stage: string;
+  scope: "local" | "official";
+  message: string;
+};
+
+export type OrderHistoryPage = {
+  items: OrderHistorySummary[];
+  next_cursor: string | null;
+};
+
+export type OrderHistoryDetail = {
+  events_truncated?: boolean;
+  summary: OrderHistorySummary;
+  events: OrderTimelineEvent[];
+  history_complete: boolean;
+};
+
 export type RuntimeInfo = {
   date_policy?: { presale_window_days: number; timezone: string };
+  seat_capabilities?: { name: string; query: boolean; regular: boolean; alternate: boolean }[];
   app_display_name: string;
   app_version: string;
   app_slug: string;
@@ -144,7 +265,57 @@ export type QueryResultRow = {
   raw: string;
 };
 
+export type SeatAvailability = {
+  status: "available" | "unavailable" | "alternate" | "unknown" | "not_applicable";
+  count: number | null;
+  raw: string;
+};
+
+export type QueryConditions = {
+  from_station: string;
+  to_station: string;
+  date: string;
+  train_codes: string[];
+  seat_types: string[];
+};
+
+/** M1 structured row; current legacy rows remain valid until M1 is wired up. */
+export type StructuredQueryResultRow = QueryResultRow & {
+  date: string;
+  from_station: string | null;
+  to_station: string | null;
+  departure_time: string | null;
+  arrival_time: string | null;
+  arrival_day_offset: number | null;
+  seats: Record<string, SeatAvailability>;
+};
+
+/** One snapshot per query date, including successful empty results. */
+export type QueryAttempt = {
+  run_id: string | null;
+  request_id?: string;
+  query_id: string;
+  sequence: number;
+  conditions: QueryConditions;
+  started_at: number;
+};
+
+export type QuerySnapshot = {
+  schema_version: 1;
+  run_id: string | null;
+  query_id: string;
+  sequence: number;
+  conditions: QueryConditions;
+  completed_at: number;
+  fetched_at: number | null;
+  status: "success" | "error";
+  error: string | null;
+  rows: StructuredQueryResultRow[];
+};
+
 export type ResultsPayload = {
+  request_id?: string;
+  snapshots?: QuerySnapshot[];
   run_id?: string;
   query_id?: string;
   fetched_at?: number;
@@ -153,9 +324,10 @@ export type ResultsPayload = {
 };
 
 export type MonitorTickPayload = {
+  snapshot?: QuerySnapshot;
   run_id?: string;
   query_id?: string;
-  fetched_at?: number;
+  fetched_at?: number | null;
   conditions?: unknown;
   loop: number;
   date: string;
@@ -171,6 +343,7 @@ export type NotifyPayload = {
 };
 
 export type HumanActionPayload = {
+  event_id?: string;
   run_id?: string;
   title: string;
   message: string;
@@ -179,6 +352,7 @@ export type HumanActionPayload = {
 };
 
 export type BridgeEvent =
+  | { event: "queryStarted"; payload: QueryAttempt }
   | { event: "log"; payload: LogEntry }
   | { event: "state"; payload: RailWatchStatus }
   | { event: "results"; payload: ResultsPayload }
@@ -249,4 +423,12 @@ export type ConfirmRequestPayload = {
   id: string;
   title: string;
   message: string;
+  okText?: string;
+  cancelText?: string;
+  kind?: "confirm" | "info";
+  danger?: boolean;
 };
+
+export type ExportLocation = { name: string; path: string };
+export type ExportLocations = { directory: string; fileName: string; shortcuts: ExportLocation[] };
+export type ExportDirectory = { directory: string; parent: string; folders: ExportLocation[]; files: string[] };

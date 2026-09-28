@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { ChildProcessWithoutNullStreams, execFile, spawn } from "node:child_process";
 import { app } from "electron";
 
 export type RuntimeEvent = {
@@ -163,7 +163,12 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
   private readonly pending = new PendingRequests();
   private nextId = 1;
   private intentionalStop = false;
+  private disposed = false;
   private restartTimer: NodeJS.Timeout | null = null;
+  private stableTimer: NodeJS.Timeout | null = null;
+  private restartAttempts = 0;
+  private unavailable = false;
+  private manualRecovery = false;
 
   constructor(private readonly command: RuntimeCommand = createPythonRuntimeCommand()) {
     super();
@@ -176,12 +181,13 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
   private readonly appVersion: string;
 
   start(): void {
+    if (this.disposed) throw new Error("Python runtime is shutting down");
     if (this.child) {
       return;
     }
+    if (this.unavailable) throw new Error("运行时无法启动，请点击重试运行时。");
     if (this.restartTimer) {
-      clearTimeout(this.restartTimer);
-      this.restartTimer = null;
+      throw new Error("运行时正在等待恢复，请稍后重试。");
     }
     this.intentionalStop = false;
     this.decoder.reset();
@@ -197,6 +203,8 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
     this.child = child;
     const finish = (error: Error, code: number | null, signal: NodeJS.Signals | null) => {
       if (this.child !== child) return;
+      if (this.stableTimer) clearTimeout(this.stableTimer);
+      this.stableTimer = null;
       this.pending.rejectAll(error);
       this.child = null;
       this.emit("exit", { code, signal } satisfies RuntimeExitInfo);
@@ -230,8 +238,34 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
       finish(error, code, signal);
     });
     child.once("spawn", () => {
-      if (this.child === child) this.emit("started");
+      if (this.child !== child) return;
+      this.emit("started");
+      const recovering = this.restartAttempts > 0 || this.manualRecovery;
+      void this.request("getRuntimeInfo", {}, { timeoutMs: 10000 }).then(info => {
+        if (this.child !== child) return;
+        if (!info || typeof info !== "object" || !("state" in info) || !info.state || typeof info.state !== "object") {
+          throw new Error("Runtime readiness response is invalid");
+        }
+        this.emit("ready", info);
+        if (recovering) this.emit("restarted");
+        this.manualRecovery = false;
+        this.stableTimer = setTimeout(() => { this.restartAttempts = 0; this.stableTimer = null; }, 30000);
+      }).catch(error => {
+        if (this.child !== child) return;
+        finish(error instanceof Error ? error : new Error("Runtime readiness failed"), null, null);
+        child.kill();
+      });
     });
+  }
+
+  retry(): void {
+    if (this.child) return;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    this.unavailable = false;
+    this.restartAttempts = 0;
+    this.manualRecovery = true;
+    this.start();
   }
 
   async request<T = unknown>(
@@ -254,34 +288,59 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
   }
 
   stop(): void {
+    this.detachChild()?.kill();
+  }
+
+  async forceStop(): Promise<void> {
+    // Permanent shutdown: periodic UI requests cannot restart the runtime.
+    this.disposed = true;
+    const child = this.detachChild();
+    if (!child) return;
+    if (process.platform === "win32" && child.pid) {
+      // Terminate only this live child and its descendants, never Chrome by
+      // image name. Kill the tree before killing its root so ancestry survives.
+      await new Promise<void>((resolve) => {
+        execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"],
+          { windowsHide: true, timeout: 5000 }, (error) => {
+            if (error) child.kill();
+            resolve();
+          });
+      });
+    } else {
+      child.kill("SIGKILL");
+    }
+  }
+
+  private detachChild(): ChildProcessWithoutNullStreams | null {
     this.intentionalStop = true;
+    if (this.stableTimer) clearTimeout(this.stableTimer);
+    this.stableTimer = null;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
-    if (!this.child) {
-      return;
-    }
     const child = this.child;
     this.child = null;
     this.pending.rejectAll(new Error("Python runtime stopped"));
-    child.kill();
+    return child;
   }
 
   private scheduleRestart(): void {
     if (this.restartTimer || this.intentionalStop) {
       return;
     }
+    if (this.restartAttempts >= 5) {
+      this.unavailable = true;
+      this.emit("unavailable", new Error("运行时连续启动失败，自动恢复已暂停，请点击重试运行时。"));
+      return;
+    }
+    const delay = Math.min(30000, 1000 * 2 ** this.restartAttempts++);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (!this.intentionalStop) {
         this.start();
-        const child = this.child;
-        child?.once("spawn", () => {
-          if (this.child === child) this.emit("restarted");
-        });
       }
-    }, 1000);
+    }, delay);
   }
 
   private handleMessage(message: RuntimeMessage): void {

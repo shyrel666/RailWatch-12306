@@ -7,8 +7,8 @@
 - `npm run test`
 - `python -m unittest discover -s tests -p "test_*.py"`
 - `npm run build`
-- `.\package-windows.cmd 0.2.0`
-- 仅在依赖缺失或需要重装时使用 `.\package-windows.cmd 0.2.0 --install-deps`
+- `.\package-windows.cmd 0.4.2`
+- 仅在依赖缺失或需要重装时使用 `.\package-windows.cmd 0.4.2 --install-deps`
 - 启动 `release/win-unpacked/RailWatch 12306.exe`，确认窗口、React renderer、preload API 和 Python runtime 都能启动。
 - 发布时只上传同一次构建生成的 `release/*.exe`、`release/*.blockmap` 和 `release/latest.yml`。
 
@@ -17,8 +17,12 @@
 - 在 `Settings` 执行 `检查环境`，确认 Python、Selenium、Chrome、ChromeDriver 状态正确。
 - 执行 `打开登录`，在官方 12306 页面手动完成登录和验证码。
 - 在 `Trip Setup` 填写出发站、到达站、日期、车次、席别、乘客和刷新间隔，保存后重启应用确认配置仍在。
+- 修改但不正式保存行程，退出并重启，确认草稿可恢复；在当前路线的查询结果选择车次，确认收藏不会跨路线自动应用。
 - 执行 `查询余票`，确认查询页打开、查询结果表格有解析输出，事件面板记录对应日志。
 - 在 `Monitor` 执行 `启动监控` 和 `停止监控`，确认按钮状态、状态摘要、事件日志都按运行状态变化。
+- 在 `Order Center` 查看旧订单与详情；缺少事件时显示历史不完整，继续核对只处理原订单。
+- 启用关闭到托盘后，在等待任务中关闭并恢复窗口；检查退出和更新安装对活动任务及未完成订单的提示与拦截。
+- 保存通知设置并用测试按钮试发到自有渠道，确认成功或失败显示与实际一致；测试声音、桌面通知和置顶组合。
 - 尝试启用 `有票时自动提交` 和 `仅候补时自动排队`，确认都会先弹出确认。
 - 使用事件面板筛选、暂停、清空和导出日志，确认导出文件可读。
 - 切换暗色模式并重启应用，确认偏好保存。
@@ -27,14 +31,14 @@
 ## 安全回归
 
 - 自动提交和自动候补默认必须关闭。
-- 登录、验证码、订单确认和支付仍必须在官方页面人工完成。
+- 登录、验证码、需要用户介入的核验及支付仍在官方页面人工完成；明确启用自动提交后，已通过页面回读的普通订单确认可由程序点击。
 - 清除本地数据、关闭浏览器等危险操作必须通过 UI 明确触发。
 - 不提交用户配置、日志、cookie、Chrome profile、安装包或打包中间产物。
 
 ## 任务可靠性回归
 
 - 运行 `python -X utf8 tests/browser_smoke.py`：真实 Chrome 仅加载本地页面夹具，验证结果更新、空结果、迟到响应、改参及弹窗白名单。
-- 打包后运行 `python -X utf8 tests/packaged_smoke.py`：隔离 APPDATA/LOCALAPPDATA，检查四个页面、preload、旧配置加载与保存、runtime 新字段和无历史查询时的启动条件。
+- 打包后运行 `python -X utf8 tests/packaged_smoke.py`：隔离 APPDATA/LOCALAPPDATA，检查五个功能页面及关于页、preload、旧配置加载与保存、runtime 新字段和无历史查询时的启动条件。
 - 验证初始化跨过目标秒仍在当日执行；超过冲刺窗口转普通监控。
 - 验证停止中不能重启、关闭浏览器或清理数据；停止前发出的浏览器请求可以完成，但不再发出后续操作。
 - 验证登录明确失效及连续三次未知结果会停止；重新登录后需手动启动。

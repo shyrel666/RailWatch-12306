@@ -138,7 +138,9 @@ class BrowserQueryTests(unittest.TestCase):
         self.assertGreaterEqual(waits[-1], 118)
         self.assertLessEqual(waits[-1], 120)
         self.assertTrue(monitor.rate_limiter.risk_detected)
-        self.assertFalse(progress)
+        self.assertEqual(len(progress), 1)
+        self.assertEqual(progress[0]["snapshot"]["status"], "error")
+        self.assertEqual(progress[0]["rows"], [])
         self.assertEqual(self.driver.execute_script("return fixture.clicks"), 1)
         self.assertEqual(self.driver.current_url, self.url)
 
@@ -247,6 +249,73 @@ class BrowserQueryTests(unittest.TestCase):
         # A cached seat value must not override a newer value on the page.
         self.driver.execute_script("document.getElementById('ZE_99').innerText='无'")
         self.assertIsNone(monitor._find_hit_row({}))
+
+    def test_stale_row_is_invalid_then_recovered_without_querying_again(self):
+        from selenium.common.exceptions import StaleElementReferenceException
+        self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td>G101</td><td id="ZE_a">有</td><td><a class="btn72">预订</a></td></tr>';""")
+        monitor = TicketMonitor(self.driver, {"train_code": "G101", "seat_keyword": "二等座"}, log_callback=lambda _: None)
+        monitor._row_snapshot = monitor.row_parser.snapshot_rows(monitor.target_seats)
+        self.driver.execute_script("const t=document.getElementById('queryLeftTable'); t.innerHTML=t.innerHTML")
+        with self.assertRaises(StaleElementReferenceException):
+            monitor._find_hit_row()
+        self.assertEqual(monitor._scan_current_rows()[:3], ("G101", "二等座", "有"))
+
+    def test_new_dom_revision_can_be_resnapshotted_only_for_the_same_completed_query(self):
+        self.assertEqual(self.query.execute(self.click, 2)["status"], "ok")
+        monitor = TicketMonitor(self.driver, {"train_code": "G101", "seat_keyword": "二等座"}, log_callback=lambda _: None)
+        monitor.query_executor = self.query
+        monitor._row_snapshot = monitor.row_parser.snapshot_rows(monitor.target_seats)
+        self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td>G101</td><td id="ZE_a">有</td><td><a class="btn72">预订</a></td></tr>';""")
+        time.sleep(0.35)
+        self.assertEqual(monitor._scan_current_rows()[:3], ("G101", "二等座", "有"))
+        self.assertEqual(self.driver.execute_script("return fixture.clicks"), 1)
+        self.driver.execute_script("document.getElementById('train_date').value='2026-09-11'")
+        from selenium.common.exceptions import StaleElementReferenceException
+        with self.assertRaises(StaleElementReferenceException):
+            monitor._scan_current_rows()
+
+    def test_pending_query_observation_uses_one_script_per_poll(self):
+        self.driver.execute_script("fixture.mode='unchanged'")
+        original = self.driver.execute_script
+        calls = []
+        def counted(script, *args):
+            calls.append(script)
+            return original(script, *args)
+        self.driver.execute_script = counted
+        try:
+            started = time.monotonic()
+            self.assertEqual(self.query.execute(self.click, 1.2)["status"], "timeout")
+            elapsed = time.monotonic() - started
+        finally:
+            self.driver.execute_script = original
+        from railwatch_query import QUERY_OBSERVATION_JS
+        polls = sum(script == QUERY_OBSERVATION_JS for script in calls)
+        self.assertGreater(polls, 0)
+        self.assertLessEqual(polls / elapsed, 10.5)
+        self.assertEqual(len(calls) - polls, 3)  # Initial form, dialog and query observer.
+
+    def test_structured_rows_use_real_cells_and_explicit_arrival_day(self):
+        self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td><a class="number">G101</a><div class="cdz"><strong>张家界西</strong><strong>上海虹桥</strong></div>'+
+          '<div class="cds"><strong>23:10</strong><strong>07:20</strong></div><div class="ls"><span>次日到达</span></div></td>'+
+          '<td id="ZE_a">3</td><td id="ZY_a">无</td><td id="WZ_a">候补</td><td id="TZ_a">不适用</td></tr>';""")
+        rows = RowParser(self.driver, SeatType.get_prefix).parse_rows()
+        self.assertEqual(rows[0]["from_station"], "张家界西")
+        self.assertEqual(rows[0]["to_station"], "上海虹桥")
+        self.assertEqual(rows[0]["departure_time"], "23:10")
+        self.assertEqual(rows[0]["arrival_time"], "07:20")
+        self.assertEqual(rows[0]["arrival_day_offset"], 1)
+        self.assertEqual(rows[0]["seats"]["二等座"]["count"], 3)
+        self.assertEqual(rows[0]["seats"]["一等座"]["status"], "unavailable")
+        self.assertEqual(rows[0]["seats"]["无座"]["status"], "alternate")
+        self.assertEqual(rows[0]["seats"]["特等座"]["status"], "not_applicable")
+        self.assertEqual(rows[0]["seats"]["软卧"]["status"], "unknown")
+        self.driver.execute_script("document.querySelector('.ls').remove(); document.querySelector('.cdz').innerHTML += '<strong>歧义站</strong>'")
+        ambiguous = RowParser(self.driver, SeatType.get_prefix).parse_rows()[0]
+        self.assertIsNone(ambiguous["from_station"])
+        self.assertIsNone(ambiguous["arrival_day_offset"])
 
     def test_advanced_sleeper_uses_its_own_inventory(self):
         self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=

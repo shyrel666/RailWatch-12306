@@ -153,7 +153,7 @@ def reset_server_time_sync() -> None:
 def resolve_sale_timestamp(config):
     value = str(config.get("sale_at", "")).strip()
     if not value:
-        raise ValueError("请核对并填写完整起售日期时间（北京时间），旧版时分秒不会自动顺延至次日。")
+        raise ValueError("请核对并填写完整起售日期时间（北京时间）。")
     try:
         target = datetime.fromisoformat(value)
     except ValueError as exc:

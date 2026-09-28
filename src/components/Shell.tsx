@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Drawer, Tooltip } from "antd";
 import {
   Gauge,
+  ChevronRight,
   Info,
   MonitorPlay,
   PanelLeftClose,
   PanelLeftOpen,
   ScrollText,
+  ReceiptText,
   Settings,
   TrainFront,
   type LucideIcon,
@@ -20,6 +22,7 @@ import {
   getRuntimePhaseTone,
 } from "../lib/formatSystemStatus";
 import { useClock } from "../lib/useClock";
+import { useSidebarPreference } from "../lib/useSidebarPreference";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { RailWatchPage, RailWatchStatus, RuntimeInfo } from "../types";
 import { BrandWordmark } from "./BrandWordmark";
@@ -30,15 +33,17 @@ export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
   { name: "仪表盘", icon: Gauge },
   { name: "行程设置", icon: TrainFront },
   { name: "购票监控", icon: MonitorPlay },
+  { name: "订单中心", icon: ReceiptText },
   { name: "系统设置", icon: Settings },
   { name: "关于", icon: Info },
 ];
 const descriptions: Record<RailWatchPage, string> = {
-  仪表盘: "你的下一程，从这里开始。",
-  行程设置: "安排路线、乘客与查询偏好。",
-  购票监控: "关注余票变化，及时处理你的订单。",
-  系统设置: "让工作台以你喜欢的方式运行。",
-  关于: "为每一次出发，做好准备。",
+  仪表盘: "行程与运行概况",
+  行程设置: "路线、乘客与查询策略",
+  购票监控: "余票查询与任务控制",
+  订单中心: "订单记录与状态核对",
+  系统设置: "环境、通知与应用偏好",
+  关于: "版本与应用信息",
 };
 
 export function SidebarNav({
@@ -81,10 +86,10 @@ export function SidebarNav({
       </div>
       <div className="nav-caption">工作空间</div>
       <nav className="nav" aria-label="工作空间">
-        {items(0, 3)}
+        {items(0, 4)}
       </nav>
       <nav className="nav nav-bottom" aria-label="应用">
-        {items(3, 5)}
+        {items(4, 6)}
       </nav>
       <button
         className="nav-item sidebar-collapse"
@@ -122,23 +127,10 @@ export function ShellLayout({
   onExportLog?: () => void;
   onToggleEventPanel: () => void;
 }) {
-  const [compact, setCompact] = useState(
-    () => window.matchMedia("(max-width: 1279px)").matches,
-  );
-  const [override, setOverride] = useState<boolean | null>(null);
-  const collapsed = override ?? compact;
+  const { collapsed, toggle: toggleSidebar } = useSidebarPreference();
   const pageSection = useRailWatchStore((state) => state.pageSection);
   const logTriggerRef = useRef<HTMLButtonElement>(null);
   const contentRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const media = window.matchMedia("(max-width: 1279px)");
-    const update = () => {
-      setCompact(media.matches);
-      setOverride(null);
-    };
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
   useEffect(() => {
     if (!pageSection) {
       if (contentRef.current) contentRef.current.scrollTop = 0;
@@ -184,7 +176,7 @@ export function ShellLayout({
         activePage={activePage}
         appName={runtime.app_display_name}
         collapsed={collapsed}
-        onToggle={() => setOverride(!collapsed)}
+        onToggle={toggleSidebar}
         onPageChange={onPageChange}
       />
       <main
@@ -194,8 +186,9 @@ export function ShellLayout({
         }
       >
         <header className="page-header">
-          <div>
-            <span className="page-eyebrow">RAILWATCH / 工作空间</span>
+          <div className="page-heading">
+            <span className="page-eyebrow">工作空间</span>
+            <ChevronRight className="page-breadcrumb" size={13} aria-hidden="true" />
             <h1>{activePage}</h1>
             <p>{descriptions[activePage]}</p>
           </div>

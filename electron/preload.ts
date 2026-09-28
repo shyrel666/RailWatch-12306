@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { isRailWatchCommand } from "./ipcSecurity";
+import type { ConfirmationRequestPayload } from "./confirmationBridge";
 
 contextBridge.exposeInMainWorld("railwatch", {
   command: <T>(command: string, payload: Record<string, unknown> = {}) => {
@@ -8,27 +9,31 @@ contextBridge.exposeInMainWorld("railwatch", {
     }
     return ipcRenderer.invoke("railwatch:command", command, payload) as Promise<T>;
   },
+  stageDraft: (draft: { config: Record<string, unknown>; revision: number } | null) => {
+    ipcRenderer.send("railwatch:stage-draft", draft);
+  },
   onEvent: (callback: (event: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on("railwatch:event", listener);
     return () => ipcRenderer.removeListener("railwatch:event", listener);
   },
-  showSaveDialog: (defaultPath?: string) => {
-    return ipcRenderer.invoke("railwatch:save-dialog", defaultPath) as Promise<string | null>;
-  },
+  getExportLocations: (defaultPath?: string) => ipcRenderer.invoke("railwatch:export-locations", defaultPath),
+  listExportDirectory: (directory: string) => ipcRenderer.invoke("railwatch:export-directory", directory),
+  prepareLogExport: (directory: string, fileName: string) => ipcRenderer.invoke("railwatch:prepare-log-export", directory, fileName),
   stopUrgentAlert: () => {
     ipcRenderer.send("railwatch:stop-alert");
   },
-  onConfirmRequest: (callback: (request: { id: string; title: string; message: string }) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload as { id: string; title: string; message: string });
+  onConfirmRequest: (callback: (request: ConfirmationRequestPayload) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload as ConfirmationRequestPayload);
     ipcRenderer.on("railwatch:confirm-request", listener);
+    ipcRenderer.send("railwatch:confirm-ready");
     return () => ipcRenderer.removeListener("railwatch:confirm-request", listener);
   },
   respondConfirmation: (id: string, accepted: boolean) => {
     ipcRenderer.send("railwatch:confirm-response", { id, accepted });
   },
-  checkUpdate: (options: { force?: boolean } = {}) => {
-    return ipcRenderer.invoke("railwatch:check-update", options);
+  checkUpdate: () => {
+    return ipcRenderer.invoke("railwatch:check-update");
   },
   getUpdateState: () => {
     return ipcRenderer.invoke("railwatch:get-update-state");
@@ -55,4 +60,4 @@ contextBridge.exposeInMainWorld("railwatch", {
     }>;
   },
 });
-
+

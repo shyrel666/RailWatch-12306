@@ -9,8 +9,11 @@ from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
 
 from railwatch_selectors import QUERY_ROW_SELECTOR, QUERY_TABLE_ID, TABLE_HEADER_SELECTORS
+from railwatch_seats import SEAT_CAPABILITIES
+from railwatch_config_contract import TRAIN_CODE_BODY
 
-TRAIN_CODE_PATTERN = re.compile(r"^\s*([GDCZTKYSL]\d{1,5}|\d{4,5})(?=\s|$)", re.IGNORECASE)
+TRAIN_CODE_PATTERN = re.compile(r"^\s*(" + TRAIN_CODE_BODY + r")(?=\s|$)", re.IGNORECASE)
+DISPLAY_SEATS = tuple(seat.name for seat in SEAT_CAPABILITIES if seat.query)
 
 BATCH_ROWS_JS = r"""
 const table = document.getElementById('queryLeftTable');
@@ -29,7 +32,19 @@ return [...table.querySelectorAll('tr[id^="ticket_"]')].filter(row => row.getCli
     const cell = (prefix && row.querySelector('td[id^="'+prefix+'_"]')) || (index >= 0 ? row.cells[index] : null);
     seats[name] = cell ? cell.innerText.trim().replace(/\n/g,'') : null;
   }
-  return {element:row, train, raw:row.innerText.trim(), seats, seat_indices};
+  const texts = selector => [...row.querySelectorAll(selector)].filter(el => el.getClientRects().length)
+    .map(el => el.innerText.trim());
+  const stations = texts('.cdz strong');
+  const times = texts('.cds strong').filter(value => /^\d{2}:\d{2}$/.test(value));
+  const arrival = texts('.ls span');
+  const dayLabels = {'当日到达':0, '次日到达':1, '第三日到达':2, '第四日到达':3};
+  const days = arrival.filter(value => Object.hasOwn(dayLabels, value));
+  return {element:row, train, raw:row.innerText.trim(), seats, seat_indices,
+    from_station:stations.length === 2 ? stations[0] : null,
+    to_station:stations.length === 2 ? stations[1] : null,
+    departure_time:times.length === 2 ? times[0] : null,
+    arrival_time:times.length === 2 ? times[1] : null,
+    arrival_day_offset:days.length === 1 ? dayLabels[days[0]] : null};
 });
 """
 
@@ -44,7 +59,8 @@ class RowParser:
     match = TRAIN_CODE_PATTERN.search(text or "")
     return match.group(1).upper() if match else None
 
-  def snapshot_rows(self, seats=()) -> List[dict]:
+  def snapshot_rows(self, seats=None) -> List[dict]:
+    seats = DISPLAY_SEATS if seats is None else seats
     values = self.driver.execute_script(BATCH_ROWS_JS, {seat: self.seat_type_get_prefix(seat) for seat in seats})
     if not isinstance(values, list):
       raise RuntimeError("无法读取查询结果快照")
@@ -58,6 +74,36 @@ class RowParser:
   @staticmethod
   def display_rows(snapshot) -> List[dict]:
     return [{"train": row["train"], "raw": row["raw"]} for row in snapshot]
+
+  @staticmethod
+  def seat_availability(value) -> dict:
+    raw = value.strip() if isinstance(value, str) else ""
+    state, count = "unknown", None
+    if raw == "有":
+      state = "available"
+    elif re.fullmatch(r"[0-9]{1,8}", raw):
+      count = int(raw)
+      state = "available" if count else "unavailable"
+    elif raw == "无":
+      state, count = "unavailable", 0
+    elif raw == "候补":
+      state = "alternate"
+    elif raw == "不适用":
+      state = "not_applicable"
+    # '--', '*', absent cells and unrecognized text provide no inventory proof.
+    return {"status": state, "count": count, "raw": raw}
+
+  @classmethod
+  def structured_rows(cls, snapshot, travel_date) -> List[dict]:
+    """Serialize the same DOM snapshot without WebElements or guessed inventory."""
+    rows = []
+    for row in snapshot:
+      result = {"train": row["train"], "date": travel_date, "raw": row.get("raw", ""),
+                "seats": {name: cls.seat_availability(value) for name, value in row.get("seats", {}).items()}}
+      for field in ("from_station", "to_station", "departure_time", "arrival_time", "arrival_day_offset"):
+        result[field] = row.get(field)
+      rows.append(result)
+    return rows
 
   @staticmethod
   def is_seat_available(value: Optional[str]) -> bool:
@@ -76,7 +122,7 @@ class RowParser:
     return False
 
   def parse_rows(self) -> List[dict]:
-    return self.display_rows(self.snapshot_rows())
+    return self.structured_rows(self.snapshot_rows(), "")
 
   @staticmethod
   def selected_route(row):
@@ -113,6 +159,8 @@ class RowParser:
       return cell.text.strip().replace("\n", "")
     except NoSuchElementException:
       return None
+    except StaleElementReferenceException:
+      raise
     except Exception:
       return None
 
@@ -125,7 +173,7 @@ class RowParser:
         cells = row.find_elements(By.CSS_SELECTOR, "td")
         if col_index < len(cells):
           return cells[col_index].text.strip().replace("\n", "")
-      except (NoSuchElementException, StaleElementReferenceException):
+      except NoSuchElementException:
         pass
     return None
 

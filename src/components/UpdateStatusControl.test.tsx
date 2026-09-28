@@ -72,7 +72,7 @@ describe("ShellLayout update control", () => {
 
     await user.click(screen.getByRole("button", { name: "检查更新" }));
     await waitFor(() => {
-      expect(railwatchApi.checkUpdate).toHaveBeenCalledWith({ force: true });
+      expect(railwatchApi.checkUpdate).toHaveBeenCalledWith();
     });
   });
 

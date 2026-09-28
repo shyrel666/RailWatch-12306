@@ -1,5 +1,5 @@
-import { Button } from "antd";
-import { useState } from "react";
+import { Button, Switch } from "antd";
+import { useEffect, useState } from "react";
 import {
   Activity,
   Cpu,
@@ -17,6 +17,9 @@ import { formatDataDirFreeSpace } from "../lib/formatSystemStatus";
 import type { CommandRunner } from "./componentTypes";
 import { ThemeControl } from "./ThemeControl";
 import type { RailWatchStatus } from "../types";
+import type { RailWatchPreferences } from "../types";
+import { railwatchApi } from "../lib/railwatchApi";
+import { NotificationSettingsPanel } from "./NotificationSettingsPanel";
 
 export function SettingsPage({
   busy,
@@ -29,6 +32,28 @@ export function SettingsPage({
   const loginReady = useRailWatchStore((state) => state.status.login_ready);
   const [checkingLogin, setCheckingLogin] = useState(false);
   const [loginResult, setLoginResult] = useState<{ ready: boolean; message: string } | null>(null);
+  const [closeToTray, setCloseToTray] = useState(false);
+  const [traySaving, setTraySaving] = useState(false);
+  const [trayReady, setTrayReady] = useState(false);
+  const [trayError, setTrayError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void railwatchApi.command<RailWatchPreferences>("loadPreferences").then((value) => {
+      if (alive) { setCloseToTray(value.close_to_tray === true); setTrayReady(true); }
+    }).catch((error) => { if (alive) setTrayError(error instanceof Error ? error.message : "无法加载关闭偏好。"); });
+    return () => { alive = false; };
+  }, []);
+  const saveTrayPreference = async (next: boolean) => {
+    setTraySaving(true);
+    setTrayError("");
+    try {
+      const saved = await railwatchApi.command<RailWatchPreferences>("savePreferences", { close_to_tray: next });
+      if (saved.close_to_tray !== next) throw new Error("关闭偏好未保存，请重试。");
+      setCloseToTray(next);
+    } catch (error) {
+      setTrayError(error instanceof Error ? error.message : "关闭偏好保存失败。");
+    } finally { setTraySaving(false); }
+  };
   const checkLogin = async () => {
     setCheckingLogin(true);
     setLoginResult(null);
@@ -92,7 +117,16 @@ export function SettingsPage({
           </div>
           <ThemeControl />
         </div>
+        <div className="setting-row">
+          <div>
+            <strong>关闭到托盘</strong>
+            <p>关闭主窗口后继续运行监控；双击托盘图标可重新打开，退出请使用托盘菜单。</p>
+            {trayError && <p role="alert" className="health-warning">{trayError}</p>}
+          </div>
+          <Switch aria-label="关闭到托盘" checked={closeToTray} disabled={!trayReady || traySaving} loading={traySaving} onChange={(next) => void saveTrayPreference(next)} />
+        </div>
       </section>
+      <NotificationSettingsPanel />
       <section
         className="settings-section"
         id="settings-environment"

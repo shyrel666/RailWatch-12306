@@ -2,11 +2,12 @@ import { createContext, useContext } from "react";
 import { Button } from "antd";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { themeOptions, type ThemeMode } from "../lib/theme";
+import type { ThemeOrigin } from "../lib/themeTransition";
 
 export const ThemeContext = createContext<{
   mode: ThemeMode;
   disabled: boolean;
-  onChange: (mode: ThemeMode) => void;
+  onChange: (mode: ThemeMode, origin?: ThemeOrigin) => void;
 }>({ mode: "system", disabled: false, onChange: () => undefined });
 export function ThemeControl() {
   const { mode, disabled, onChange } = useContext(ThemeContext);
@@ -21,7 +22,10 @@ export function ThemeControl() {
       className="theme-toggle"
       icon={<Icon size={16} aria-hidden="true" />}
       disabled={disabled}
-      onClick={() => onChange(next.value)}
+      onClick={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        onChange(next.value, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+      }}
     >
       {current.label}
     </Button>

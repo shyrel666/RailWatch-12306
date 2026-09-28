@@ -9,7 +9,7 @@ from typing import Mapping, Optional, Tuple
 
 APP_DISPLAY_NAME = "RailWatch 12306"
 APP_SLUG = "railwatch-12306"
-APP_PAGES = ("仪表盘", "行程设置", "购票监控", "系统设置")
+APP_PAGES = ("仪表盘", "行程设置", "购票监控", "订单中心", "系统设置")
 
 
 class AppPhase(str, Enum):
@@ -18,6 +18,7 @@ class AppPhase(str, Enum):
     LOGIN = "login"
     QUERY_READY = "query_ready"
     MONITORING = "monitoring"
+    ORDER = "order"
     HIT = "hit"
     ALTERNATE = "alternate"
     ERROR = "error"
@@ -55,6 +56,7 @@ class RailWatchState:
     hits: Tuple[TicketHit, ...] = field(default_factory=tuple)
     task: Mapping[str, object] = field(default_factory=dict)
     order: Mapping[str, object] = field(default_factory=dict)
+    human_action: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "RailWatchState":
@@ -150,7 +152,7 @@ class RailWatchState:
 
     def with_human_action(self, message: str = "") -> "RailWatchState":
         """需要人工核验时的非错误警示状态：停止监控，保留命中阶段，不翻转为 error。"""
-        next_phase = AppPhase.QUERY_READY
+        next_phase = AppPhase.ORDER if self.order else AppPhase.QUERY_READY
         if self.phase in (AppPhase.HIT, AppPhase.ALTERNATE):
             next_phase = self.phase
         return replace(

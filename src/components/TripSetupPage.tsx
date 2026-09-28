@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button, Input, Select, Switch } from "antd";
 import {
   ArrowLeftRight,
@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
+import { tripFingerprint } from "../store/railwatchStore";
 import {
   executionReference,
   getDateRangeStatus,
@@ -20,9 +21,10 @@ import {
   todayIso,
   useBeijingToday,
 } from "../lib/tripDate";
-import type { RailWatchConfig } from "../types";
+import type { PassengerCandidates, RailWatchConfig, StationSearchResult, StationSuggestion, TripChoices } from "../types";
 import type { CommandRunner, ConfirmDialog } from "./componentTypes";
 import { PreferenceSection } from "./PreferenceSection";
+import { TimerSettings } from "./TimerSettings";
 import { RiskToggle } from "./DisplayPrimitives";
 import {
   PRIORITIES, REQUEST_MODES, delayPreview, isStrategyCustomized, modeDefaults,
@@ -32,8 +34,49 @@ import {
 
 type DateRangePreset = "单日" | "±1天" | "±2天";
 
-const SEAT_OPTIONS = ["不限", "二等座", "一等座", "商务座"] as const;
-const COMMON_TRAINS = ["G1", "G3", "G17", "D313", "D321"];
+const trainCodes = (value: string) => [...new Set(value.toUpperCase().split(/[,，、;；\s]+/).filter(Boolean))];
+
+function StationField({ label, value, onChange, runCommand }: {
+  label: string; value: string; onChange: (name: string) => void; runCommand: CommandRunner;
+}) {
+  const [items, setItems] = useState<StationSuggestion[]>([]);
+  const [warning, setWarning] = useState<string | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [searched, setSearched] = useState(false);
+  useEffect(() => {
+    const query = value.trim();
+    if (!query) { setItems([]); setWarning(null); setSearched(false); return; }
+    let current = true;
+    setSearched(false);
+    const timer = window.setTimeout(() => {
+      void runCommand<StationSearchResult>("searchStations", { query, limit: 10 }).then(result => {
+        if (!current) return;
+        setItems(result?.items ?? []);
+        setWarning(result?.warning ?? null);
+        setSearched(Boolean(result));
+      });
+    }, 250);
+    return () => { current = false; window.clearTimeout(timer); };
+  }, [value, runCommand]);
+  return <div className="trip-field">
+    <label htmlFor={`station-${label}`}>{label}</label>
+    <span className="trip-input-shell"><Building2 size={15} />
+      <Input id={`station-${label}`} aria-label={label} bordered={false} value={value}
+        onFocus={() => setFocused(true)} onBlur={() => window.setTimeout(() => setFocused(false), 150)}
+        onChange={event => onChange(event.target.value)} />
+    </span>
+    {focused && items.length > 0 ? <div className="station-suggestions" role="listbox" aria-label={`${label}联想`}>
+      {items.map(item => <button type="button" role="option" aria-selected={value === item.name}
+        key={`${item.name}-${item.code}`} onMouseDown={event => event.preventDefault()}
+        onClick={() => { onChange(item.name); setFocused(false); }}>
+        {item.name}<small>{item.pinyin || item.code}</small>
+      </button>)}
+    </div> : null}
+    {warning ? <small className="trip-date-hint" role="status">{warning}</small> : null}
+    {!focused && searched && !warning && value.trim() && !items.some(item => item.name === value.trim())
+      ? <small className="trip-date-hint" role="status">请从联想中选择完整站名；未匹配时请核对站码数据。</small> : null}
+  </div>;
+}
 
 function NumberStepper({
   ariaLabel,
@@ -141,20 +184,50 @@ export function TripSetupPage({
 }) {
   const config = useRailWatchStore((state) => state.config);
   const setConfig = useRailWatchStore((state) => state.setConfig);
+  const savedConfig = useRailWatchStore(state => state.savedConfig);
+  const savedAt = useRailWatchStore(state => state.savedAt);
+  const configSaveError = useRailWatchStore(state => state.configSaveError);
+  const draftRead = useRailWatchStore(state => state.draftRead);
+  const draftSaveState = useRailWatchStore(state => state.draftSaveState);
+  const draftSavedAt = useRailWatchStore(state => state.draftSavedAt);
+  const draftError = useRailWatchStore(state => state.draftError);
+  const applyDraft = useRailWatchStore(state => state.applyDraft);
+  const dismissDraft = useRailWatchStore(state => state.dismissDraft);
+  const markConfigSaved = useRailWatchStore(state => state.markConfigSaved);
   const [dateRange, setDateRange] = useState<DateRangePreset>(
     () => (config.date_range as DateRangePreset) || "±1天",
   );
+  useEffect(() => setDateRange((config.date_range as DateRangePreset) || "±1天"), [config.date_range]);
+  const formalDirty = savedConfig ? tripFingerprint(config) !== tripFingerprint(savedConfig) : false;
+  const formatSavedAt = (at: number | null) => at === null ? "未知" : new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  }).format(new Date(at * 1000));
   const priority = queryPriority(config);
   const requestMode = getRequestMode(config);
   const preview = delayPreview(config);
   const customized = isStrategyCustomized(config);
   const [passengerDraft, setPassengerDraft] = useState("");
+  const [passengerError, setPassengerError] = useState("");
+  const [passengerCandidates, setPassengerCandidates] = useState<PassengerCandidates | null>(null);
+  const [choices, setChoices] = useState<TripChoices>({ recent_routes: [], favorites: [] });
+  const [trainNotice, setTrainNotice] = useState("");
+  const [stationRevision, setStationRevision] = useState(0);
+
+  useEffect(() => {
+    let current = true;
+    void runCommand<TripChoices>("loadTripChoices").then(result => {
+      if (current && result && Array.isArray(result.recent_routes) && Array.isArray(result.favorites)) setChoices(result);
+    });
+    return () => { current = false; };
+  }, [runCommand]);
 
   const update = (patch: Partial<RailWatchConfig>) => setConfig(patch);
   const today = useBeijingToday();
   const windowDays = useRailWatchStore(
     (state) => state.runtime.date_policy?.presale_window_days,
   );
+  const loadedSeatCapabilities = useRailWatchStore(state => state.runtime.seat_capabilities);
+  const seatCapabilities = loadedSeatCapabilities ?? [];
   const monitoring = useRailWatchStore((state) => state.status.monitoring);
   const tripDateStatus = getTripDateStatus(config.date, today, windowDays);
   const rangeStatus = getDateRangeStatus(
@@ -176,6 +249,28 @@ export function TripSetupPage({
       .map((seat) => seat.trim())
       .filter(Boolean);
   }, [config.seat_keyword]);
+  const selectedTrains = useMemo(() => trainCodes(config.train_code), [config.train_code]);
+  const currentFavorite = choices.favorites.find(item => item.from_station === config.from_station_cn.trim() &&
+    item.to_station === config.to_station_cn.trim());
+  const setRoute = (from: string, to: string) => {
+    if ((from !== config.from_station_cn || to !== config.to_station_cn) && selectedTrains.length) {
+      setTrainNotice("路线已变化；现有目标车次会保留，请核对后再执行。此路线收藏不会自动应用。");
+    }
+    update({ from_station_cn: from, to_station_cn: to });
+  };
+  const moveTrain = (index: number, delta: number) => {
+    const next = [...selectedTrains];
+    const target = index + delta;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    update({ train_code: next.join(", ") });
+  };
+  const saveFavorites = async () => {
+    const result = await runCommand<TripChoices>("saveTrainFavorites", {
+      from_station: config.from_station_cn.trim(), to_station: config.to_station_cn.trim(), trains: selectedTrains,
+    }, "当前路线的车次收藏已保存");
+    if (result) setChoices(result);
+  };
 
   const guardedAutomation = async (
     key: "auto_submit" | "auto_alternate",
@@ -195,13 +290,10 @@ export function TripSetupPage({
   };
 
   const swapStations = () => {
-    update({
-      from_station_cn: config.to_station_cn,
-      to_station_cn: config.from_station_cn,
-    });
+    setRoute(config.to_station_cn, config.from_station_cn);
   };
 
-  const toggleSeat = (seat: (typeof SEAT_OPTIONS)[number]) => {
+  const toggleSeat = (seat: string) => {
     if (seat === "不限") {
       update({ seat_keyword: "" });
       return;
@@ -223,32 +315,37 @@ export function TripSetupPage({
 
   const addPassenger = () => {
     const name = passengerDraft.trim();
-    if (!name) {
-      return;
-    }
+    if (!name) { setPassengerError("请输入乘客姓名。"); return; }
+    if (name.length > 40 || /[,，、\r\n]/.test(name)) { setPassengerError("姓名格式无效，请输入单个完整姓名。"); return; }
+    if (passengerNames.includes(name)) { setPassengerError("乘客姓名重复，请核对官方页面中的身份信息。"); return; }
+    if (passengerNames.length >= 20) { setPassengerError("最多配置 20 位乘客。"); return; }
     const nextNames = [...passengerNames, name];
     update({
       passengers: formatPassengers(nextNames),
       passenger_count: Math.max(1, nextNames.length),
     });
     setPassengerDraft("");
+    setPassengerError("");
   };
 
-  const removePassenger = (name: string) => {
-    const nextNames = passengerNames.filter((item) => item !== name);
+  const removePassenger = (index: number) => {
+    const nextNames = passengerNames.filter((_, position) => position !== index);
     update({
       passengers: formatPassengers(nextNames),
       passenger_count: Math.max(1, nextNames.length || 1),
+      passenger_selections: (config.passenger_selections ?? []).filter(item => item.name !== passengerNames[index]),
     });
   };
 
-  const applyCommonTrain = () => {
-    const current = config.train_code
-      .split(/[,，、\s]+/)
-      .map((code) => code.trim())
-      .filter(Boolean);
-    const merged = [...new Set([...current, ...COMMON_TRAINS])];
-    update({ train_code: merged.join(", ") });
+  const addCandidate = (candidate: PassengerCandidates["items"][number]) => {
+    if (candidate.ambiguous || candidate.ticket_type !== "adult" || passengerNames.includes(candidate.name)) return;
+    if (passengerNames.length >= 20) { setPassengerError("最多配置 20 位乘客。"); return; }
+    const next = [...passengerNames, candidate.name];
+    update({ passengers: formatPassengers(next), passenger_count: next.length,
+      passenger_selections: [...(config.passenger_selections ?? []), {
+        name: candidate.name, ticket_type: candidate.ticket_type, identity_hint: candidate.identity_hint,
+      }] });
+    setPassengerError("");
   };
 
   const handlePriorityChange = (next: string) => {
@@ -261,9 +358,11 @@ export function TripSetupPage({
   };
 
   const loadConfig = async () => {
+    if (formalDirty && !await confirm("恢复上次保存", "当前编辑尚未正式保存，恢复上次保存会覆盖这些修改。是否继续？")) return;
     const loaded = await runCommand<RailWatchConfig>("loadConfig");
     if (loaded) {
       setConfig(loaded);
+      markConfigSaved(loaded, savedAt ?? Date.now() / 1000);
       setDateRange((loaded.date_range as DateRangePreset) || "±1天");
     }
   };
@@ -278,7 +377,11 @@ export function TripSetupPage({
         return;
       }
     }
-    await runCommand("saveConfig", { config }, "设置已保存");
+    const result = await runCommand<RailWatchConfig>("saveConfig", { config }, "设置已保存");
+    if (result) {
+      const next = await runCommand<TripChoices>("loadTripChoices");
+      if (next && Array.isArray(next.recent_routes) && Array.isArray(next.favorites)) setChoices(next);
+    }
   };
 
   return (
@@ -302,6 +405,21 @@ export function TripSetupPage({
             恢复上次保存
           </Button>
         </header>
+        <div className="trip-save-status" role="status">
+          <span>{formalDirty ? "有未正式保存的修改" : "当前编辑与上次正式保存一致"}</span>
+          <span>上次正式保存：{formatSavedAt(savedAt)}（北京时间）</span>
+          <span>草稿：{draftSaveState === "editing" ? "编辑中" : draftSaveState === "saving" ? "保存中" :
+            draftSaveState === "saved" ? `已保存 ${formatSavedAt(draftSavedAt)}` : draftSaveState === "error" ? "保存失败" :
+            draftRead.status === "available" ? `发现可恢复草稿 ${formatSavedAt(draftRead.draft.saved_at)}` : "尚未保存"}</span>
+          {configSaveError ? <span role="alert">正式保存失败：{configSaveError}</span> : null}
+          {draftError ? <span role="alert">草稿：{draftError}</span> : null}
+        </div>
+        {draftRead.status === "available" ? <div className="trip-draft-recovery" role="group" aria-label="恢复行程草稿">
+          <span>发现上次未正式保存的行程草稿（{formatSavedAt(draftRead.draft.saved_at)}）。恢复后不会启动监控。</span>
+          <button type="button" onClick={applyDraft}>恢复草稿</button>
+          <button type="button" onClick={dismissDraft}>使用已保存配置</button>
+        </div> : null}
+        {draftRead.status === "invalid" ? <div className="trip-draft-recovery" role="alert">{draftRead.warning}</div> : null}
 
         <div className="trip-setup-form-scroll">
           <PreferenceSection
@@ -311,20 +429,8 @@ export function TripSetupPage({
             defaultOpen
           >
             <div className="trip-form-row trip-form-row--stations">
-              <label className="trip-field">
-                <span>出发站</span>
-                <span className="trip-input-shell">
-                  <Building2 size={15} />
-                  <Input
-                    aria-label="出发站"
-                    bordered={false}
-                    value={config.from_station_cn}
-                    onChange={(event) =>
-                      update({ from_station_cn: event.target.value })
-                    }
-                  />
-                </span>
-              </label>
+              <StationField key={`from-${stationRevision}`} label="出发站" value={config.from_station_cn} runCommand={runCommand}
+                onChange={value => setRoute(value, config.to_station_cn)} />
               <button
                 aria-label="交换出发站与到达站"
                 className="trip-swap-button"
@@ -333,21 +439,21 @@ export function TripSetupPage({
               >
                 <ArrowLeftRight size={16} />
               </button>
-              <label className="trip-field">
-                <span>到达站</span>
-                <span className="trip-input-shell">
-                  <Building2 size={15} />
-                  <Input
-                    aria-label="到达站"
-                    bordered={false}
-                    value={config.to_station_cn}
-                    onChange={(event) =>
-                      update({ to_station_cn: event.target.value })
-                    }
-                  />
-                </span>
-              </label>
+              <StationField key={`to-${stationRevision}`} label="到达站" value={config.to_station_cn} runCommand={runCommand}
+                onChange={value => setRoute(config.from_station_cn, value)} />
             </div>
+            {config.from_station_cn.trim() && config.from_station_cn.trim() === config.to_station_cn.trim()
+              ? <small className="trip-date-hint" role="alert">出发站和到达站不能相同</small> : null}
+            {trainNotice ? <small className="trip-date-hint" role="status">{trainNotice}</small> : null}
+            <button type="button" className="trip-station-refresh" onClick={() => void runCommand("refreshStations", {}, "站码数据已更新").then(result => {
+              if (result) setStationRevision(value => value + 1);
+            })}>更新站码数据</button>
+            {choices.recent_routes.length ? <div className="trip-route-choices" aria-label="最近路线">
+              <span>最近路线：</span>{choices.recent_routes.map(route => <button type="button"
+                key={`${route.from_station}-${route.to_station}`} onClick={() => setRoute(route.from_station, route.to_station)}>
+                {route.from_station} → {route.to_station}
+              </button>)}
+            </div> : null}
 
             <div className="trip-form-row trip-form-row--split">
               <label className="trip-field">
@@ -404,19 +510,30 @@ export function TripSetupPage({
                       }
                     />
                   </span>
-                  <Button
-                    className="trip-inline-button"
-                    onClick={applyCommonTrain}
-                    type="default"
-                  >
-                    常用车次
+                  <Button className="trip-inline-button" onClick={() => void saveFavorites()} type="default">
+                    保存为本路线收藏
                   </Button>
                 </span>
+                {currentFavorite?.trains.length ? <span className="trip-route-choices">
+                  本路线收藏：<button type="button" onClick={() => update({ train_code: currentFavorite.trains.join(", ") })}>
+                    应用 {currentFavorite.trains.join("、")}
+                  </button>
+                </span> : null}
+                {selectedTrains.length ? <span className="trip-train-order" aria-label="车次优先顺序">
+                  {selectedTrains.map((code, index) => <span key={code}>
+                    {index + 1}. {code}
+                    <button type="button" aria-label={`上移 ${code}`} disabled={index === 0} onClick={() => moveTrain(index, -1)}>↑</button>
+                    <button type="button" aria-label={`下移 ${code}`} disabled={index === selectedTrains.length - 1} onClick={() => moveTrain(index, 1)}>↓</button>
+                  </span>)}
+                </span> : null}
+                <small className="field-help">查询本路线全部车次后，可在结果页按日期和实际区间选择目标。</small>
               </label>
               <div className="trip-field">
                 <span>席别（可多选）</span>
                 <div aria-label="席别" className="chip-group" role="group">
-                  {SEAT_OPTIONS.map((seat) => (
+                  {[{ name: "不限", query: true, regular: false, alternate: false }, ...seatCapabilities.filter(seat => seat.query)].map((capability) => {
+                    const seat = capability.name;
+                    return (
                     <button
                       aria-pressed={selectedSeats.includes(seat)}
                       className={
@@ -428,10 +545,23 @@ export function TripSetupPage({
                       onClick={() => toggleSeat(seat)}
                       type="button"
                     >
-                      {seat}
+                      {seat}{seat !== "不限" ? <small>{capability.regular ? "可自动提交" : "查询／人工"}{capability.alternate ? " · 可自动候补" : ""}</small> : null}
                     </button>
-                  ))}
+                  );})}
                 </div>
+                {!seatCapabilities.length ? <small className="field-help">席别能力尚未加载，请检查运行时状态。</small> : null}
+                {selectedSeats.length > 1 ? <span className="trip-train-order" aria-label="席别优先顺序">
+                  {selectedSeats.map((seat, index) => <span key={seat}>{index + 1}. {seat}
+                    <button type="button" aria-label={`上移席别 ${seat}`} disabled={index === 0} onClick={() => {
+                      const next = [...selectedSeats]; [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                      update({ seat_keyword: next.join("，") });
+                    }}>↑</button>
+                    <button type="button" aria-label={`下移席别 ${seat}`} disabled={index === selectedSeats.length - 1} onClick={() => {
+                      const next = [...selectedSeats]; [next[index + 1], next[index]] = [next[index], next[index + 1]];
+                      update({ seat_keyword: next.join("，") });
+                    }}>↓</button>
+                  </span>)}
+                </span> : null}
               </div>
             </div>
 
@@ -439,12 +569,12 @@ export function TripSetupPage({
               <div className="trip-field">
                 <span>乘客</span>
                 <div className="passenger-strip">
-                  {passengerNames.map((name) => (
-                    <span className="passenger-tag" key={name}>
-                      {name} 成人
+                  {passengerNames.map((name, index) => (
+                    <span className="passenger-tag" key={`${name}-${index}`}>
+                      {name}
                       <button
                         aria-label={`移除乘客 ${name}`}
-                        onClick={() => removePassenger(name)}
+                        onClick={() => removePassenger(index)}
                         type="button"
                       >
                         <X size={12} />
@@ -476,213 +606,184 @@ export function TripSetupPage({
                     </button>
                   </span>
                 </div>
+                {passengerError ? <small className="trip-date-hint" role="alert">{passengerError}</small> : null}
+                <small className="field-help">姓名不代表票种。自动交易仅支持官方页面明确标为成人且票种回读为成人票的乘客；学生、儿童请在官方页面处理。</small>
+                <button type="button" className="trip-station-refresh" onClick={() => void runCommand<PassengerCandidates>("readPassengers").then(result => {
+                  if (result) setPassengerCandidates(result);
+                })}>从官方当前页面读取乘客</button>
+                {passengerCandidates?.warning ? <small className="field-help" role="status">{passengerCandidates.warning}</small> : null}
+                {passengerCandidates?.items.length ? <div className="trip-route-choices" aria-label="官方页面乘客候选">
+                  {passengerCandidates.items.map((candidate, index) => <button type="button" key={`${candidate.name}-${candidate.identity_hint}-${index}`}
+                    disabled={candidate.ambiguous || candidate.ticket_type !== "adult" || passengerNames.includes(candidate.name)}
+                    onClick={() => addCandidate(candidate)}>{candidate.name} · {candidate.identity_hint || "证件摘要未提供"} · {
+                      candidate.ambiguous ? "同名需人工核对" : candidate.ticket_type === "adult" ? "成人" : "票种不支持自动交易"
+                    }</button>)}
+                </div> : null}
               </div>
             </div>
           </PreferenceSection>
-          <PreferenceSection
-            id="trip-query"
-            title="查询策略"
-            description="调整查询频率、优先级与座位偏好"
-          >
-            <div className="trip-form-row trip-form-row--split">
-              {" "}
-              <div className="trip-field">
-                <span className="trip-field-label-with-help">
-                  优先级
-                  <CircleHelp aria-hidden size={13} />
-                </span>
-                <SegmentedControl
-                  ariaLabel="优先级"
-                  options={["速度优先", "成功率优先"] as const}
-                  value={PRIORITIES[priority].label}
-                  onChange={handlePriorityChange}
-                />
-                <small className="field-help">
-                  {customized ? "已自定义；再次选择优先级可恢复推荐参数。" : "已应用推荐参数，可继续手动调整。"}
-                  {priority === "speed"
-                    ? "速度优先缩短查询等待，适合关注起售后的及时响应。"
-                    : "成功率优先侧重稳定查询和较长等待，适合持续监控；不代表购票成功率保证。"}
-                </small>
+          <div className="trip-strategy-sections">
+            <PreferenceSection
+              id="trip-query"
+              title="查询策略"
+              description="调整查询频率、优先级与座位偏好"
+              defaultOpen={window.matchMedia("(min-width: 1400px)").matches}
+            >
+              <div className="trip-form-row trip-form-row--split">
+                {" "}
+                <div className="trip-field">
+                  <span className="trip-field-label-with-help">
+                    优先级
+                    <CircleHelp aria-hidden size={13} />
+                  </span>
+                  <SegmentedControl
+                    ariaLabel="优先级"
+                    options={["速度优先", "成功率优先"] as const}
+                    value={PRIORITIES[priority].label}
+                    onChange={handlePriorityChange}
+                  />
+                  <small className="field-help">
+                    {customized ? "已自定义；再次选择优先级可恢复推荐参数。" : "已应用推荐参数，可继续手动调整。"}
+                    {priority === "speed"
+                      ? "速度优先缩短查询等待，适合关注起售后的及时响应。"
+                      : "成功率优先侧重稳定查询和较长等待，适合持续监控；不代表购票成功率保证。"}
+                  </small>
+                </div>{" "}
+                <label className="trip-field">
+                  <span>座位偏好</span>
+                  <Select
+                    aria-label="座位偏好"
+                    className="trip-select"
+                    options={["无偏好", "靠窗优先", "靠过道优先"].map(
+                      (value) => ({ value, label: value }),
+                    )}
+                    value={config.seat_prefer}
+                    onChange={(value) => update({ seat_prefer: value })}
+                  />
+                </label>
               </div>{" "}
+              <div className="trip-form-row trip-form-row--quad">
+                <div className="trip-field">
+                  <span>查询间隔</span>
+                  <NumberStepper
+                    ariaLabel="查询间隔"
+                    decimals={1}
+                    max={60}
+                    min={config.smart_rate ? REQUEST_MODES[requestMode].min_interval : 1}
+                    step={0.5}
+                    suffix="秒"
+                    value={config.interval}
+                    onChange={(value) => update({ interval: value })}
+                  />
+                </div>
+                <div className="trip-field">
+                  <span>超时时间</span>
+                  <NumberStepper
+                    ariaLabel="超时时间"
+                    max={120}
+                    min={5}
+                    step={1}
+                    suffix="秒"
+                    value={config.query_timeout}
+                    onChange={(value) => update({ query_timeout: value })}
+                  />
+                </div>
+                <div className="trip-field">
+                  <span className="trip-field-label-with-help">
+                    随机延迟
+                    <CircleHelp aria-hidden size={13} />
+                  </span>
+                  <div className="trip-readonly-pill">
+                    {preview.label} 秒
+                  </div>
+                  <small className="field-help">{preview.detail}</small>
+                </div>
+                <div className="trip-field">
+                  <span className="trip-field-label-with-help">
+                    请求模式
+                    <CircleHelp aria-hidden size={13} />
+                  </span>
+                  <Select
+                    aria-label="请求模式"
+                    className="trip-select"
+                    options={(Object.keys(REQUEST_MODES) as RequestMode[])
+                      .filter((mode) => mode !== "legacy" || requestMode === "legacy")
+                      .map((mode) => ({ value: mode, label: REQUEST_MODES[mode].label }))}
+                    value={requestMode}
+                    onChange={(value) =>
+                      handleRequestModeChange(value as RequestMode)
+                    }
+                  />
+                </div>
+              </div>
+              <div className="trip-advanced-switches">
+                {" "}
+                <label className="switch-row">
+                  <Switch
+                    aria-label="保持会话"
+                    checked={config.keep_alive}
+                    onChange={(checked) => update({ keep_alive: checked })}
+                  />
+                  <span>保持会话</span>
+                </label>
+                <label className="switch-row">
+                  <Switch
+                    aria-label="智能轮询"
+                    checked={config.smart_rate}
+                    onChange={(checked) => update({ smart_rate: checked })}
+                  />
+                  <span>智能轮询</span>
+                </label>
+              </div>
+            </PreferenceSection>
+            <TimerSettings config={config} update={update} windowDays={windowDays} />
+            <PreferenceSection
+              id="trip-automation"
+              title="自动化"
+              description={
+                config.auto_submit || config.auto_alternate
+                  ? "已启用 · 核验与支付需人工完成"
+                  : "自动提交与自动候补默认关闭"
+              }
+            >
               <label className="trip-field">
-                <span>座位偏好</span>
-                <Select
-                  aria-label="座位偏好"
-                  className="trip-select"
-                  options={["无偏好", "靠窗优先", "靠过道优先"].map(
-                    (value) => ({ value, label: value }),
-                  )}
-                  value={config.seat_prefer}
-                  onChange={(value) => update({ seat_prefer: value })}
+                <span>候补截止</span>
+                <input
+                  aria-label="候补截止"
+                  className="native-input"
+                  type="text"
+                  placeholder="开车前60分钟，或 2026-09-10 18:00"
+                  value={config.alternate_deadline}
+                  onChange={(event) =>
+                    update({ alternate_deadline: event.target.value })
+                  }
                 />
               </label>
-            </div>{" "}
-            <div className="trip-form-row trip-form-row--quad">
-              <div className="trip-field">
-                <span>查询间隔</span>
-                <NumberStepper
-                  ariaLabel="查询间隔"
-                  decimals={1}
-                  max={60}
-                  min={config.smart_rate ? REQUEST_MODES[requestMode].min_interval : 1}
-                  step={0.5}
-                  suffix="秒"
-                  value={config.interval}
-                  onChange={(value) => update({ interval: value })}
+              <p>
+                候补截止可填“开车前60分钟”或完整日期时间，仅选择官方页面提供的对应选项。
+              </p>{" "}
+              <div className="trip-advanced-risk">
+                <RiskToggle
+                  checked={config.auto_submit}
+                  title={config.auto_submit ? "自动提交已启用" : "自动提交关闭"}
+                  description="开启后按设置的目标自动提交订单并确认，无需人工点击确认；核验与支付需人工完成。"
+                  onChange={(checked) =>
+                    void guardedAutomation("auto_submit", checked)
+                  }
                 />
-              </div>
-              <div className="trip-field">
-                <span>超时时间</span>
-                <NumberStepper
-                  ariaLabel="超时时间"
-                  max={120}
-                  min={5}
-                  step={1}
-                  suffix="秒"
-                  value={config.query_timeout}
-                  onChange={(value) => update({ query_timeout: value })}
-                />
-              </div>
-              <div className="trip-field">
-                <span className="trip-field-label-with-help">
-                  随机延迟
-                  <CircleHelp aria-hidden size={13} />
-                </span>
-                <div className="trip-readonly-pill">
-                  {preview.label} 秒
-                </div>
-                <small className="field-help">{preview.detail}</small>
-              </div>
-              <div className="trip-field">
-                <span className="trip-field-label-with-help">
-                  请求模式
-                  <CircleHelp aria-hidden size={13} />
-                </span>
-                <Select
-                  aria-label="请求模式"
-                  className="trip-select"
-                  options={(Object.keys(REQUEST_MODES) as RequestMode[])
-                    .filter((mode) => mode !== "legacy" || requestMode === "legacy")
-                    .map((mode) => ({ value: mode, label: REQUEST_MODES[mode].label }))}
-                  value={requestMode}
-                  onChange={(value) =>
-                    handleRequestModeChange(value as RequestMode)
+                <RiskToggle
+                  checked={config.auto_alternate}
+                  title={
+                    config.auto_alternate ? "候补排队已启用" : "候补排队关闭"
+                  }
+                  description="按已配置的乘车人和席别提交首选候补；人工支付预付款后才生效。实验性功能，需核对官方订单。"
+                  onChange={(checked) =>
+                    void guardedAutomation("auto_alternate", checked)
                   }
                 />
               </div>
-            </div>
-            <div className="trip-advanced-switches">
-              {" "}
-              <label className="switch-row">
-                <Switch
-                  aria-label="保持会话"
-                  checked={config.keep_alive}
-                  onChange={(checked) => update({ keep_alive: checked })}
-                />
-                <span>保持会话</span>
-              </label>
-              <label className="switch-row">
-                <Switch
-                  aria-label="智能轮询"
-                  checked={config.smart_rate}
-                  onChange={(checked) => update({ smart_rate: checked })}
-                />
-                <span>智能轮询</span>
-              </label>
-            </div>
-          </PreferenceSection>
-          <PreferenceSection
-            id="trip-timer"
-            title="定时启动"
-            description={
-              config.timer_enabled
-                ? "已启用 · 按北京时间等待起售"
-                : "在指定的起售时间开始监控"
-            }
-            enabled={config.timer_enabled}
-          >
-            <label className="switch-row">
-              <Switch
-                aria-label="定时启动"
-                checked={config.timer_enabled}
-                onChange={(checked) => update({ timer_enabled: checked })}
-              />
-              <span>启用定时启动</span>
-            </label>
-            <label className="trip-field">
-              <span>起售日期时间（北京时间）</span>
-              <input
-                aria-label="定时启动时间"
-                className="native-input"
-                type="datetime-local"
-                step="1"
-                value={config.sale_at?.replace(/\+08:00$/, "") || ""}
-                onChange={(event) =>
-                  update({
-                    sale_at: event.target.value
-                      ? `${event.target.value}+08:00`
-                      : "",
-                    target_time: event.target.value.slice(11),
-                    sale_time_source: "manual",
-                    sale_time_checked_at: new Date().toISOString(),
-                  })
-                }
-              />
-            </label>
-            <p>
-              请按 12306
-              公布的车站起售时间核对日期，并提前完成登录及人证核验。定时使用系统时钟，请提前校准电脑时间；起售前
-              10 秒不再启动准备操作。
-            </p>
-            <p>旧版时间 {config.target_time} 不会自动顺延至次日。</p>
-          </PreferenceSection>
-          <PreferenceSection
-            id="trip-automation"
-            title="自动化"
-            description={
-              config.auto_submit || config.auto_alternate
-                ? "已启用 · 核验与支付需人工完成"
-                : "自动提交与自动候补默认关闭"
-            }
-            enabled={config.auto_submit || config.auto_alternate}
-          >
-            <label className="trip-field">
-              <span>候补截止</span>
-              <input
-                aria-label="候补截止"
-                className="native-input"
-                type="text"
-                placeholder="开车前60分钟，或 2026-09-10 18:00"
-                value={config.alternate_deadline}
-                onChange={(event) =>
-                  update({ alternate_deadline: event.target.value })
-                }
-              />
-            </label>
-            <p>
-              候补截止可填“开车前60分钟”或完整日期时间，仅选择官方页面提供的对应选项。
-            </p>{" "}
-            <div className="trip-advanced-risk">
-              <RiskToggle
-                checked={config.auto_submit}
-                title={config.auto_submit ? "自动提交已启用" : "自动提交关闭"}
-                description="开启后按设置的目标自动提交订单并确认，无需人工点击确认；核验与支付需人工完成。"
-                onChange={(checked) =>
-                  void guardedAutomation("auto_submit", checked)
-                }
-              />
-              <RiskToggle
-                checked={config.auto_alternate}
-                title={
-                  config.auto_alternate ? "候补排队已启用" : "候补排队关闭"
-                }
-                description="按已配置的乘车人和席别提交首选候补；人工支付预付款后才生效。实验性功能，需核对官方订单。"
-                onChange={(checked) =>
-                  void guardedAutomation("auto_alternate", checked)
-                }
-              />
-            </div>
-          </PreferenceSection>
+            </PreferenceSection>
+          </div>
         </div>
         <footer className="trip-setup-footer">
           <Button
@@ -699,6 +800,10 @@ export function TripSetupPage({
             onClick={() => void runCommand("analyzeQuery", { config })}
           >
             查询余票
+          </Button>
+          <Button loading={busy === "analyzeQuery"}
+            onClick={() => void runCommand("analyzeQuery", { config: { ...config, train_code: "" } })}>
+            查询本路线全部车次
           </Button>
         </footer>
       </section>

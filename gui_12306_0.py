@@ -21,13 +21,14 @@ import json
 import urllib.request
 import random
 import threading
+import uuid
 from typing import Optional, List, Dict, Callable, Tuple, Any
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from railwatch_dates import expand_travel_dates
-from railwatch_query import FillResult, fill_result, QueryExecutor, FILL_QUERY_FORM_JS, DISMISS_DIALOG_JS
-from railwatch_row_parser import RowParser, TRAIN_CODE_PATTERN
+from railwatch_query import FillResult, fill_result, QueryExecutor, FILL_QUERY_FORM_JS, DISMISS_DIALOG_JS, query_snapshot, query_conditions
+from railwatch_row_parser import RowParser, TRAIN_CODE_PATTERN, DISPLAY_SEATS
 from railwatch_selectors import (
     ALTERNATE_BUTTON_SELECTORS,
     BOOK_BUTTON_SELECTORS,
@@ -41,8 +42,8 @@ from railwatch_orders import OrderIntent, OrderResult
 from railwatch_config_contract import parse_passenger_names
 from railwatch_order_page import OrderPage
 from railwatch_time import ServerTimeSync, get_server_time_sync
-from railwatch_verification import VerificationDetector
 from railwatch_preferences import atomic_write_json
+from railwatch_seats import seat_prefix
 
 
 def _safe_print(title: str, msg: str) -> None:
@@ -85,6 +86,7 @@ except ImportError:
 # ==================== 常量定义 ====================
 STATION_JS_URL = "https://kyfw.12306.cn/otn/resources/js/framework/station_name.js"
 CACHE_FILE = "station_codes_cache.json"
+STATION_SEARCH_FILE = "station_search_cache.json"
 USER_CONFIG_FILE = "user_config.json"
 
 # 仅明确未起售提示在冲刺期间使用短重试，其他故障遵循正常退避。
@@ -114,13 +116,8 @@ class SeatType(Enum):
     
     @classmethod
     def get_prefix(cls, seat_name: str) -> Optional[str]:
-        """根据席别名称获取 td id 前缀"""
-        seat_name = (seat_name or "").strip()
-        for member in cls:
-            cn_name, prefix = member.value
-            if cn_name == seat_name:
-                return prefix
-        return None
+        """根据统一席别能力表获取 td id 前缀。"""
+        return seat_prefix((seat_name or "").strip())
 
 
 # ==================== 配置数据类 ====================
@@ -161,6 +158,7 @@ class QueryConfig:
     prepare_time: int = 2      # 提前准备秒数
     keep_alive: bool = True     # 是否开启会话保活
     passengers: str = ""       # 目标乘车人姓名，逗号分隔
+    passenger_selections: List[dict] = field(default_factory=list)
     
     # 候补订单功能
     auto_alternate: bool = False  # 是否启用无票时自动候补
@@ -196,6 +194,7 @@ class QueryConfig:
             "prepare_time": self.prepare_time,
             "keep_alive": self.keep_alive,
             "passengers": self.passengers,
+            "passenger_selections": self.passenger_selections,
             "auto_alternate": self.auto_alternate,
             "alternate_deadline": self.alternate_deadline,
             "date_range": self.date_range,
@@ -228,6 +227,7 @@ class QueryConfig:
             prepare_time=data.get("prepare_time", 2),
             keep_alive=data.get("keep_alive", True),
             passengers=data.get("passengers", ""),
+            passenger_selections=data.get("passenger_selections", []),
             auto_alternate=data.get("auto_alternate", False),
             alternate_deadline=data.get("alternate_deadline", ""),
             date_range=data.get("date_range", "单日"),
@@ -394,10 +394,14 @@ class StationCodeResolver:
         if os.path.exists(self.cache_path):
             try:
                 with open(self.cache_path, "r", encoding="utf-8") as f:
-                    self._name2code = json.load(f)
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict) or not all(isinstance(name, str) and isinstance(code, str)
+                                                          for name, code in loaded.items()):
+                    raise ValueError("站码缓存格式无效")
+                self._name2code = loaded
                 self.log(f"✅ 站点编码缓存已加载：{len(self._name2code)} 条")
                 return self._name2code
-            except (json.JSONDecodeError, IOError) as e:
+            except (json.JSONDecodeError, IOError, ValueError) as e:
                 self.log(f"⚠️ 缓存读取失败，将重新下载：{e}")
 
         # 下载 station_name.js
@@ -411,7 +415,8 @@ class StationCodeResolver:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                js_text = urllib.request.urlopen(STATION_JS_URL, timeout=20).read().decode("utf-8", errors="ignore")
+                with urllib.request.urlopen(STATION_JS_URL, timeout=20) as response:
+                    js_text = response.read().decode("utf-8", errors="ignore")
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -428,6 +433,7 @@ class StationCodeResolver:
         raw = match.group(1)
         # 格式：@bjb|北京北|VAP|beijingbei|bjb|0@...
         name2code: Dict[str, str] = {}
+        searchable = []
         items = raw.split("@")
         for item in items:
             if not item.strip():
@@ -438,16 +444,63 @@ class StationCodeResolver:
                 code = parts[2].strip()
                 if cn_name and code:
                     name2code[cn_name] = code
+                    searchable.append({"name": cn_name, "code": code,
+                                       "pinyin": parts[3].strip() if len(parts) > 3 else "",
+                                       "initials": parts[4].strip() if len(parts) > 4 else ""})
+        if not name2code:
+            raise RuntimeError("站码数据为空，旧缓存已保留。")
 
         # 保存缓存
         try:
-            with open(self.cache_path, "w", encoding="utf-8") as f:
-                json.dump(name2code, f, ensure_ascii=False, indent=2)
+            atomic_write_json(self.cache_path, name2code)
             self.log(f"✅ 站点编码已缓存：{len(name2code)} 条")
         except IOError as e:
             self.log(f"⚠️ 缓存保存失败：{e}")
 
+        try:
+            atomic_write_json(os.path.join(self.base_dir, STATION_SEARCH_FILE), searchable)
+        except OSError as e:
+            self.log(f"⚠️ 站名联想缓存保存失败：{e}")
+
         return name2code
+
+    def search(self, query: str, limit: int = 12) -> dict:
+        """Search known stations without broadening the submitted station name."""
+        if not isinstance(query, str) or len(query) > 80 or type(limit) is not int or not 1 <= limit <= 30:
+            raise ValueError("站名搜索参数无效。")
+        needle = query.strip().lower()
+        if not needle:
+            return {"items": [], "warning": None}
+        try:
+            names = self.load()
+        except Exception as exc:
+            return {"items": [], "warning": f"站码缓存不可用，请检查网络后重试；仍可手动输入完整站名。原因：{exc}"}
+        records = None
+        try:
+            with open(os.path.join(self.base_dir, STATION_SEARCH_FILE), encoding="utf-8") as handle:
+                value = json.load(handle)
+            if isinstance(value, list):
+                records = [entry for entry in value if isinstance(entry, dict) and
+                           names.get(entry.get("name")) == entry.get("code")]
+        except (OSError, ValueError, TypeError):
+            pass
+        old_cache = records is None
+        if records is None:
+            records = [{"name": name, "code": code, "pinyin": "", "initials": ""}
+                       for name, code in names.items()]
+        matches = [entry for entry in records if any(needle in str(entry.get(key, "")).lower()
+                   for key in ("name", "pinyin", "initials"))]
+        matches.sort(key=lambda entry: (0 if entry["name"].lower() == needle else
+                                        1 if entry["name"].lower().startswith(needle) else 2,
+                                        entry["name"]))
+        warning = "旧站码缓存仅支持中文联想；联网后可更新站码数据。" if old_cache and needle.isascii() else None
+        return {"items": matches[:limit], "warning": warning}
+
+    def refresh(self) -> dict:
+        """Explicit user refresh; a failed download leaves the old cache intact."""
+        names = self._download_and_parse()
+        self._name2code = names
+        return {"count": len(names)}
 
     def get_code(self, cn_name: str) -> str:
         """获取站点编码"""
@@ -497,6 +550,7 @@ class PageAnalyzer(BaseHandler):
         """
         打开查询页 -> 自动填参 -> 自动点查询 -> 等待结果行 -> 解析
         """
+        self.last_query = {}
         self.log("🌐 正在打开 12306 车票查询页...")
         self.driver.get("https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc")
 
@@ -527,13 +581,14 @@ class PageAnalyzer(BaseHandler):
 
         executor = QueryExecutor(self.driver)
         result = executor.execute(self.click_query_button, int(cfg.get("query_timeout", 40)))
+        self.last_query = result
         if result["status"] not in ("ok", "empty"):
             raise RuntimeError(result.get("reason") or "本轮查询未完成")
         rows = [] if result["status"] == "empty" else self._parse_rows()
         if not executor.current():
             raise RuntimeError("查询结果已失效，请重新查询")
         self.last_query = result
-        return rows
+        return [{**row, "date": date} for row in rows]
 
     @staticmethod
     def _format_row(row: dict) -> str:
@@ -573,6 +628,7 @@ class TicketMonitor(BaseHandler):
         order_journal=None,
         on_order=None,
         run_id="",
+        query_start_callback=None,
     ):
         super().__init__(driver, log_callback)
         self.cfg = dict(cfg)
@@ -590,6 +646,7 @@ class TicketMonitor(BaseHandler):
         self.query_executor = QueryExecutor(driver, self.should_stop, self._poll_wait, lambda: self.tick()) if param_filler else None
         self.notify = notify_callback or (lambda title, msg: print(title, msg, flush=True) if title.isascii() and msg.isascii() else _safe_print(title, msg))
         self.progress = progress_callback
+        self.query_start_callback = query_start_callback
         self.on_hit = on_hit
         self.human_action = human_action_callback
         self.server_time_sync = server_time_sync or get_server_time_sync(log_callback=self.log)
@@ -619,7 +676,6 @@ class TicketMonitor(BaseHandler):
         self._form_snapshot = None
         self.row_parser = RowParser(self.driver, SeatType.get_prefix)
         self._row_snapshot = None
-        self.verification = VerificationDetector(self.driver, log_callback=self.log)
         self.submit_flow = SubmitFlow(
             self.driver,
             cfg,
@@ -629,7 +685,6 @@ class TicketMonitor(BaseHandler):
         self.alternate_flow = AlternateFlow(
             self.driver,
             cfg,
-            self.verification,
             log_callback=self.log,
             human_action_callback=self.human_action,
             find_alternate_button=self._find_alternate_button,
@@ -666,11 +721,9 @@ class TicketMonitor(BaseHandler):
         if not isinstance(result, OrderResult):
             result = OrderResult("unknown", "提交适配器未返回可验证的订单结果")
         if action == "book" and result.status == "unknown" and result.reason == "官方提示余票不足":
-            reconciled = self.order_page.reconcile(intent, navigate=True, allow_empty=True)
-            if reconciled.status == "not_submitted" and reconciled.no_order:
-                result = OrderResult("sold_out", "售罄且官方待支付订单已确认为空", no_order=True)
-            else:
-                result = reconciled
+            # Only OrderPage knows whether confirmation was dispatched. A sold-out
+            # message alone must not authorize leaving an ambiguous confirmation.
+            result = self.order_page.reconcile(intent, navigate=False)
         try:
             result = self.order_journal.record(intent, result)
             self._mark("confirmed_failure" if result.can_fallback else result.status)
@@ -694,8 +747,8 @@ class TicketMonitor(BaseHandler):
         if not train_str:
             return []
         # 支持逗号、空格、分号分隔
-        trains = re.split(r"[,，;\s]+", train_str)
-        return [t.strip().upper() for t in trains if t.strip()]
+        trains = re.split(r"[,，、;；\s]+", train_str)
+        return list(dict.fromkeys(t.strip().upper() for t in trains if t.strip()))
     
     def _parse_seat_targets(self) -> List[str]:
         """解析目标席别列表"""
@@ -703,8 +756,8 @@ class TicketMonitor(BaseHandler):
         if not seat_str:
             return []
         # 支持逗号、空格、分号分隔
-        seats = re.split(r"[,，;\s]+", seat_str)
-        return [s.strip() for s in seats if s.strip()]
+        seats = re.split(r"[,，、;；\s]+", seat_str)
+        return list(dict.fromkeys(s.strip() for s in seats if s.strip()))
 
     def _apply_loop_date(self, loop_count: int, force: bool = False) -> None:
         if self.date_provider:
@@ -859,6 +912,37 @@ class TicketMonitor(BaseHandler):
         return loop_count <= 5
 
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:
+        self._snapshot_query_id = uuid.uuid4().hex
+        self._snapshot_sequence = loop_count
+        self._snapshot_published = False
+        self.last_query = {}
+        self._snapshot_config = dict(self.cfg)
+        if self.travel_dates:
+            self._snapshot_config["date"] = self._fallback_date if self._prefer_alternate else self.travel_dates[(loop_count - 1) % len(self.travel_dates)]
+        try:
+            return self._query_loop(loop_count, interval)
+        except Exception as exc:
+            self._publish_query(error=f"查询失败：{exc}")
+            raise
+
+    def _publish_query(self, error=None):
+        if self._snapshot_published or self.should_stop():
+            return
+        if not self.progress:
+            return
+        rows = [] if error is not None else self.row_parser.structured_rows(self._row_snapshot or [], self._snapshot_config.get("date", ""))
+        snapshot = query_snapshot(self._snapshot_config, rows, run_id=self.run_id,
+                                  query_id=self._snapshot_query_id, sequence=self._snapshot_sequence,
+                                  error=error, fetched_at=self.last_query.get("fetched_at"))
+        self._snapshot_published = True
+        try:
+            self.progress({**self.last_query, "query_id": snapshot["query_id"], "fetched_at": snapshot["fetched_at"],
+                           "loop": self._snapshot_sequence, "date": snapshot["conditions"]["date"],
+                           "rows": snapshot["rows"], "snapshot": snapshot})
+        except Exception:
+            pass  # A display callback must not alter transaction decisions.
+
+    def _query_loop(self, loop_count: int, interval: float) -> bool:
         """单次监控循环，返回是否命中（风控优化版）"""
         self._row_snapshot = None
         if self.should_stop() or not self.session_check():
@@ -876,7 +960,15 @@ class TicketMonitor(BaseHandler):
         self.log(f"🔎 第 {loop_count} 次查询 (间隔: {interval:.1f}s)")
 
         self._apply_loop_date(loop_count, force=navigated)
+        self._snapshot_config = dict(self.cfg)
+        if self.query_start_callback:
+            try:
+                self.query_start_callback({"run_id": self.run_id or None, "query_id": self._snapshot_query_id,
+                                           "sequence": loop_count, "conditions": query_conditions(self._snapshot_config), "started_at": time.time()})
+            except Exception:
+                pass  # Display observers cannot interrupt a query or transaction.
         if not self._fill_query_params(force=navigated):
+            self._publish_query(error="查询参数未就绪，本轮未取得有效结果")
             self._sleep(interval)
             return False
         if self.should_stop():
@@ -890,6 +982,8 @@ class TicketMonitor(BaseHandler):
             status = result["status"]
             if status == "cancelled":
                 return True
+            if status not in ("ok", "empty"):
+                self._publish_query(error=result.get("reason") or {"not_on_sale": "尚未起售", "rate_limited": "查询限频", "server_backoff": "服务端要求等待"}.get(status, "本轮查询未完成"))
             if status in ("rate_limited", "server_backoff"):
                 reason = result.get("reason", f"查询收到 HTTP {result.get('http_status')}")
                 if self.rate_limiter:
@@ -927,12 +1021,14 @@ class TicketMonitor(BaseHandler):
                 self._sleep(max(interval, self.rate_limiter.get_interval() if self.rate_limiter else interval))
                 return False
             if not self.query_executor.current():
+                self._publish_query(error="查询条件或结果已改变，本轮结果无效")
                 self._needs_navigation = True
                 self._sleep(interval)
                 return False
         else:
             # Compatibility for standalone core callers without a form adapter.
             if not self.click_query_button() or not self.wait_for_rows(timeout=int(self.cfg.get("query_timeout", 40)), stop_check=self.should_stop):
+                self._publish_query(error="本轮查询未完成")
                 if self.rate_limiter:
                     self.rate_limiter.on_timeout()
                 self._sleep(max(interval, self.rate_limiter.get_interval() if self.rate_limiter else interval))
@@ -940,22 +1036,22 @@ class TicketMonitor(BaseHandler):
         if self.rate_limiter:
             self.rate_limiter.on_success()
 
-        self._row_snapshot = [] if self.last_query.get("status") == "empty" else self.row_parser.snapshot_rows(self.target_seats)
-        if self.progress:
-            try:
-                self.progress({**self.last_query, "loop": loop_count, "date": self.current_loop_date or str(self.cfg.get("date", "")), "rows": self.row_parser.display_rows(self._row_snapshot)})
-            except Exception:
-                pass
+        self._row_snapshot = [] if self.last_query.get("status") == "empty" else self.row_parser.snapshot_rows(list(dict.fromkeys([*DISPLAY_SEATS, *self.target_seats])))
 
-        # 6) 找到席别列索引（兆底用）
-        seat_col_indices = {}
-
-        # 7) 判断是否命中
-        if self.query_executor and not self.query_executor.current():
+        if self.last_query.get("status") == "empty" and self.query_executor and not self.query_executor.current():
+            self._publish_query(error="读取结果期间查询已失效，本轮结果已丢弃")
             self._needs_navigation = True
             self._sleep(interval)
             return False
-        hit = None if self.last_query.get("status") == "empty" else self._find_hit_row(seat_col_indices)
+        try:
+            hit = None if self.last_query.get("status") == "empty" else self._scan_current_rows()
+        except StaleElementReferenceException:
+            self._needs_navigation = True
+            self._publish_query(error="结果页面持续变化，本轮快照无效，将在下一轮重新核对")
+            self.log("结果页面持续变化，本轮快照无效，未作无票或候补判断。")
+            self._sleep(interval)
+            return False
+        self._publish_query()
         if hit:
             train_code, seat_name, seat_value, row_el, action_btn, action_type = hit
             self.log(f"🎯 命中：{train_code} | {seat_name}={seat_value}")
@@ -999,12 +1095,30 @@ class TicketMonitor(BaseHandler):
         self._mark("query_click")
         return self.click_query_button()
 
-    def _get_seat_col_index(self, seat_keyword: str) -> Optional[int]:
-        """获取席别在表头的列索引"""
-        return self.row_parser.get_seat_col_index(seat_keyword)
+    def _scan_current_rows(self):
+        """Retry a stale DOM snapshot once without sending another ticket query."""
+        for attempt in range(2):
+            if self.should_stop():
+                return None
+            if self.query_executor and not self.query_executor.current():
+                if not attempt and self.query_executor.current(accept_revision=True):
+                    self._row_snapshot = self.row_parser.snapshot_rows(
+                        list(dict.fromkeys([*DISPLAY_SEATS, *self.target_seats])))
+                    continue
+                raise StaleElementReferenceException("Query ownership changed")
+            try:
+                return self._find_hit_row()
+            except StaleElementReferenceException:
+                if attempt:
+                    raise
+                if self.query_executor and not self.query_executor.current(accept_revision=True):
+                    raise
+                self._row_snapshot = self.row_parser.snapshot_rows(
+                    list(dict.fromkeys([*DISPLAY_SEATS, *self.target_seats])))
 
-    def _find_hit_row(self, seat_col_indices):
+    def _find_hit_row(self, seat_col_indices=None):
         """Inspect every target for cash inventory before considering one waitlist seat."""
+        seat_col_indices = seat_col_indices or {}
         try:
             rows = self._row_snapshot if self._row_snapshot is not None else self.row_parser.snapshot_rows(self.target_seats)
             ranked = []
@@ -1041,7 +1155,7 @@ class TicketMonitor(BaseHandler):
                         if button is not None:
                             return train, seat, "候补", row, button, "alternate"
             return None
-        except (NoSuchElementException, StaleElementReferenceException):
+        except NoSuchElementException:
             return None
 
     def _get_seat_value(self, row, seat_keyword: str, col_index: Optional[int]) -> Optional[str]:
@@ -1064,7 +1178,7 @@ class TicketMonitor(BaseHandler):
                 if (button.text.strip() == "候补" and button.is_displayed() and button.is_enabled()
                         and button.get_attribute("aria-disabled") != "true"):
                     return button
-        except (NoSuchElementException, StaleElementReferenceException):
+        except NoSuchElementException:
             pass
         return None
 

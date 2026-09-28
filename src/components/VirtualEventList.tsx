@@ -43,7 +43,10 @@ export function VirtualEventList({ entries, className }: { entries: Entry[]; cla
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
-    const update = () => setViewport({ top: element.scrollTop, height: element.clientHeight || 400 });
+    const update = () => {
+      const top = element.scrollTop, height = element.clientHeight || 400;
+      setViewport(previous => previous.top === top && previous.height === height ? previous : { top, height });
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);

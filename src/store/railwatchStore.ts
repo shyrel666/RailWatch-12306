@@ -1,18 +1,29 @@
 import { createStore } from "zustand/vanilla";
 import { DEFAULT_QUERY_STRATEGY } from "../lib/queryStrategy";
+import { conditionsMatch, mergeQuerySnapshots, queryFamily, queryRows, type QueryViews } from "../lib/queryResults";
 import type {
   HumanActionPayload,
   LogEntry,
   MonitorTickPayload,
   NotifyPayload,
   QueryResultRow,
+  QueryAttempt,
   RailWatchConfig,
   RailWatchPage,
   RailWatchStatus,
   ResultsPayload,
   RuntimeInfo,
   TicketHit,
+  TripDraftReadResult,
 } from "../types";
+
+export function tripFingerprint(config: RailWatchConfig) {
+  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => key !== "query_jobs").sort(([a], [b]) => a.localeCompare(b))));
+}
+
+function humanActionKey(action: HumanActionPayload) {
+  return action.event_id || JSON.stringify([action.run_id, action.title, action.message]);
+}
 
 export const defaultStatus: RailWatchStatus = {
   phase: "idle",
@@ -34,7 +45,7 @@ export const defaultRuntimeInfo: RuntimeInfo = {
   app_display_name: "RailWatch 12306",
   app_version: "未知",
   app_slug: "railwatch-12306",
-  pages: ["仪表盘", "行程设置", "购票监控", "系统设置"],
+  pages: ["仪表盘", "行程设置", "购票监控", "订单中心", "系统设置"],
   data_dir: "",
   data_dir_writable: false,
   data_dir_free_bytes: 0,
@@ -88,15 +99,43 @@ export type RailWatchStore = {
   runtime: RuntimeInfo;
   status: RailWatchStatus;
   config: RailWatchConfig;
+  savedConfig: RailWatchConfig | null;
+  savedAt: number | null;
+  configSaveError: string | null;
+  draftRead: TripDraftReadResult;
+  tripInitialized: boolean;
+  editRevision: number;
+  draftRevision: number;
+  draftSaveState: "idle" | "editing" | "saving" | "saved" | "error";
+  draftSavedAt: number | null;
+  draftError: string | null;
+  initializeTrip: (config: RailWatchConfig, savedAt: number | null, draft: TripDraftReadResult) => void;
+  applyDraft: () => void;
+  dismissDraft: () => void;
+  markConfigSaved: (config: RailWatchConfig, at: number) => void;
+  markConfigSaveError: (reason: string) => void;
+  markDraftSaving: (editRevision: number) => void;
+  markDraftSaved: (editRevision: number, revision: number, at: number) => void;
+  markDraftError: (editRevision: number, reason: string) => void;
   logs: LogEntry[];
   pausedLogs: LogEntry[];
   droppedLogs: number;
   retiredRuns: string[];
   results: QueryResultRow[];
+  queryViews: QueryViews;
+  activeQuery: QueryAttempt | null;
+  applyQueryStarted: (attempt: QueryAttempt) => void;
+  queryConfig: RailWatchConfig | null;
+  manualQueryId: string | null;
+  manualQueryPending: boolean;
+  manualQueryError: string | null;
+  beginManualQuery: (id: string, config: RailWatchConfig) => void;
+  endManualQuery: (id: string, error?: string) => void;
   monitorLoops: number;
   hits: TicketHit[];
   notifications: NotifyPayload[];
   lastHumanAction: HumanActionPayload | null;
+  dismissedHumanActionKey: string | null;
   activePage: RailWatchPage;
   logPaused: boolean;
   eventPanelVisible: boolean;
@@ -135,15 +174,54 @@ export function createRailWatchStore() {
     runtime: defaultRuntimeInfo,
     status: defaultStatus,
     config: defaultConfig,
+    savedConfig: null,
+    savedAt: null,
+    configSaveError: null,
+    draftRead: { status: "missing", draft: null, warning: null },
+    tripInitialized: false,
+    editRevision: 0,
+    draftRevision: 0,
+    draftSaveState: "idle",
+    draftSavedAt: null,
+    draftError: null,
+    initializeTrip: (config, savedAt, draft) => set({ config: { ...defaultConfig, ...config },
+      savedConfig: { ...defaultConfig, ...config }, savedAt, configSaveError: null, draftRead: draft, tripInitialized: true,
+      editRevision: 0, draftRevision: draft.status === "available" ? draft.draft.revision : 0,
+      draftSaveState: "idle", draftSavedAt: draft.status === "available" ? draft.draft.saved_at : null,
+      draftError: draft.status === "invalid" ? draft.warning : null }),
+    applyDraft: () => {
+      const draft = get().draftRead;
+      if (draft.status !== "available") return;
+      get().setConfig({ ...draft.draft.config });
+      set({ draftRead: { status: "missing", draft: null, warning: null } });
+    },
+    dismissDraft: () => set({ draftRead: { status: "missing", draft: null, warning: null } }),
+    markConfigSaved: (config, at) => set({ savedConfig: { ...config }, savedAt: at, configSaveError: null }),
+    markConfigSaveError: (reason) => set({ configSaveError: reason }),
+    markDraftSaving: (revision) => {
+      if (revision === get().editRevision) set({ draftSaveState: "saving", draftError: null });
+    },
+    markDraftSaved: (editRevision, revision, at) => set({ draftRevision: Math.max(get().draftRevision, revision),
+      draftSavedAt: at, ...(editRevision === get().editRevision ? { draftSaveState: "saved" as const, draftError: null } : {}) }),
+    markDraftError: (revision, reason) => {
+      if (revision === get().editRevision) set({ draftSaveState: "error", draftError: reason });
+    },
     logs: [],
     pausedLogs: [],
     droppedLogs: 0,
     retiredRuns: [],
     results: [],
+    queryViews: {},
+    activeQuery: null,
+    queryConfig: null,
+    manualQueryId: null,
+    manualQueryPending: false,
+    manualQueryError: null,
     monitorLoops: 0,
     hits: [],
     notifications: [],
     lastHumanAction: null,
+    dismissedHumanActionKey: null,
     activePage: "仪表盘",
     pageSection: null,
     logPaused: false,
@@ -174,9 +252,14 @@ export function createRailWatchStore() {
       const orderResolved = Boolean(status.order?.order_id && !status.order.recovery_required &&
         ["pending_payment", "active", "fulfilled"].includes(status.order.status));
       set({ status, hits: status.hits,
+        ...(!status.monitoring && !get().manualQueryPending ? { activeQuery: null } : {}),
         ...(orderResolved ? { lastHumanAction: null } : {}),
-        ...(changed ? { monitorLoops: 0, results: [], lastHumanAction: null,
+        ...(changed ? { monitorLoops: 0, results: [], queryViews: {}, activeQuery: null, queryConfig: { ...get().config, ...status.current_config },
+          manualQueryId: null, manualQueryPending: false, manualQueryError: null, lastHumanAction: null,
           retiredRuns: current ? [...get().retiredRuns, current].slice(-1000) : get().retiredRuns } : {}),
+        ...(changed ? { dismissedHumanActionKey: null } : {}),
+        ...(status.human_action && (changed || humanActionKey(status.human_action) !== get().dismissedHumanActionKey)
+          ? { lastHumanAction: status.human_action } : {}),
       });
     },
     applyLog: (entry) => {
@@ -187,11 +270,49 @@ export function createRailWatchStore() {
     },
     applyResults: (payload) => {
       if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
+      if (payload.snapshots) {
+        if (payload.request_id !== get().manualQueryId || !get().manualQueryPending || !get().queryConfig || get().status.monitoring) return;
+        const merged = mergeQuerySnapshots(get().queryViews, payload.snapshots.filter(s => s.run_id === null),
+          `manual:${payload.request_id}`, get().queryConfig!);
+        if (merged.accepted) set({ queryViews: merged.views, results: queryRows(merged.views), activePage: "购票监控",
+          ...(payload.snapshots.some(s => s.query_id === get().activeQuery?.query_id) ? { activeQuery: null } : {}) });
+        return;
+      }
+      if (get().manualQueryId || Object.keys(get().queryViews).length) return;
       set({ results: payload.rows, activePage: "购票监控" });
     },
     applyMonitorTick: (payload) => {
       if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
+      if (payload.snapshot) {
+        if (!payload.run_id || payload.snapshot.run_id !== payload.run_id || get().manualQueryId || !get().status.monitoring) return;
+        const config = get().queryConfig ?? { ...get().config, ...get().status.current_config };
+        const merged = mergeQuerySnapshots(get().queryViews, [payload.snapshot], `run:${payload.run_id}`, config);
+        if (merged.accepted) set({ queryConfig: config, queryViews: merged.views, results: queryRows(merged.views), monitorLoops: Math.max(get().monitorLoops, payload.loop),
+          ...(payload.snapshot.query_id === get().activeQuery?.query_id ? { activeQuery: null } : {}) });
+        return;
+      }
+      if (get().manualQueryId || Object.keys(get().queryViews).length) return;
       set({ results: payload.rows, monitorLoops: payload.loop });
+    },
+    beginManualQuery: (id, config) => {
+      if (get().status.monitoring) return;
+      const same = get().queryConfig && queryFamily(get().queryConfig!) === queryFamily(config);
+      set({ manualQueryId: id, manualQueryPending: true, manualQueryError: null, activeQuery: null, queryConfig: { ...config },
+        ...(same ? {} : { queryViews: {}, results: [] }) });
+    },
+    endManualQuery: (id, error) => {
+      if (get().manualQueryId !== id) return;
+      set({ manualQueryPending: false, manualQueryError: error ?? null, activeQuery: null });
+    },
+    applyQueryStarted: (attempt) => {
+      if (attempt.run_id ? attempt.run_id !== get().status.task?.run_id || !get().status.monitoring
+        : attempt.request_id !== get().manualQueryId || !get().manualQueryPending) return;
+      const config = get().queryConfig;
+      if (!config || !conditionsMatch(attempt.conditions, config) || !Number.isSafeInteger(attempt.sequence) || attempt.sequence < 0) return;
+      if (get().activeQuery && attempt.sequence <= get().activeQuery!.sequence) return;
+      const owner = attempt.run_id ? `run:${attempt.run_id}` : `manual:${attempt.request_id}`;
+      if (Object.values(get().queryViews).some(v => v.owner === owner && v.latest.sequence >= attempt.sequence)) return;
+      set({ activeQuery: attempt });
     },
     applyNotify: (payload) => {
       if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
@@ -203,13 +324,20 @@ export function createRailWatchStore() {
     },
     applyHumanAction: (payload) => {
       if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
+      if (humanActionKey(payload) === get().dismissedHumanActionKey) return;
       set({ lastHumanAction: payload });
     },
     clearHumanAction: () => {
-      set({ lastHumanAction: null });
+      set({ dismissedHumanActionKey: get().lastHumanAction ? humanActionKey(get().lastHumanAction!) : null, lastHumanAction: null });
     },
     setConfig: (patch) => {
-      set({ config: { ...get().config, ...patch } });
+      const config = { ...get().config, ...patch };
+      if (tripFingerprint(config) === tripFingerprint(get().config)) return;
+      const changed = queryFamily(config) !== queryFamily(get().config);
+      set({ config, editRevision: get().editRevision + 1, draftSaveState: "editing", draftError: null,
+        ...(!get().status.monitoring && changed ? { queryViews: {}, results: [], queryConfig: null, activeQuery: null,
+        manualQueryId: null, manualQueryPending: false,
+        manualQueryError: get().manualQueryPending ? "查询条件已改变，本次查询结果已作废" : null } : {}) });
     },
     setActivePage: (page, section) => {
       set({ activePage: page, pageSection: section ?? null });

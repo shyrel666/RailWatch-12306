@@ -17,7 +17,6 @@ from railwatch_selectors import (
 )
 from railwatch_config_contract import parse_passenger_names
 from railwatch_submit_flow import SubmitFlow
-from railwatch_verification import VerificationDetector
 
 
 class AlternateFlow:
@@ -25,14 +24,12 @@ class AlternateFlow:
     self,
     driver,
     cfg: dict,
-    verification: VerificationDetector,
     log_callback: Optional[Callable[[str], None]] = None,
     human_action_callback: Optional[Callable[[dict], None]] = None,
     find_alternate_button: Optional[Callable] = None,
   ):
     self.driver = driver
     self.cfg = cfg
-    self.verification = verification
     self.log = log_callback or (lambda _message: None)
     self.human_action = human_action_callback
     self.find_alternate_button = find_alternate_button

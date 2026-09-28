@@ -3,6 +3,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { railwatchApi } from "./railwatchApi";
 import { useThemePreference } from "./useThemePreference";
+import { getTheme } from "./theme";
 
 let systemDark = false;
 let listener: (() => void) | undefined;
@@ -43,7 +44,7 @@ test("follows system changes only in system mode and applies tokens to document 
   expect(result.current.darkMode).toBe(true);
   expect(document.documentElement.dataset.theme).toBe("dark");
   expect(document.documentElement.style.getPropertyValue("--surface")).toBe(
-    "#202622",
+    getTheme(true).variables["--surface"],
   );
   await act(() => result.current.saveTheme("light"));
   act(() => {

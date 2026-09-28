@@ -98,7 +98,7 @@ class AmbiguousConfirmationTests(unittest.TestCase):
         result = page.regular(Mock(), intent)
         self.assertEqual(result.status, "pending_payment")
         confirm.click.assert_called_once()
-        page._post_submit.assert_called_once_with(intent, True)
+        page._post_submit.assert_called_once_with(intent, False)
 
 
 if __name__ == "__main__":

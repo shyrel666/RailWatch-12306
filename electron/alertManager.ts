@@ -1,10 +1,16 @@
-import { BrowserWindow, Notification, app, ipcMain, shell } from "electron";
+import { BrowserWindow, Notification, ipcMain, shell } from "electron";
 
 type UrgentAlertPayload = {
   title: string;
   message: string;
   train_code?: string;
   kind?: "notify" | "humanAction";
+};
+
+export type AlertPreferences = {
+  desktop_urgent: boolean;
+  sound_loop: boolean;
+  window_attention: boolean;
 };
 
 let alertInterval: NodeJS.Timeout | null = null;
@@ -90,10 +96,10 @@ function attachFocusAutoStop(mainWindow: BrowserWindow): void {
   });
 }
 
-export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: UrgentAlertPayload): void {
+export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: UrgentAlertPayload, preferences: AlertPreferences): void {
   const title = payload.title || "RailWatch 提醒";
   const body = payload.message || "";
-  if (Notification.isSupported()) {
+  if (preferences.desktop_urgent && Notification.isSupported()) {
     const notification = new Notification({
       title,
       body,
@@ -113,6 +119,8 @@ export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: Urgen
   }
 
   if (mainWindow && !mainWindow.isDestroyed()) {
+  }
+  if (preferences.window_attention && mainWindow && !mainWindow.isDestroyed()) {
     attachFocusAutoStop(mainWindow);
     alertShownAt = Date.now();
     if (mainWindow.isMinimized()) {
@@ -132,21 +140,23 @@ export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: Urgen
         mainWindow.flashFrame(false);
       }
     }, ALWAYS_ON_TOP_MS);
-    mainWindow.webContents.send("railwatch:urgent-alert", payload);
   }
-
-  startUrgentAlertLoop();
+  if (preferences.sound_loop) startUrgentAlertLoop();
+  else stopUrgentAlertLoop();
 }
 
-export function registerAlertIpcHandlers(): void {
-  ipcMain.on("railwatch:stop-alert", () => stopUrgentAlert());
-  app.on("before-quit", () => {
-    stopUrgentAlert();
-    if (alertWindow && !alertWindow.isDestroyed()) {
-      alertWindow.destroy();
-      alertWindow = null;
-    }
+export function registerAlertIpcHandlers(isTrusted: (url: string | undefined) => boolean): void {
+  ipcMain.on("railwatch:stop-alert", event => {
+    if (isTrusted(event.senderFrame?.url)) stopUrgentAlert();
   });
+}
+
+export function cleanupUrgentAlert(): void {
+  stopUrgentAlert();
+  if (alertWindow && !alertWindow.isDestroyed()) {
+    alertWindow.destroy();
+    alertWindow = null;
+  }
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
