@@ -16,7 +16,9 @@ class CleanupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.target = Path(self.temp.name, APP_SLUG)
+        # Windows runners expose TEMP through an 8.3 alias (RUNNER~1).
+        # Use its canonical path so the fixture satisfies the production guard.
+        self.target = Path(self.temp.name, APP_SLUG).resolve()
         self.target.mkdir()
         (self.target / "config.json").write_text('original', encoding="utf-8")
 
