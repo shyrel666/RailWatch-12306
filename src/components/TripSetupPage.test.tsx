@@ -41,6 +41,40 @@ describe("TripSetupPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
 
+  test("offers deadline choices and preserves manually entered dates on remount", async () => {
+    const user = userEvent.setup();
+    const renderPage = () => render(<TripSetupPage busy={null} confirm={async () => false}
+      runCommand={(async () => undefined) as CommandRunner} />);
+    let page = renderPage();
+    await user.click(screen.getByText("自动化", { selector: "h2" }));
+    const input = screen.getByRole("combobox", { name: "候补截止" });
+    expect((input as HTMLInputElement).value).toBe("开车前1小时");
+    await user.click(input);
+    expect(screen.queryByText("开车前30分钟")).toBeNull();
+    expect(await screen.findByText("开车前3小时", { selector: ".ant-select-item-option-content" })).toBeTruthy();
+    await user.click(await screen.findByText("开车前1天", { selector: ".ant-select-item-option-content" }));
+    expect(railwatchStore.getState().config.alternate_deadline).toBe("开车前1天");
+    await user.click(input);
+    await user.click(await screen.findByText("开车前20分钟", { selector: ".ant-select-item-option-content" }));
+    expect(railwatchStore.getState().config.alternate_deadline).toBe("开车前20分钟");
+    await user.clear(input);
+    await user.type(input, "2026-10-01 18:00");
+    await user.tab();
+    expect(railwatchStore.getState().config.alternate_deadline).toBe("2026-10-01 18:00");
+    page.unmount();
+    page = renderPage();
+    await user.click(screen.getByText("自动化", { selector: "h2" }));
+    expect((screen.getByRole("combobox", { name: "候补截止" }) as HTMLInputElement).value).toBe("2026-10-01 18:00");
+  });
+
+  test("shows the automation seat requirement before leaving trip settings", () => {
+    railwatchStore.setState({ config: { ...defaultConfig, auto_submit: true,
+      train_code: "G9", passengers: "测试乘客", seat_keyword: "" } });
+    render(<TripSetupPage busy={null} confirm={async () => false} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByText(/请选择明确席别/)).toBeTruthy();
+    expect(screen.getByText("自动化配置待完善")).toBeTruthy();
+  });
+
   test("priority applies a complete preset, persists on remount, and leaves trip choices intact", async () => {
     const user = userEvent.setup();
     railwatchStore.setState({ config: { ...defaultConfig, interval: 20, query_timeout: 70,
@@ -138,6 +172,7 @@ describe("TripSetupPage", () => {
       { name: "张三", ticket_type: "adult", identity_hint: "11***22", ambiguous: false },
       { name: "李四", ticket_type: "student", identity_hint: "33***44", ambiguous: false },
       { name: "王五", ticket_type: "adult", identity_hint: "55***66", ambiguous: true },
+      { name: "赵六", ticket_type: "unknown", identity_hint: "", ambiguous: false },
     ], warning: null } : undefined) as CommandRunner;
     render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
     await user.click(screen.getByRole("button", { name: "从官方当前页面读取乘客" }));
@@ -148,6 +183,7 @@ describe("TripSetupPage", () => {
     ]);
     expect(screen.getByRole("button", { name: /李四.*票种不支持自动交易/ }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: /王五.*同名需人工核对/ }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: /赵六.*列表未标票种/ }).hasAttribute("disabled")).toBe(true);
     expect(screen.queryByText("张三 成人")).toBeNull();
   });
 

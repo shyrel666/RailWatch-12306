@@ -39,7 +39,7 @@ from railwatch_selectors import (
 from railwatch_submit_flow import SubmitFlow
 from railwatch_alternate_flow import AlternateFlow
 from railwatch_orders import OrderIntent, OrderResult
-from railwatch_config_contract import parse_passenger_names
+from railwatch_config_contract import parse_codes, parse_passenger_names
 from railwatch_order_page import OrderPage
 from railwatch_time import ServerTimeSync, get_server_time_sync
 from railwatch_preferences import atomic_write_json
@@ -579,7 +579,8 @@ class PageAnalyzer(BaseHandler):
         if not filled:
             raise ValueError(filled.reason) if filled.status == "config_error" else RuntimeError(filled.reason)
 
-        executor = QueryExecutor(self.driver)
+        executor = QueryExecutor(self.driver, stop_check=getattr(self, "stop_check", lambda: False),
+                                 wait=getattr(self, "wait_callback", None))
         result = executor.execute(self.click_query_button, int(cfg.get("query_timeout", 40)))
         self.last_query = result
         if result["status"] not in ("ok", "empty"):
@@ -743,21 +744,11 @@ class TicketMonitor(BaseHandler):
     
     def _parse_train_targets(self) -> List[str]:
         """解析目标车次列表"""
-        train_str = self.cfg.get("train_code", "").strip()
-        if not train_str:
-            return []
-        # 支持逗号、空格、分号分隔
-        trains = re.split(r"[,，、;；\s]+", train_str)
-        return list(dict.fromkeys(t.strip().upper() for t in trains if t.strip()))
-    
+        return parse_codes(self.cfg.get("train_code", ""), upper=True)
+
     def _parse_seat_targets(self) -> List[str]:
         """解析目标席别列表"""
-        seat_str = self.cfg.get("seat_keyword", "").strip()
-        if not seat_str:
-            return []
-        # 支持逗号、空格、分号分隔
-        seats = re.split(r"[,，、;；\s]+", seat_str)
-        return list(dict.fromkeys(s.strip() for s in seats if s.strip()))
+        return parse_codes(self.cfg.get("seat_keyword", ""))
 
     def _apply_loop_date(self, loop_count: int, force: bool = False) -> None:
         if self.date_provider:

@@ -53,3 +53,11 @@ describe("sale calendar", () => {
     expect(presaleDays(NaN)).toBe(15);
   });
 });
+
+import sharedSaleCases from "../../tests/fixtures/sale-time-cases.json";
+test("matches the backend shared sale time cases", () => {
+  for (const item of sharedSaleCases) {
+    const result = saleDay(item.date, Date.parse(item.now), item.window_days, item.info as StationSaleTimes);
+    expect(result.saleAt, item.name).toBe(item.expected ? Date.parse(item.expected) : null);
+  }
+});

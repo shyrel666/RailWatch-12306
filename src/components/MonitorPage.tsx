@@ -1,7 +1,9 @@
+import { RehearsalPanel } from "./RehearsalPanel";
 import { useState } from "react";
 import { Alert, Button, Switch } from "antd";
 import { useClock } from "../lib/useClock";
 import { hasUnresolvedOrder } from "../lib/dashboardState";
+import { automationConfigIssue } from "../lib/automationReadiness";
 import {
   Activity,
   Bell,
@@ -68,6 +70,7 @@ export function MonitorPage({
   const draftConfig = useRailWatchStore((state) => state.config);
   const editRevision = useRailWatchStore((state) => state.editRevision);
   const status = useRailWatchStore((state) => state.status);
+  const rehearsalEnabled = useRailWatchStore(state => state.rehearsalEnabled);
   const results = useRailWatchStore((state) => state.results);
   const queryViews = useRailWatchStore((state) => state.queryViews);
   const activeQuery = useRailWatchStore((state) => state.activeQuery);
@@ -121,17 +124,21 @@ export function MonitorPage({
 
   const order = status.order;
   const unresolvedOrder = hasUnresolvedOrder(order);
+  const seatCapabilities = useRailWatchStore(state => state.runtime.seat_capabilities);
+  const automationIssue = automationConfigIssue(draftConfig, seatCapabilities);
   const canStart = Boolean(
     draftConfig.from_station_cn.trim() &&
       draftConfig.to_station_cn.trim() &&
       dateRange.valid.length &&
       !status.monitoring &&
       !unresolvedOrder &&
+      !automationIssue &&
       (!draftConfig.timer_enabled || draftConfig.sale_at),
   );
   const canStop = status.monitoring;
 
   const startWithSummary = async () => {
+    if (!canStart) return;
     const snapshot = structuredClone(draftConfig);
     const dates = [...dateRange.valid];
     setStartError("");
@@ -161,7 +168,9 @@ export function MonitorPage({
                 ? "等待人工处理"
                 : status.error_message
                   ? "监控异常"
-                  : taskLabels[status.task?.status || ""] ||
+                  : !status.monitoring && automationIssue
+                    ? "自动化配置待完善"
+                    : taskLabels[status.task?.status || ""] ||
                     (canStart ? "监控就绪" : "等待就绪")}
           </h2>
           <p>
@@ -172,12 +181,15 @@ export function MonitorPage({
                 : status.error_message ||
                   (status.monitoring
                     ? status.status_message
-                    : canStart
+                    : automationIssue || (canStart
                       ? "行程已配置，可启动监控"
-                      : "请配置有效的行程日期")}
+                      : "请配置有效的行程日期"))}
           </p>
         </div>
         <div className="st-command-actions">
+          {!status.monitoring && automationIssue ? (
+            <Button onClick={() => setActivePage("行程设置", "trip-basics")}>完善自动化配置</Button>
+          ) : null}
           <Button
             className="st-btn-start"
             disabled={!canStart}
@@ -272,7 +284,7 @@ export function MonitorPage({
           onClose={clearHumanAction}
         />
       ) : null}
-      <p>实验性购票辅助：核验与支付需人工完成，发现现票不代表订单已创建。</p>
+      <p>购票辅助：核验与支付需人工完成，发现现票不代表订单已创建，订单状态以官方页面为准。</p>
 
       {status.monitoring ? (
         <p role="status">
@@ -280,6 +292,7 @@ export function MonitorPage({
         </p>
       ) : null}
       {/* ── Metrics Signal Strip ── */}
+      {rehearsalEnabled ? <RehearsalPanel busy={busy} runCommand={runCommand} /> : null}
       <section className="st-metrics-strip">
         <div className="st-metric">
           <Timer size={14} />

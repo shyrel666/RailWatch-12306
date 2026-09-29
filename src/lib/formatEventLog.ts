@@ -1,5 +1,21 @@
 import type { LogEntry } from "../types";
 
+export function formatEventTime(value: string) {
+  // Legacy logs contain only a clock time; preserve those and unknown formats.
+  const match = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/);
+  if (!match) return value;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  // Date.parse rolls overflowing fields forward (02-30 becomes 03-02).
+  const [, date, clock, sign, hours, minutes] = match;
+  const offset = sign ? (sign === "-" ? -1 : 1) * (Number(hours) * 60 + Number(minutes)) : 0;
+  if (new Date(timestamp + offset * 60 * 1000).toISOString().slice(0, 19) !== `${date}T${clock}`) return value;
+
+  // Beijing is UTC+8, regardless of the computer's local timezone.
+  return new Date(timestamp + 8 * 60 * 60 * 1000)
+    .toISOString().slice(0, 19).replace("T", " ");
+}
+
 export type EventTone = "info" | "success" | "warn" | "error";
 
 export type PresentedEvent = LogEntry & {

@@ -1,3 +1,5 @@
+import { needsRehearsal, rehearsalExpired } from "../lib/rehearsal";
+import { tripFingerprint } from "../store/railwatchStore";
 import { useMemo } from "react";
 import { Button, Tooltip } from "antd";
 import {
@@ -8,7 +10,9 @@ import {
   Check,
   Clock3,
   Database,
+  History,
   Lock,
+  Pencil,
   ScrollText,
   Search,
   TrainFront,
@@ -23,7 +27,8 @@ import {
 } from "../lib/tripDate";
 import { displayedConfig } from "../lib/taskDisplay";
 import { dashboardAction } from "../lib/dashboardState";
-import { presentEventLogs } from "../lib/formatEventLog";
+import { automationConfigIssue } from "../lib/automationReadiness";
+import { formatEventTime, presentEventLogs } from "../lib/formatEventLog";
 import { useClock } from "../lib/useClock";
 import type { RailWatchStatus } from "../types";
 import type { WorkflowStep } from "./DisplayPrimitives";
@@ -130,6 +135,7 @@ export function DashboardPage() {
   const windowDays = useRailWatchStore(
     (state) => state.runtime.date_policy?.presale_window_days,
   );
+  const seatCapabilities = useRailWatchStore((state) => state.runtime.seat_capabilities);
   const today = useBeijingToday();
   const now = useClock();
   const range = getDateRangeStatus(
@@ -142,9 +148,12 @@ export function DashboardPage() {
     config.from_station_cn.trim() &&
       config.to_station_cn.trim() &&
       range.valid.length &&
+      !automationConfigIssue(config, seatCapabilities) &&
       (!config.timer_enabled || config.sale_at),
   );
-  const action = dashboardAction(status, human, tripValid);
+  const rehearsal = useRailWatchStore(s => s.rehearsal);
+  const rehearsalEnabled = useRailWatchStore(s => s.rehearsalEnabled);
+  const action = dashboardAction(status, human, tripValid, rehearsalEnabled && needsRehearsal(config, rehearsal.report, rehearsalExpired(rehearsal.fingerprint, tripFingerprint(config))));
   const steps = getWorkflowSteps(status, hits.length > 0);
   const nextQuery = !status.monitoring
     ? "—"
@@ -166,30 +175,31 @@ export function DashboardPage() {
           <span className="eyebrow">
             {status.monitoring ? "运行中的行程" : "当前行程"}
           </span>
-          <div className="button-row">
+          <div className="button-row journey-actions">
             <Button
               type="text"
+              icon={<History size={16} aria-hidden="true" />}
               aria-label="查看订单历史与核对时间线"
               onClick={() => navigate("订单中心")}
             >
-              订单历史 <ArrowUpRight size={14} />
+              订单历史
             </Button>
             <Button
               type="text"
-              icon={<ArrowUpRight size={16} />}
+              icon={<Pencil size={16} aria-hidden="true" />}
               onClick={() => navigate("行程设置", "trip-basics")}
             >
               编辑行程
             </Button>
+            <span className={"status-badge " + (status.monitoring ? "green" : "")}>
+              {status.monitoring ? "监控运行中" : "监控未运行"}
+            </span>
           </div>
         </div>
         <div className="journey-route">
           <strong>{config.from_station_cn || "出发站"}</strong>
           <ArrowRight size={24} />
           <strong>{config.to_station_cn || "到达站"}</strong>
-          <span className={"status-badge " + (status.monitoring ? "green" : "")}>
-            {status.monitoring ? "监控运行中" : "监控未运行"}
-          </span>
         </div>
         <div className="journey-facts">
           <span>
@@ -323,7 +333,7 @@ export function DashboardPage() {
           <ol className="activity-list">
             {recentEvents.map((entry) => (
               <li key={entry.id}>
-                <time>{entry.time}</time>
+                <time dateTime={entry.time} title={`北京时间 · ${formatEventTime(entry.time)}`}>{formatEventTime(entry.time)}</time>
                 <span className={`event-level ${entry.tone}`}>{entry.label}</span>
                 <span className="activity-message"><strong>{entry.title}</strong>{entry.detail ? <span>{entry.detail}</span> : null}</span>
               </li>

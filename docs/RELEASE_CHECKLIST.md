@@ -18,13 +18,16 @@ npm run test
 npm run build
 python -X utf8 tests/browser_smoke.py
 python -X utf8 tests/order_browser_smoke.py
+python -X utf8 tests/passenger_book_browser_smoke.py
+python -X utf8 tests/rehearsal_browser_smoke.py
+python -X utf8 tests/rehearsal_ui_smoke.py
 python -X utf8 tests/query_ui_smoke.py
 python -X utf8 tests/notification_ui_smoke.py
 python -X utf8 tests/trip_order_ui_smoke.py
-.\package-windows.cmd 0.4.2
+.\package-windows.cmd 0.5.0
 ```
 
-Use `.\package-windows.cmd 0.4.2 --install-deps` only when Node or Python packaging dependencies need to be reinstalled. Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
+Use `.\package-windows.cmd 0.5.0 --install-deps` only when Node or Python packaging dependencies need to be reinstalled. Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
 
 Upload only matching assets from the same build to the GitHub Release:
 
@@ -44,3 +47,5 @@ Upload only matching assets from the same build to the GitHub Release:
 ## Manual QA
 
 Run the checks in [release-qa.md](release-qa.md) before publishing an installer.
+
+For v0.5.0, complete [rehearsal validation](v0.5.0-validation.md): a valid logged-in read-only run, cancellation while querying, unchanged transaction counts, and an isolated packaged-runtime rehearsal. Do not treat fixture success as confirmation of a current official session or official transaction DOM. Run `scripts/validate_rehearsal_live.py` only while the desktop task is idle; it attaches a dedicated tab and uses a temporary journal, then restores the original tab.

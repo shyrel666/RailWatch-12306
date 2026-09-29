@@ -244,6 +244,27 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertIn("自动候补", result["message"])
         self.assertFalse(bridge.is_monitoring)
 
+    def test_start_monitor_matches_shared_automation_readiness_cases_before_browser_work(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_seats import public_seat_capabilities
+
+        path = os.path.join(os.path.dirname(__file__), "fixtures", "automation-readiness-cases.json")
+        with open(path, encoding="utf-8") as handle:
+            cases = json.load(handle)
+        self.assertEqual(cases["capabilities"], public_seat_capabilities())
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = RailWatchBridge(data_dir=directory, event_callback=lambda event: None)
+            config = {"from_station_cn": "北京", "to_station_cn": "上海",
+                      "date": (dt.date.today() + dt.timedelta(days=7)).isoformat(), **cases["base"]}
+            for patch in cases["valid"]:
+                with self.subTest(valid=patch):
+                    self.assertTrue(bridge.start_monitor({**config, **patch}).get("requires_confirmation"))
+            for case in cases["invalid"]:
+                with self.subTest(patch=case["patch"]), self.assertRaisesRegex(ValueError, case["expected"]):
+                    bridge.start_monitor({**config, **case["patch"]})
+            self.assertFalse(bridge.is_monitoring)
+            self.assertIsNone(bridge.driver)
+
     def test_open_login_opens_page_without_marking_login_ready(self):
         from railwatch_bridge import RailWatchBridge
 
@@ -937,7 +958,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 input=b'{"id":"1","command":"getRuntimeInfo","payload":{}}\n',
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=10,
+                timeout=30,
                 check=True,
                 env={**os.environ, "LOCALAPPDATA": data_home, "XDG_DATA_HOME": data_home, "HOME": data_home},
             )

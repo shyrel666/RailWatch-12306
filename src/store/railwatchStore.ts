@@ -1,3 +1,4 @@
+import type { RehearsalCheck, RehearsalReport, RehearsalStarted } from "../lib/rehearsal";
 import { createStore } from "zustand/vanilla";
 import { DEFAULT_QUERY_STRATEGY } from "../lib/queryStrategy";
 import { conditionsMatch, mergeQuerySnapshots, queryFamily, queryRows, type QueryViews } from "../lib/queryResults";
@@ -96,6 +97,16 @@ export const defaultConfig: RailWatchConfig = {
 };
 
 export type RailWatchStore = {
+  rehearsalEnabled: boolean;
+  setRehearsalEnabled: (enabled: boolean) => void;
+  rehearsal: { activeId: string | null; trigger: "manual" | "task" | null; checks: RehearsalCheck[]; report: RehearsalReport | null; fingerprint: string | null; pendingFingerprint: string | null; lastStartedAt?: number; historyCleared?: boolean };
+  prepareRehearsal: (config: RailWatchConfig) => void;
+  applyRehearsalStarted: (payload: RehearsalStarted) => void;
+  applyRehearsalStep: (payload: { rehearsal_id: string; check: RehearsalCheck }) => void;
+  applyRehearsalFinished: (payload: { report: RehearsalReport }) => void;
+  resetRehearsalProgress: () => void;
+  clearRehearsalHistory: () => void;
+  loadRehearsalHistory: (report: RehearsalReport) => void;
   runtime: RuntimeInfo;
   status: RailWatchStatus;
   config: RailWatchConfig;
@@ -171,6 +182,21 @@ export const MAX_LOG_ENTRIES = 1000;
 export function createRailWatchStore() {
   let nextLogId = 0;
   return createStore<RailWatchStore>((set, get) => ({
+    rehearsalEnabled: false,
+    setRehearsalEnabled: rehearsalEnabled => set({ rehearsalEnabled }),
+    rehearsal: { activeId: null, trigger: null, checks: [], report: null, fingerprint: null, pendingFingerprint: null },
+    prepareRehearsal: config => set(state => ({ rehearsal: { ...state.rehearsal, pendingFingerprint: tripFingerprint(config) } })),
+    applyRehearsalStarted: payload => set(state => ({ rehearsal: { ...state.rehearsal,
+      activeId: payload.rehearsal_id, trigger: payload.trigger, checks: payload.checks,
+      pendingFingerprint: payload.trigger === "task" ? tripFingerprint({ ...state.config, ...state.status.current_config }) : state.rehearsal.pendingFingerprint } })),
+    applyRehearsalStep: payload => set(state => state.rehearsal.activeId !== payload.rehearsal_id ? {} : ({ rehearsal: {
+      ...state.rehearsal, checks: state.rehearsal.checks.map(c => c.id === payload.check.id ? payload.check : c) } })),
+    applyRehearsalFinished: ({ report }) => set(state => state.rehearsal.activeId !== report.rehearsal_id ? {} : ({ rehearsal: {
+      ...state.rehearsal, activeId: null, checks: report.checks, report, fingerprint: state.rehearsal.pendingFingerprint, pendingFingerprint: null } })),
+    resetRehearsalProgress: () => set(state => ({ rehearsal: { ...state.rehearsal, activeId: null, pendingFingerprint: null } })),
+    clearRehearsalHistory: () => set(state => ({ rehearsal: { ...state.rehearsal, report: null, checks: [], fingerprint: null,
+      pendingFingerprint: null, lastStartedAt: state.rehearsal.report?.started_at ?? state.rehearsal.lastStartedAt, historyCleared: true } })),
+    loadRehearsalHistory: report => set(state => state.rehearsal.activeId || state.rehearsal.report || state.rehearsal.historyCleared ? {} : ({ rehearsal: { ...state.rehearsal, report, fingerprint: null } })),
     runtime: defaultRuntimeInfo,
     status: defaultStatus,
     config: defaultConfig,

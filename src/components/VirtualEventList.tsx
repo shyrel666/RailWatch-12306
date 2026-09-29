@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { PresentedEvent } from "../lib/formatEventLog";
+import { formatEventTime, type PresentedEvent } from "../lib/formatEventLog";
 
 type Entry = PresentedEvent & { id?: number };
 const ESTIMATE = 88;
@@ -20,7 +20,7 @@ function MeasuredEntry({ entry, onHeight }: { entry: Entry; onHeight: (id: numbe
     <article ref={ref} className={`event-entry ${entry.tone}`}>
       <span aria-hidden="true" className={`event-dot ${entry.tone}`} />
       <div className="event-body">
-        <div className="event-row"><time dateTime={entry.time}>{entry.time}</time><span className={`event-level ${entry.tone}`}>{entry.label}</span></div>
+        <div className="event-row"><time dateTime={entry.time} title={`北京时间 · ${formatEventTime(entry.time)}`}>{formatEventTime(entry.time)}</time><span className={`event-level ${entry.tone}`}>{entry.label}</span></div>
         <strong>{entry.title}</strong>
         {entry.detail ? <p>{entry.detail}</p> : null}
       </div>

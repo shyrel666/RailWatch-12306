@@ -210,6 +210,9 @@ class OrderEvidenceTests(unittest.TestCase):
         self.assertFalse(OrderPage.deadline_matches("开车前20分钟", "18:00", "2026-09-10"))
         self.assertTrue(OrderPage.deadline_matches("开车前1小时", "开车前60分钟", "2026-09-10"))
         self.assertFalse(OrderPage.deadline_matches("开车前20分钟", "开车前60分钟", "2026-09-10"))
+        self.assertTrue(OrderPage.deadline_matches("开车前1天", "开车前24小时", "2026-09-10"))
+        self.assertTrue(OrderPage.deadline_matches("开车前1440分钟", "开车前1天", "2026-09-10"))
+        self.assertFalse(OrderPage.deadline_matches("开车前12小时", "开车前1天", "2026-09-10"))
 
 
 class JournalTests(unittest.TestCase):

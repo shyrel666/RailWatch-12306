@@ -30,6 +30,7 @@ import type {
   MonitorTickPayload,
   QueryResultRow,
   RailWatchConfig,
+  RailWatchPreferences,
   RailWatchStatus,
   RuntimeInfo,
   TicketHit,
@@ -89,6 +90,16 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   const savedConfig = useRailWatchStore(state => state.savedConfig);
   const draftRevisionBase = useRef(0);
   const draftWriteChain = useRef<Promise<void>>(Promise.resolve());
+  const clearingDataRef = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+    void railwatchApi.command<RailWatchPreferences>("loadPreferences")
+      .then(result => { if (alive) railwatchStore.getState().setRehearsalEnabled(result.auto_rehearsal === true); }).catch(() => undefined);
+    void railwatchApi.command<{ items: import("./lib/rehearsal").RehearsalReport[] }>("rehearsalHistory")
+      .then(result => { if (result.items[0]) railwatchStore.getState().loadRehearsalHistory(result.items[0]); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, []);
 
   const applyEvent = useCallback(
     (event: BridgeEvent) => {
@@ -101,6 +112,12 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       )
         return;
       switch (event.event) {
+        case "rehearsalStarted":
+          state.applyRehearsalStarted(event.payload as import("./lib/rehearsal").RehearsalStarted); break;
+        case "rehearsalStep":
+          state.applyRehearsalStep(event.payload as { rehearsal_id: string; check: import("./lib/rehearsal").RehearsalCheck }); break;
+        case "rehearsalFinished":
+          state.applyRehearsalFinished(event.payload as { report: import("./lib/rehearsal").RehearsalReport }); break;
         case "queryStarted":
           state.applyQueryStarted(event.payload as import("./types").QueryAttempt);
           break;
@@ -163,6 +180,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         case "runtimeError":
         case "runtimeExit":
         case "runtimeUnavailable":
+          state.resetRehearsalProgress();
           state.applyState({
             ...state.status,
             monitoring: false,
@@ -183,6 +201,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
           });
           break;
         case "runtimeRestarted":
+          state.resetRehearsalProgress();
           notification.destroy("runtime-state");
           void railwatchApi
             .command<RuntimeInfo>("getRuntimeInfo")
@@ -258,7 +277,22 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       payload: Record<string, unknown> = {},
       successText?: string,
     ): Promise<T | undefined> => {
+      if (clearingDataRef.current) return undefined;
+      if (command === "clearLocalData") {
+        clearingDataRef.current = true;
+        await draftWriteChain.current;
+      }
       setBusy(command);
+      const finishClear = async (value: unknown) => {
+        if (command !== "clearLocalData" || !value || typeof value !== "object" || !("cleared" in value) || !value.cleared) return;
+        railwatchApi.stageDraft(null);
+        try { localStorage.removeItem("railwatch.theme"); } catch { /* The preferences file is authoritative. */ }
+        const result = value as { cleanup_pending?: boolean; warning?: string; remaining_paths?: string[] };
+        await showThemedDialog({ kind: "info", title: result.cleanup_pending ? "部分旧文件尚未清除" : "本地数据已清除",
+          content: result.cleanup_pending ? `${result.warning}\n旧文件位置：\n${(result.remaining_paths ?? []).join("\n")}`
+            : "应用将重新加载，请重新检查运行环境并登录。", okText: "重新加载", cancelText: "关闭" });
+        window.location.reload();
+      };
       const queryRequestId = command === "analyzeQuery" ? crypto.randomUUID() : null;
       if (queryRequestId) {
         railwatchStore.getState().beginManualQuery(queryRequestId, (payload.config ?? railwatchStore.getState().config) as RailWatchConfig);
@@ -291,6 +325,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
           if (successText) {
             message.success(successText);
           }
+          await finishClear(confirmedResult);
           return confirmedResult;
         }
         if (isStatusPayload(result)) {
@@ -314,18 +349,21 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         if (successText) {
           message.success(successText);
         }
+        await finishClear(result);
         return result as T;
       } catch (error) {
         if (command === "saveConfig") railwatchStore.getState().markConfigSaveError(error instanceof Error ? error.message : String(error));
         if (queryRequestId) railwatchStore.getState().endManualQuery(queryRequestId, error instanceof Error ? error.message : String(error));
-        message.error(error instanceof Error ? error.message : String(error));
+        const errorText = error instanceof Error ? error.message : String(error);
+        message.error(command === "clearLocalData" ? errorText.replace(/^Error invoking remote method ['"]railwatch:command['"]:\s*(?:Error:\s*)?/, "") : errorText);
         return undefined;
       } finally {
         if (queryRequestId && railwatchStore.getState().manualQueryPending) railwatchStore.getState().endManualQuery(queryRequestId);
         setBusy(null);
+        if (command === "clearLocalData") clearingDataRef.current = false;
       }
     },
-    [confirm, message],
+    [confirm, message, showThemedDialog],
   );
 
   const saveTheme = async (
@@ -375,6 +413,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     })();
 
     const refreshRuntime = window.setInterval(() => {
+      if (clearingDataRef.current) return;
       void railwatchApi
         .command<RuntimeInfo>("getRuntimeInfo")
         .then((runtimeInfo) => {
@@ -392,13 +431,14 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   }, [applyEvent, runCommand]);
 
   useEffect(() => {
-    if (!tripInitialized || editRevision === 0) return;
+    if (!tripInitialized || editRevision === 0 || clearingDataRef.current) return;
     const state = railwatchStore.getState();
     const snapshot = structuredClone(state.config);
     const revision = ++draftRevisionBase.current;
     railwatchApi.stageDraft({ config: snapshot, revision });
     const timer = window.setTimeout(() => {
       draftWriteChain.current = draftWriteChain.current.then(async () => {
+        if (clearingDataRef.current) return;
         const current = railwatchStore.getState();
         current.markDraftSaving(editRevision);
         try {

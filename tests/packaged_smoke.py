@@ -105,10 +105,14 @@ def main():
                 assert runtime["data_dir"].startswith(tmp)
                 assert evaluate("window.railwatch.command('stopMonitor').then(s => s.monitoring)") is False
                 evaluate("[...document.querySelectorAll('.nav-item')].find(b => b.textContent.includes('购票监控')).click()")
-                time.sleep(0.4)
-                assert evaluate("document.querySelector('.st-btn-start')?.disabled") is False
+                # Initial trip loading can finish after the direct IPC checks.
+                for _ in range(50):
+                    if evaluate("document.querySelector('.st-btn-start')?.disabled") is False:
+                        break
+                    time.sleep(0.2)
                 image = call("Page.captureScreenshot", {"format":"png"})
                 (log_dir / "packaged-monitor.png").write_bytes(base64.b64decode(image["data"]))
+                assert evaluate("document.querySelector('.st-btn-start')?.disabled") is False, evaluate("document.querySelector('.page-surface')?.innerText")
                 print(json.dumps({"preload":True,"runtime":True,"legacy_config":True,"draft":True,
                     "legacy_order":True,"valid_start_without_results":True,"stop":True,
                     "screenshot":str(log_dir / "packaged-monitor.png")}, ensure_ascii=False))

@@ -19,7 +19,7 @@
 </div>
 
 > [!IMPORTANT]
-> **v0.4.2 的交易自动化仍为实验性功能。** 自动化回归使用本地页面验证，实际订单状态以官方页面为准。RailWatch 不是 12306 官方产品，不保证抢票成功或候补兑现；登录核验和支付须由你在官方页面完成。
+> **自动候补仍为实验性功能。** 支付后的状态同步、候补提交至兑现，以及断网和重启后的订单恢复仍待完整真实场景验收。RailWatch 不是 12306 官方产品，不保证抢票成功或候补兑现；登录核验和支付须由你在官方页面完成，实际订单状态以官方页面为准。
 
 <p align="center">
   <a href="#preview">界面预览</a> ·
@@ -36,7 +36,7 @@
 
 ![RailWatch v0.4.2 行程设置界面，展示演示路线、草稿恢复与车次收藏](docs/images/trip-setup-v0.4.2.png)
 
-<p align="center"><sub>v0.4.2 最新生产构建的实际渲染截图（2026-09-28）。使用隔离的演示行程与订单，未连接真实账号；所示车次、余票和时间不作为购票依据。</sub></p>
+<p align="center"><sub>v0.4.2 生产构建的实际渲染截图（2026-09-28）。使用隔离的演示行程与订单，未连接真实账号；所示车次、余票和时间不作为购票依据。</sub></p>
 
 <details>
 <summary><strong>购票监控 · 深色主题</strong></summary>
@@ -63,6 +63,8 @@
 | **行程与优先级** | 配置出发站、到达站、日期范围、目标车次、席别和乘客；运行中的任务保留启动时配置。 |
 | **购票日历** | 查看从今天开始的预售窗口、配置出发站对应的开售日期与倒计时；起售时间读取官方数据，未知或过期时提示核对。 |
 | **起售定时** | 填写完整北京时间起售时刻，提前准备查询页；等待期间防止自动休眠，恢复运行后重新检查。 |
+| **起售彩排（v0.5.0）** | 开售前只读核对登录、乘车人、车次席别与定时，在本地断网页面演练交易核对；给出风险及修复入口，不创建真实订单。 |
+| **实战复盘（v0.5.0）** | 按已记录事件查看阶段耗时、准备余量及彩排预测，缺失数据留空，区分本机观察与本地脚本耗时。 |
 | **现票优先** | 本轮先检查全部目标车次的现票，按配置顺序选择，避免前一行的候补掩盖后一行的现票。 |
 | **候补辅助** | 均无现票时选择首选可候补组合；明确在提交前售罄时可进入候补路径，提交后结果未知则保留原订单核对。 |
 | **订单跟踪与恢复** | 区分预订待支付、候补待支付、生效和兑现；保存提交意图，重启后可继续核对原订单。 |
@@ -172,7 +174,7 @@ python -X utf8 tests/order_browser_smoke.py
 python -X utf8 tests/timing_smoke.py --samples 1000
 ```
 
-Chrome 回归使用独立临时配置和本地页面，阻断 12306 网络请求。测试通过不能代替真实账号下单验收。完整结果与故障覆盖见 [验收记录](docs/transaction-reliability.md)。
+Chrome 自动回归使用独立临时配置和本地页面，阻断 12306 网络请求。另已完成普通订单创建的真实场景测试及修复后待支付页面的只读匹配验证；这不代表支付、候补或异常恢复已完成验收。各次验证范围与故障覆盖见 [验收记录](docs/transaction-reliability.md)。
 
 README 截图可在完成 `npm run build` 后运行 `python -X utf8 scripts/capture-readme.py` 更新；脚本使用隔离浏览器及演示数据。
 
@@ -186,7 +188,7 @@ python -m pip install pyinstaller
 npm run package
 ```
 
-也可使用一键脚本 `.\package-windows.cmd 0.4.2`。该脚本会设置 npm 版本号并清理旧 `release/` 输出；维护新版本时需同步核对 `pyproject.toml` 和更新日志。
+也可使用一键脚本 `.\package-windows.cmd 0.5.0`。该脚本会设置 npm 版本号并清理旧 `release/` 输出；维护新版本时需同步核对 `pyproject.toml` 和更新日志。当前版本为 v0.5.0，验证范围与剩余现场验收见[彩排验收记录](docs/v0.5.0-validation.md)。
 
 构建结果位于 `release/`。GitHub 的版本标签推送会触发 [Windows 打包工作流](https://github.com/shyrel666/RailWatch-12306/actions/workflows/package-windows.yml)，将安装程序、`.blockmap` 和 `latest.yml` 发布到对应 Release。
 
@@ -221,7 +223,7 @@ flowchart LR
 
 | 你想了解 | 入口 |
 | --- | --- |
-| 当前版本变化 | [更新日志](CHANGELOG.md) · [v0.4.2 发布说明](docs/releases/v0.4.2.md) |
+| 当前版本变化 | [更新日志](CHANGELOG.md) · [v0.5.0 发布说明](docs/releases/v0.5.0.md) · [v0.4.2 发布说明](docs/releases/v0.4.2.md) |
 | 交易行为、恢复规则及实测限制 | [交易可靠性实现与验收记录](docs/transaction-reliability.md) |
 | 如何开发和提交改进 | [贡献指南](CONTRIBUTING.md) |
 | 发布前需要检查什么 | [发布检查清单](docs/RELEASE_CHECKLIST.md) |

@@ -1,6 +1,20 @@
 import { describe, expect, test } from "vitest";
 import type { LogEntry } from "../types";
-import { countEventsByFilter, presentEventLogs, summarizeEventLogs, filterPresentedEvents } from "./formatEventLog";
+import { countEventsByFilter, presentEventLogs, summarizeEventLogs, filterPresentedEvents, formatEventTime } from "./formatEventLog";
+
+test.each([
+  ["2026-09-28T14:01:01+08:00", "2026-09-28 14:01:01"],
+  ["2026-09-28T14:01:01.123456+08:00", "2026-09-28 14:01:01"],
+  ["2026-09-27T20:01:01Z", "2026-09-28 04:01:01"],
+  ["2026-09-27T20:01:01-04:00", "2026-09-28 08:01:01"],
+  ["14:01:01", "14:01:01"],
+  ["unknown", "unknown"],
+  ["2026-13-28T14:01:01+08:00", "2026-13-28T14:01:01+08:00"],
+  ["2026-02-30T14:01:01+08:00", "2026-02-30T14:01:01+08:00"],
+  ["2026-09-28T24:00:00+08:00", "2026-09-28T24:00:00+08:00"],
+])("formats event time %s for display in Beijing time", (input, expected) => {
+  expect(formatEventTime(input)).toBe(expected);
+});
 
 test("one presentation preserves every filter and merged-entry count", () => {
   const logs: LogEntry[] = [

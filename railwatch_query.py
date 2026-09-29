@@ -281,7 +281,8 @@ class QueryExecutor:
         if self.stop_check():
             return {"status": "cancelled"}
         self.driver.execute_script(QUERY_BEGIN_JS, self.token)
-        deadline = time.monotonic() + timeout
+        clicked_at = time.monotonic()
+        deadline = clicked_at + timeout
         if not click():
             dialog = self.inspect_dialog()
             return {"status": dialog["kind"] if dialog["kind"] != "none" else "timeout", "reason": dialog["text"]}
@@ -305,7 +306,7 @@ class QueryExecutor:
                 return {**result, "reason": "本轮请求失败或有其他查询响应干扰"}
             if isinstance(result, dict) and result.get("status") in ("ok", "empty"):
                 self.revision = result.get("revision")
-                return {**result, "query_id": self.token, "conditions": self.snapshot, "fetched_at": time.time()}
+                return {**result, "round_trip_ms": round((time.monotonic() - clicked_at) * 1000, 3), "query_id": self.token, "conditions": self.snapshot, "fetched_at": time.time()}
             self.wait(0.1)
         return {"status": "timeout", "reason": "未观察到本轮查询完成"}
 

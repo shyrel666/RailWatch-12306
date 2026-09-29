@@ -61,8 +61,18 @@ const details=cards.map(c=>({train:txt(c.querySelector('.ticket-number')),
  seat:txt(c.querySelector('.ticket-info-txt span'))}));
 const orders=all('.order-item').map(root=>{
  const header=txt(root.querySelector('.order-item-hd'));
- const orderId=header.match(/(?:候补单号|订单号|订单号码)\s*[：:]\s*([A-Za-z0-9]+)/)?.[1]||'';
- const state=all('.order-item-hd .pull-right,.order-item-hd .txt-second,.order-status',root).map(txt).join(' ');
+ const ids=[...header.matchAll(/(?:候补单号|订单号码?)\s*[：:]\s*([A-Za-z0-9]+)/g)].map(m=>m[1]);
+ // The regular unpaid card shows only its booking date in the header. Its
+ // visible payment/cancel controls carry the order identity in data-sequence.
+ // Read only this card's DOM attributes; conflicting identities fail closed.
+ if(root.id==='not_complete'&&!header.includes('候补单号')) {
+   ids.push(...all('.order-item-ft a[data-sequence],.order-item-ft button[data-sequence]',root)
+     .filter(e=>/^(去支付|立即支付|继续支付|取消订单)$/.test(txt(e)))
+     .map(e=>(e.getAttribute('data-sequence')||'').trim()));
+ }
+ const orderId=ids.length&&ids.every(id=>/^[A-Za-z0-9]+$/.test(id))&&new Set(ids).size===1?ids[0]:'';
+ const ticketStates=all('.ticket-status-name',root).map(txt);
+ const state=ticketStates.length?ticketStates.join(' '):all('.order-item-hd .pull-right,.order-item-hd .txt-second,.order-status',root).map(txt).join(' ');
  const payment=all('a,button',root).some(e=>/^(去支付|立即支付|网上支付|继续支付|支付)$/.test(txt(e)));
  const body=[];
  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
@@ -71,7 +81,7 @@ const orders=all('.order-item').map(root=>{
    if(visible(node.parentElement) && !node.parentElement.closest('.order-item-hd,.order-item-ft')) body.push(node.textContent);
  }
  return {order_id:orderId,kind:header.includes('候补单号')?'alternate':'regular',
-   text:body.join(' ').replace(/\s+/g,' ').trim(),state,payment,passengers:passengers(root),
+   text:body.join(' ').replace(/\s+/g,' ').trim(),state,state_conflict:new Set(ticketStates).size>1,payment,passengers:passengers(root),
    train_codes:trainCodes(root)};
 });
 // The immediate payment page uses a legacy ticket table, not .order-item cards.
@@ -110,36 +120,103 @@ return {url:location.href, orders, dialogs, details,
  processing:officialProgress || all('.order-queue').some(e=>/排队|处理中/.test(txt(e))) };
 """
 
-SELECT_PASSENGERS_JS = r"""
-const wanted=arguments[0];
-const visible=e=>!!(e&&e.getClientRects().length);
-const inputs=[...document.querySelectorAll('#normal_passenger_id input[type="checkbox"],#passenge_list input.chose-pass-dom')].filter(visible);
-const name=e=> {const l=e.closest('label')||document.querySelector('label[for="'+e.id+'"]');
- return (l?.getAttribute('title') || (l?.innerText||'').replace(/（(?:学生|儿童|成人)）/g,'')).trim();};
-const adult=e=> {const l=e.closest('label')||document.querySelector('label[for="'+e.id+'"]');
- const type=(e.dataset.ticketType||l?.dataset.ticketType||l?.innerText||'').trim();
- return /成人/.test(type) && !/学生|儿童/.test(type);};
-if(!wanted.length || wanted.some(n=>inputs.filter(e=>name(e)===n).length!==1 ||
- !adult(inputs.find(e=>name(e)===n)))) return false;
-for(const input of inputs) {
- const select=wanted.includes(name(input));
- if(input.checked!==select) {if(input.disabled)return false;input.click();}
-}
-const actual=inputs.filter(e=>e.checked).map(name);
-return actual.length===wanted.length && wanted.every(n=>actual.includes(n));
+PASSENGER_FIELDS_JS = r"""
+const visible=e=>!!(e&&e.getClientRects().length&&getComputedStyle(e).visibility==='visible');
+const allInputs=[...document.querySelectorAll('#normal_passenger_id input[type="checkbox"],#passenge_list input.chose-pass-dom')]
+ .filter(e=>visible(e.closest('#normal_passenger_id,#passenge_list')));
+const inputs=allInputs.filter(visible);
+const label=e=>e.closest('label')||[...(e.labels||[])][0];
+const name=e=> {const l=label(e);
+ return (l?.getAttribute('title') || l?.innerText || '').replace(/[（(](?:学生|儿童|成人)[）)]/g,'').trim();};
+const ticketType=e=> {
+ const l=label(e), text=[e.dataset.ticketType,l?.dataset.ticketType,l?.innerText].filter(Boolean).join(' ');
+ return /学生|\bstudent\b/i.test(text)?'student':/儿童|\bchild\b/i.test(text)?'child':/成人|\badult\b/i.test(text)?'adult':'unknown';
+};
 """
 
-READ_PASSENGER_CANDIDATES_JS = r"""
-const visible=e=>!!(e&&e.getClientRects().length);
-const inputs=[...document.querySelectorAll('#normal_passenger_id input[type="checkbox"],#passenge_list input.chose-pass-dom')].filter(visible);
+SELECT_PASSENGERS_JS = PASSENGER_FIELDS_JS + r"""
+const wanted=arguments[0], regular=arguments[1]===true;
+if(!wanted.length || new Set(wanted).size!==wanted.length) return '乘车人名单为空或姓名重复，请核对行程设置';
+// Collapsed rows are hidden, not absent: uniqueness must cover the whole list.
+if(allInputs.some(e=>e.checked&&!inputs.includes(e))) return '官方乘客列表折叠区存在已勾选乘客，请展开核对';
+for(const n of wanted) {
+ if(allInputs.filter(e=>name(e)===n).length>1) return '官方乘客列表存在同名记录，无法唯一选择，请人工核对';
+ const matches=inputs.filter(e=>name(e)===n);
+ if(!matches.length) return '官方乘客列表未找到完整姓名匹配项，请检查列表是否已加载或展开';
+ const type=ticketType(matches[0]);
+ if(type==='student'||type==='child') return '目标乘客标记为学生或儿童，当前自动交易仅支持成人票';
+ // Regular checkout provides a passenger-specific ticket selector after selection.
+ // Unknown list labels are not adult evidence; verify_form must confirm every row.
+ if(type!=='adult'&&!regular) return '候补乘客列表未明确票种，请在官方页面核对';
+}
+const changes=inputs.filter(e=>e.checked!==wanted.includes(name(e)));
+if(changes.some(e=>e.disabled)) return '乘客勾选项不可操作，请检查官方页面';
+for(const input of changes) if(input.checked!==wanted.includes(name(input))) input.click();
+const actual=inputs.filter(e=>e.checked).map(name);
+return actual.length===wanted.length && wanted.every(n=>actual.includes(n)) || '乘客勾选结果与目标名单不一致';
+"""
+
+READ_PASSENGER_BOOK_JS = r"""
+// Personal-centre list, verified 2026-09-28. Read-only; never return data-val,
+// checkbox values, phone numbers, tokens or full document numbers.
+const visible=e=>!!(e&&e.getClientRects().length&&getComputedStyle(e).visibility==='visible');
+const text=e=>(e?.innerText||'').trim();
+const root=document.querySelector('#content_list');
+const headers=[...(root?.querySelectorAll('.order-panel-head th')||[])].map(text);
+const expected=['序号','姓名','证件类型','证件号码','手机／电话','核验状态','操作'];
+const table=root?.querySelector('.order-item-table');
+const unknown={recognized:false,items:[],page:0,total_pages:null,has_next:false,complete:false};
+if(!visible(root)||!visible(table)||JSON.stringify(headers)!==JSON.stringify(expected)) return unknown;
+const search=document.querySelector('#_search_name');
+if(search?.value.trim() && search.value.trim()!=='请输入乘客姓名') return unknown;
+const rows=[...table.querySelectorAll('tr')].filter(visible);
+if(rows.length>10 || rows.length!==table.querySelectorAll('tr').length) return unknown;
+const items=[];
+for(const row of rows){
+  const cells=[...row.cells];
+  const nameNode=cells[1]?.querySelector('.name-yichu[title]');
+  if(cells.length!==7||!visible(nameNode)||!nameNode.title.trim()||nameNode.title.trim()!==text(nameNode)) return unknown;
+  const identity=cells[5].querySelector('.verification-status-user[title]');
+  const label=visible(identity)?identity.title.trim():'';
+  let verification='unknown';
+  // Preserve pre-pass as a distinct state; it is not an official rejection.
+  if(label==='已通过'&&identity.classList.contains('user-check-success')) verification='passed';
+  else if(label==='预通过') verification='prepassed';
+  else if(identity?.classList.contains('user-check-error')) {
+    if(/未经核验|待核验/.test(label)) verification='pending';
+    else if(/未通过|不再支持|重复/.test(label)) verification='failed';
+  }
+  const edit=cells[6].querySelector('.one-edit[data-val]');
+  const self=!!cells[0].querySelector('input.UserSelf');
+  // Non-self rows embed the profile type in the edit link; never click it.
+  // For self there is no edit link, so the type must remain unknown.
+  const fields=!self&&visible(edit)?edit.getAttribute('data-val').split('#'):[];
+  const code=fields.length===7&&fields[0]===nameNode.title.trim()?fields[3]:'';
+  const ticket_type=({'1':'adult','2':'child','3':'student'})[code]||'unknown';
+  const documentText=text(cells[3]);
+  const hint=documentText.length>5 ? documentText.slice(0,2)+'***'+documentText.slice(-2):'';
+  items.push({name:nameNode.title.trim(),ticket_type,unsupported_ticket_type:code==='4',
+    type_source:code?'profile_metadata':'unavailable',verification,
+    identity_hint:/^[^*＊\s]{1,2}\*{3}[^*＊\s]{1,2}$/.test(hint)?hint:''});
+}
+const pager=document.querySelector('.pagination');
+const totalText=text(pager?.querySelector('.page-all strong'));
+const currentText=text(pager?.querySelector('.page-num .active'));
+const total=/^\d+$/.test(totalText)?Number(totalText):null;
+const page=/^\d+$/.test(currentText)?Number(currentText):0;
+const next=pager?.querySelector('a.next');
+const has_next=visible(next)&&!next.classList.contains('disabled')&&next.getAttribute('aria-disabled')!=='true';
+const coherent=total!==null&&total>=1&&page>=1&&page<=total&&has_next===(page<total);
+return {recognized:true,items,page,total_pages:total,has_next,complete:coherent&&page===total,
+  pagination_valid:coherent};
+"""
+
+
+READ_PASSENGER_CANDIDATES_JS = PASSENGER_FIELDS_JS + r"""
 const mask=value=>{const text=(value||'').trim();return text.length>5?text.slice(0,2)+'***'+text.slice(-2):'';};
 return inputs.slice(0,100).map(input=>{
- const label=input.closest('label')||document.querySelector('label[for="'+input.id+'"]');
- const text=(label?.innerText||'').trim();
- const name=(label?.getAttribute('title')||text.replace(/（(?:学生|儿童|成人)）/g,'')).trim();
- const type=/学生/.test(text)?'student':/儿童/.test(text)?'child':/成人/.test(text)?'adult':'unknown';
- const identity=mask(label?.dataset.identity||input.dataset.identity||'');
- return {name,ticket_type:type,identity_hint:identity};
+ const identity=mask(label(input)?.dataset.identity||input.dataset.identity||'');
+ return {name:name(input),ticket_type:ticketType(input),identity_hint:identity};
 });
 """
 
@@ -269,6 +346,7 @@ class OrderPage:
         self.wait = wait or time.sleep
         self.mark = mark or (lambda stage, detail=None: None)
         self.log = log or (lambda message: None)
+        self._people_error = ""
 
     def apply_seat_preference(self, preference, passenger_count):
         if preference not in ("靠窗优先", "靠过道优先"):
@@ -293,7 +371,7 @@ class OrderPage:
         # Only an identified, matching order can establish payment or fulfillment.
         matching = [r for r in snap.get("orders", []) if r.get("order_id")
                     and record_matches(r, intent) and (not known_id or r["order_id"] == known_id)]
-        if len(matching) == 1:
+        if len(matching) == 1 and not matching[0].get("state_conflict"):
             record = matching[0]
             state = record.get("state", "")
             stage = None
@@ -308,6 +386,9 @@ class OrderPage:
                 return OrderResult(stage, order_id=record["order_id"], evidence={
                     "matched": True, "url": snap.get("url", "").split("?")[0],
                     "observed_at": time.time(), "state": state[:100]})
+        if len(matching) == 1 and matching[0].get("state_conflict"):
+            return OrderResult("unknown", "已匹配到订单，但订单内车票状态不一致（如部分退票或改签），请在官方订单详情人工核对",
+                               order_id=matching[0]["order_id"])
         dialogs = " ".join(snap.get("dialogs", []))
         if snap.get("verification") or re.search(r"登录|核验|验证码|滑块|频繁|操作过快|稍后再试|候补.*(?:上限|限额)", dialogs) or re.search(r"login\.html|/login/init", snap.get("url", "")):
             return OrderResult("verification", "请在官方页面完成登录、核验或处理限制")
@@ -425,12 +506,15 @@ class OrderPage:
         return True
 
     def prepare_people(self, intent):
-        selected = self.driver.execute_script(SELECT_PASSENGERS_JS, list(intent.passengers)) is True
+        result = self.driver.execute_script(SELECT_PASSENGERS_JS, list(intent.passengers), intent.kind == "regular")
+        selected = result is True
         if not selected:
             expand = self.button(("#order_toggle",))
             if expand and expand.text.strip() == "展开":
                 expand.click()
-                selected = self.driver.execute_script(SELECT_PASSENGERS_JS, list(intent.passengers)) is True
+                result = self.driver.execute_script(SELECT_PASSENGERS_JS, list(intent.passengers), intent.kind == "regular")
+                selected = result is True
+        self._people_error = result if isinstance(result, str) else "乘车人选择未完成，请检查官方页面"
         return selected
 
     @staticmethod
@@ -438,8 +522,8 @@ class OrderPage:
         if not actual or not expected:
             return False
         def relative_minutes(value):
-            match = re.fullmatch(r"开车前\s*(\d+)\s*(分钟|小时)", value.strip())
-            return int(match[1]) * (60 if match[2] == "小时" else 1) if match else None
+            match = re.fullmatch(r"开车前\s*(\d+)\s*(分钟|小时|天)", value.strip())
+            return int(match[1]) * {"分钟": 1, "小时": 60, "天": 1440}[match[2]] if match else None
         expected_relative = relative_minutes(expected)
         if expected_relative is not None:
             return relative_minutes(actual) == expected_relative
@@ -571,15 +655,17 @@ class OrderPage:
             ready_result = self.poll(ready)
             if isinstance(ready_result, OrderResult): return ready_result
             stage = "选择乘车人"
-            if not ready_result or not self.prepare_people(intent):
-                return OrderResult("verification", "乘车人未能唯一匹配，请检查官方页面")
+            if not ready_result:
+                return OrderResult("verification", "乘客表单尚未加载，请检查官方页面")
+            if not self.prepare_people(intent):
+                return OrderResult("verification", self._people_error)
             stage = "选择席别"
             if not self.select_regular_seats(intent):
                 return OrderResult("verification", "尚未点击提交订单：席别选项未能唯一匹配，请检查官方页面")
             stage = "核对订单信息"
             if not self.poll(lambda: self.verify_form(intent), 6):
                 self.log("回读核对未通过，已停止自动提交：" + self.form_mismatch_report(intent))
-                return OrderResult("verification", "车次、日期、区间、乘客或席别回读不一致")
+                return OrderResult("verification", "车次、日期、区间、乘客、成人票种或席别回读不一致，尚未提交订单")
             submit = self.button(("#submitOrder_id",))
             if not submit: return OrderResult("not_submitted", "提交按钮不可用", no_order=True)
             if self.stop(): return OrderResult("not_submitted", "提交前已停止", no_order=True)
@@ -648,8 +734,10 @@ class OrderPage:
                 next_step.click()
             if not self.poll(lambda: self.snapshot().get("details")):
                 return OrderResult("verification", "请检查候补需求清单并进入候补订单页")
-            if not self.prepare_people(intent) or not self.set_deadline(intent.deadline, intent.date):
-                return OrderResult("verification", "乘客或截止兑现时间未能回读确认")
+            if not self.prepare_people(intent):
+                return OrderResult("verification", self._people_error)
+            if not self.set_deadline(intent.deadline, intent.date):
+                return OrderResult("verification", "截止兑现时间未能回读确认")
             if not self.verify_form(intent):
                 return OrderResult("verification", "候补组合不匹配，或包含额外车次、席别、无座设置")
             submit = self.button(("#toPayBtn",))

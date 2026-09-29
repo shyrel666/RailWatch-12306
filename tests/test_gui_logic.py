@@ -1,85 +1,7 @@
 import unittest
-import sys
-import types
 from unittest.mock import Mock, patch
 
-class TimeoutException(Exception):
-    pass
-
-
-class NoSuchElementException(Exception):
-    pass
-
-
-class StaleElementReferenceException(Exception):
-    pass
-
-
-class ElementClickInterceptedException(Exception):
-    pass
-
-
-selenium = types.ModuleType("selenium")
-webdriver = types.ModuleType("selenium.webdriver")
-common = types.ModuleType("selenium.webdriver.common")
-by_module = types.ModuleType("selenium.webdriver.common.by")
-support = types.ModuleType("selenium.webdriver.support")
-ui_module = types.ModuleType("selenium.webdriver.support.ui")
-ec_module = types.ModuleType("selenium.webdriver.support.expected_conditions")
-actions_module = types.ModuleType("selenium.webdriver.common.action_chains")
-exceptions_module = types.ModuleType("selenium.common.exceptions")
-selenium_common = types.ModuleType("selenium.common")
-
-
-class By:
-    ID = "id"
-    CSS_SELECTOR = "css selector"
-    XPATH = "xpath"
-
-
-class WebDriverWait:
-    def __init__(self, driver, timeout):
-        self.driver = driver
-
-    def until(self, condition):
-        raise TimeoutException()
-
-
-class ActionChains:
-    def __init__(self, driver):
-        self.driver = driver
-
-    def move_to_element(self, element):
-        return self
-
-    def perform(self):
-        return None
-
-
-def _identity_condition(locator):
-    return lambda driver: None
-
-
-by_module.By = By
-ui_module.WebDriverWait = WebDriverWait
-ec_module.presence_of_element_located = _identity_condition
-ec_module.element_to_be_clickable = _identity_condition
-actions_module.ActionChains = ActionChains
-exceptions_module.TimeoutException = TimeoutException
-exceptions_module.NoSuchElementException = NoSuchElementException
-exceptions_module.StaleElementReferenceException = StaleElementReferenceException
-exceptions_module.ElementClickInterceptedException = ElementClickInterceptedException
-
-sys.modules.setdefault("selenium", selenium)
-sys.modules.setdefault("selenium.webdriver", webdriver)
-sys.modules.setdefault("selenium.webdriver.common", common)
-sys.modules.setdefault("selenium.webdriver.common.by", by_module)
-sys.modules.setdefault("selenium.webdriver.support", support)
-sys.modules.setdefault("selenium.webdriver.support.ui", ui_module)
-sys.modules.setdefault("selenium.webdriver.support.expected_conditions", ec_module)
-sys.modules.setdefault("selenium.webdriver.common.action_chains", actions_module)
-sys.modules.setdefault("selenium.common", selenium_common)
-sys.modules.setdefault("selenium.common.exceptions", exceptions_module)
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
 from gui_12306_0 import BaseHandler, PageAnalyzer, QueryConfig, TicketMonitor
 
@@ -439,7 +361,7 @@ class TicketMonitorLogicTests(unittest.TestCase):
         driver = Mock()
         driver.execute_script.return_value = True
         self.assertTrue(OrderPage(driver).prepare_people(intent("alternate")))
-        driver.execute_script.assert_called_once_with(SELECT_PASSENGERS_JS, ["张三"])
+        driver.execute_script.assert_called_once_with(SELECT_PASSENGERS_JS, ["张三"], False)
 
     def test_find_hit_row_uses_houbu_button_not_seat_text(self):
         class Row:

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { isoDaysFromToday } from "../lib/tripDate";
@@ -13,6 +13,7 @@ import { DashboardPage } from "./DashboardPage";
 
 function resetStore() {
   railwatchStore.setState({
+    rehearsalEnabled: false,
     runtime: { ...defaultRuntimeInfo, state: { ...defaultStatus } },
     status: { ...defaultStatus },
     config: { ...defaultConfig },
@@ -176,6 +177,23 @@ describe("DashboardPage", () => {
     );
   });
 
+  test("readiness uses loaded seat capabilities like the monitor page", () => {
+    railwatchStore.getState().setRehearsalEnabled(true);
+    const seats = [{ name: "二等座", query: true, regular: true, alternate: true },
+      { name: "一等座", query: true, regular: true, alternate: false }];
+    for (const [seat, heading] of [["一等座", "确认你的出行安排"], ["二等座", "开售前先彩排一次"]]) {
+      railwatchStore.setState({
+        runtime: { ...defaultRuntimeInfo, state: { ...defaultStatus }, seat_capabilities: seats },
+        status: { ...defaultStatus, environment_ready: true, login_ready: true, query_ready: true },
+        config: { ...defaultConfig, date: isoDaysFromToday(3), auto_alternate: true, train_code: "G101",
+          passengers: "测试甲", seat_keyword: seat },
+      });
+      render(<DashboardPage />);
+      expect(screen.getByRole("heading", { name: heading })).toBeTruthy();
+      cleanup();
+    }
+  });
+
   test("does not warn for a date inside the presale window", () => {
     railwatchStore.setState({
       config: { ...defaultConfig, date: isoDaysFromToday(3) },
@@ -185,5 +203,20 @@ describe("DashboardPage", () => {
 
     expect(screen.queryByText(/出发日期已过去/)).toBeNull();
     expect(screen.queryByText(/超出预售期/)).toBeNull();
+  });
+
+  test("disabled rehearsal never redirects the next action to its hidden panel", () => {
+    railwatchStore.setState({
+      status: { ...defaultStatus, environment_ready: true, login_ready: true, query_ready: true },
+      config: { ...defaultConfig, date: isoDaysFromToday(3), timer_enabled: true,
+        sale_at: `${isoDaysFromToday(1)}T10:00:00+08:00` },
+    });
+    render(<DashboardPage />);
+    expect(screen.queryByRole("button", { name: "前往起售彩排" })).toBeNull();
+    expect(screen.getByRole("button", { name: "进入购票监控" })).toBeTruthy();
+    act(() => railwatchStore.getState().setRehearsalEnabled(true));
+    expect(screen.getByRole("button", { name: "前往起售彩排" })).toBeTruthy();
+    act(() => railwatchStore.getState().setRehearsalEnabled(false));
+    expect(screen.queryByRole("button", { name: "前往起售彩排" })).toBeNull();
   });
 });

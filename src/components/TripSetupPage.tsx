@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Input, Select, Switch } from "antd";
+import { Alert, AutoComplete, Button, Input, Select, Switch } from "antd";
+import { automationConfigIssue } from "../lib/automationReadiness";
 import {
   ArrowLeftRight,
   BarChart3,
   Building2,
   CalendarDays,
+  ChevronDown,
   CircleHelp,
   FolderOpen,
   Plus,
@@ -228,6 +230,7 @@ export function TripSetupPage({
   );
   const loadedSeatCapabilities = useRailWatchStore(state => state.runtime.seat_capabilities);
   const seatCapabilities = loadedSeatCapabilities ?? [];
+  const automationIssue = automationConfigIssue(config, loadedSeatCapabilities);
   const monitoring = useRailWatchStore((state) => state.status.monitoring);
   const tripDateStatus = getTripDateStatus(config.date, today, windowDays);
   const rangeStatus = getDateRangeStatus(
@@ -428,6 +431,7 @@ export function TripSetupPage({
             description="确定你的目的地与同行人"
             defaultOpen
           >
+            {automationIssue ? <Alert type="warning" showIcon message="自动化配置待完善" description={automationIssue} /> : null}
             <div className="trip-form-row trip-form-row--stations">
               <StationField key={`from-${stationRevision}`} label="出发站" value={config.from_station_cn} runCommand={runCommand}
                 onChange={value => setRoute(value, config.to_station_cn)} />
@@ -607,7 +611,7 @@ export function TripSetupPage({
                   </span>
                 </div>
                 {passengerError ? <small className="trip-date-hint" role="alert">{passengerError}</small> : null}
-                <small className="field-help">姓名不代表票种。自动交易仅支持官方页面明确标为成人且票种回读为成人票的乘客；学生、儿童请在官方页面处理。</small>
+                <small className="field-help">姓名不代表票种。普通订单按完整姓名勾选后，须回读确认为成人票才会提交；候补须在乘客列表明确标为成人。学生、儿童请在官方页面处理。</small>
                 <button type="button" className="trip-station-refresh" onClick={() => void runCommand<PassengerCandidates>("readPassengers").then(result => {
                   if (result) setPassengerCandidates(result);
                 })}>从官方当前页面读取乘客</button>
@@ -616,7 +620,7 @@ export function TripSetupPage({
                   {passengerCandidates.items.map((candidate, index) => <button type="button" key={`${candidate.name}-${candidate.identity_hint}-${index}`}
                     disabled={candidate.ambiguous || candidate.ticket_type !== "adult" || passengerNames.includes(candidate.name)}
                     onClick={() => addCandidate(candidate)}>{candidate.name} · {candidate.identity_hint || "证件摘要未提供"} · {
-                      candidate.ambiguous ? "同名需人工核对" : candidate.ticket_type === "adult" ? "成人" : "票种不支持自动交易"
+                      candidate.ambiguous ? "同名需人工核对" : candidate.ticket_type === "adult" ? "成人" : candidate.ticket_type === "unknown" ? "列表未标票种，可手动填写姓名后核对" : "票种不支持自动交易"
                     }</button>)}
                 </div> : null}
               </div>
@@ -748,19 +752,20 @@ export function TripSetupPage({
             >
               <label className="trip-field">
                 <span>候补截止</span>
-                <input
+                <AutoComplete
                   aria-label="候补截止"
-                  className="native-input"
-                  type="text"
-                  placeholder="开车前60分钟，或 2026-09-10 18:00"
-                  value={config.alternate_deadline}
-                  onChange={(event) =>
-                    update({ alternate_deadline: event.target.value })
+                  className="trip-select"
+                  placeholder="选择截止时间，或输入完整日期时间"
+                  options={["开车前20分钟", "开车前1小时", "开车前2小时", "开车前3小时", "开车前6小时", "开车前12小时", "开车前1天"].map(value => ({ value }))}
+                  suffixIcon={<ChevronDown size={14} style={{ pointerEvents: "none" }} />}
+                  value={config.alternate_deadline === "开车前60分钟" ? "开车前1小时" : config.alternate_deadline}
+                  onChange={(value) =>
+                    update({ alternate_deadline: value })
                   }
                 />
               </label>
               <p>
-                候补截止可填“开车前60分钟”或完整日期时间，仅选择官方页面提供的对应选项。
+                可选择常用截止时间，也可输入完整日期时间（如 2026-10-01 18:00）；提交时以官方页面实际提供的选项为准。
               </p>{" "}
               <div className="trip-advanced-risk">
                 <RiskToggle

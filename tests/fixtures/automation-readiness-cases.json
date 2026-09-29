@@ -1,0 +1,47 @@
+{
+  "base": {
+    "auto_submit": true,
+    "auto_alternate": false,
+    "train_code": "G9",
+    "passengers": "测试甲，测试乙",
+    "seat_keyword": "二等座",
+    "passenger_selections": []
+  },
+  "capabilities": [
+    { "name": "二等座", "query": true, "regular": true, "alternate": true },
+    { "name": "一等座", "query": true, "regular": true, "alternate": false },
+    { "name": "商务座", "query": true, "regular": false, "alternate": false },
+    { "name": "特等座", "query": true, "regular": false, "alternate": false },
+    { "name": "无座", "query": true, "regular": false, "alternate": false },
+    { "name": "硬座", "query": true, "regular": true, "alternate": false },
+    { "name": "软座", "query": true, "regular": true, "alternate": false },
+    { "name": "硬卧", "query": true, "regular": true, "alternate": false },
+    { "name": "软卧", "query": true, "regular": true, "alternate": false },
+    { "name": "高级软卧", "query": true, "regular": false, "alternate": false },
+    { "name": "动卧", "query": true, "regular": false, "alternate": false }
+  ],
+  "valid": [
+    {},
+    { "auto_submit": false, "auto_alternate": true },
+    { "passenger_selections": [{ "name": "测试甲", "ticket_type": "adult", "identity_hint": "" }] }
+  ],
+  "invalid": [
+    { "patch": { "train_code": "", "passengers": "", "seat_keyword": "" }, "expected": "目标车次" },
+    { "patch": { "passengers": "", "seat_keyword": "" }, "expected": "添加乘客" },
+    { "patch": { "passengers": "测试甲、测试甲", "seat_keyword": "",
+                 "passenger_selections": [{ "name": "测试甲", "ticket_type": "student", "identity_hint": "" }] },
+      "expected": "姓名重复" },
+    { "patch": { "seat_keyword": "", "passenger_selections": [{ "name": "测试甲", "ticket_type": "student", "identity_hint": "" }] },
+      "expected": "已核对为成人" },
+    { "patch": { "passenger_selections": [{ "name": "测试丙", "ticket_type": "adult", "identity_hint": "" }] },
+      "expected": "已核对为成人" },
+    { "patch": { "auto_alternate": true, "seat_keyword": "一等座",
+                 "passengers": "乘客1，乘客2，乘客3，乘客4，乘客5，乘客6，乘客7，乘客8，乘客9，乘客10，乘客11，乘客12，乘客13，乘客14，乘客15，乘客16，乘客17，乘客18，乘客19，乘客20" },
+      "expected": "19名" },
+    { "patch": { "seat_keyword": "" }, "expected": "明确席别" },
+    { "patch": { "seat_keyword": "不限" }, "expected": "明确席别" },
+    { "patch": { "seat_keyword": "二等座，不限" }, "expected": "明确席别" },
+    { "patch": { "seat_keyword": "商务座" }, "expected": "席别 商务座" },
+    { "patch": { "auto_alternate": true, "seat_keyword": "一等座" }, "expected": "席别 一等座" }
+  ]
+}

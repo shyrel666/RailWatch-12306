@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -46,6 +45,7 @@ from railwatch_system import get_app_version, inspect_data_dir, probe_connectivi
 from railwatch_time import ServerTimeSync, get_server_time_sync, resolve_sale_timestamp
 from railwatch_orders import OrderJournal, OrderIntent, OrderResult, STAGES
 from railwatch_order_page import OrderPage
+from railwatch_cleanup import checked_data_path, release_orphan_browsers, reset_directory
 
 try:
     from chromedriver_manager import (
@@ -266,6 +266,8 @@ class RailWatchBridge:
         self._task_lock = threading.RLock()
         self._browser_busy = False
         self._browser_operation = None
+        self._rehearsal_cancel = None
+        self._last_rehearsal_at = float("-inf")
         self._admission_closed = False
         self._event_context = threading.local()
         self._driver_lock = threading.RLock()
@@ -315,6 +317,8 @@ class RailWatchBridge:
             if purpose == "install" and (activity["state"] != "idle" or activity["unresolved_order"]):
                 return {"ready": False, "reason": "有活动任务或未完成订单，更新已推迟。", "activity": activity}
             self._admission_closed = True
+            if self._rehearsal_cancel is not None:
+                self._rehearsal_cancel.set()
             task = self._task if self.is_monitoring else None
             if task:
                 task.cancel.set()
@@ -557,13 +561,27 @@ class RailWatchBridge:
 
     @idle_browser_command
     def read_passengers(self) -> dict:
-        """Read visible official candidates only while the controlled browser is idle."""
-        from railwatch_order_page import READ_PASSENGER_CANDIDATES_JS
+        """Read visible official candidates only while the controlled browser is idle.
+
+        Supported pages: the personal-centre passenger list (passengers.html, current
+        page only, no pagination clicks), the regular order page and the alternate page.
+        """
+        from urllib.parse import urlparse
+        from railwatch_order_page import READ_PASSENGER_BOOK_JS, READ_PASSENGER_CANDIDATES_JS
+        unsupported = "当前官方页面没有可读取的乘客列表；请在受控浏览器打开「常用乘车人」页、下单页或候补页后再试，或继续手动填写姓名。"
         if self.driver is None or not driver_session_alive(self.driver):
             return {"items": [], "warning": "受控浏览器未打开；登录后请在官方页面打开乘客列表。"}
-        raw = self.driver.execute_script(READ_PASSENGER_CANDIDATES_JS)
+        has_next = False
+        current_url = getattr(self.driver, "current_url", "")
+        if isinstance(current_url, str) and urlparse(current_url).path == "/otn/view/passengers.html":
+            book = self.driver.execute_script(READ_PASSENGER_BOOK_JS)
+            recognized = isinstance(book, dict) and book.get("recognized")
+            raw = book.get("items") if recognized else None
+            has_next = bool(recognized and book.get("has_next"))
+        else:
+            raw = self.driver.execute_script(READ_PASSENGER_CANDIDATES_JS)
         if not isinstance(raw, list):
-            return {"items": [], "warning": "当前官方页面没有可读取的乘客列表。"}
+            return {"items": [], "warning": unsupported}
         items = []
         for item in raw[:100]:
             if not isinstance(item, dict):
@@ -577,7 +595,10 @@ class RailWatchBridge:
         counts = {item["name"]: sum(candidate["name"] == item["name"] for candidate in items) for item in items}
         for item in items:
             item["ambiguous"] = counts[item["name"]] > 1
-        return {"items": items, "warning": None if items else "当前官方页面没有可读取的乘客列表；可继续手动填写姓名。"}
+        warning = None if items else unsupported
+        if items and has_next:
+            warning = "常用乘车人列表有多页，仅读取了当前页；同名核对以彩排与下单页为准。"
+        return {"items": items, "warning": warning}
 
     def _ensure_matching_chromedriver(self, force: bool = False) -> None:
         """Chrome 会自动升级，本地 ChromeDriver 可能落后于已安装 Chrome；发现大版本不匹配时自动补齐。
@@ -746,8 +767,7 @@ class RailWatchBridge:
             return self.emit_state(self.state.with_login_verified(False, "请先打开登录页。"))
         try:
             with self._driver_lock:
-                self.driver.set_script_timeout(5)
-                result = self.driver.execute_async_script(LOGIN_CHECK_JS)
+                result = self._verify_login_session()
             if result == "ok":
                 self._record_device_id_after_login()
                 self.log("12306 登录状态已验证。", "SUCCESS")
@@ -761,6 +781,120 @@ class RailWatchBridge:
                 self._release_driver()
                 return self.emit_state(self.state.with_login_verified(False, "浏览器已关闭，请先打开登录页。"))
             return self.emit_state(self.state.with_login_verified(False, f"登录状态检查失败: {exc}"))
+
+    def _verify_login_session(self, cancel=None):
+        if not self.driver:
+            return "expired"
+        if cancel is None:
+            self.driver.set_script_timeout(5)
+            result = self.driver.execute_async_script(LOGIN_CHECK_JS)
+        else:
+            from urllib.parse import urlparse
+            if "login" in urlparse(self.driver.current_url).path:
+                result = "expired"
+            else:
+                key = "__railwatch_login_" + uuid.uuid4().hex
+                script = LOGIN_CHECK_JS.replace("const done = arguments[arguments.length-1];",
+                    "const done = value => { window[" + json.dumps(key) + "] = value; };")
+                self.driver.execute_script(script)
+                deadline = time.monotonic() + 3
+                result = None
+                while result is None and time.monotonic() < deadline:
+                    if cancel.wait(.05):
+                        raise TaskCancelled()
+                    result = self.driver.execute_script("return window[arguments[0]] || null", key)
+                self.driver.execute_script("delete window[arguments[0]]", key)
+                result = result or "unknown"
+        return result
+
+    def _probe_query(self, driver, config, cancel=None):
+        analyzer = PageAnalyzer(driver, log_callback=lambda *_: None, base_dir=self.data_dir)
+        if cancel is not None:
+            analyzer.stop_check = cancel.is_set
+            analyzer.wait_callback = cancel.wait
+        try:
+            rows = analyzer.open_fill_query_and_analyze(config)
+            return rows or [], getattr(analyzer, "last_query", {})
+        except Exception:
+            return [], getattr(analyzer, "last_query", {})
+
+    @idle_browser_command
+    def rehearse(self, raw_config, options=None):
+        config = validate_config(raw_config)
+        if self.order_journal.pending():
+            raise RuntimeError("存在待支付或待核对订单，请先处理原订单。")
+        if time.monotonic() - self._last_rehearsal_at < 120:
+            raise RuntimeError("彩排冷却中，请等待两分钟后再试。")
+        target = resolve_sale_timestamp(config) if config.get("timer_enabled") else None
+        if target is not None and 0 <= target - time.time() < 300:
+            raise RuntimeError("距离起售不足五分钟，不能运行彩排。")
+        if options is not None and (not isinstance(options, dict) or set(options) - {"send_test_notification"}
+                                   or any(type(value) is not bool for value in options.values())):
+            raise ValueError("彩排选项无效。")
+        cancel = threading.Event()
+        with self._task_lock:
+            self._rehearsal_cancel = cancel
+            if self._admission_closed:
+                cancel.set()
+        self._last_rehearsal_at = time.monotonic()
+        try:
+            return self._run_rehearsal(config, cancel, options=options)
+        finally:
+            with self._task_lock:
+                self._rehearsal_cancel = None
+
+    def _run_rehearsal(self, config, cancel, *, options=None, run_id=None):
+        from railwatch_rehearsal import RehearsalRunner
+        from railwatch_rehearsal_checks import make_checks
+        from railwatch_rehearsal_drill import cancellable_browser, DrillIsolationError
+        checks, context = make_checks(self, config)
+        context["send_test_notification"] = bool((options or {}).get("send_test_notification"))
+        def release():
+            driver = self.driver
+            if driver is not None:
+                driver.execute = getattr(driver, "_rehearsal_raw_execute", driver.execute)
+            self._release_driver()
+        runner = RehearsalRunner(config, checks, emit=self.emit, save=self.order_journal.save_rehearsal,
+                                 log=self.log, session_lost=lambda exc: is_session_lost(exc) or isinstance(exc, DrillIsolationError), release=release,
+                                 history=lambda: [self.run_review(item["run_id"]) for item in self.order_journal.recent_runs(5)["items"]])
+        with cancellable_browser(self.driver, cancel):
+            return runner.run(trigger="task" if run_id else "manual", cancel=cancel, run_id=run_id)
+
+    def cancel_rehearsal(self):
+        with self._task_lock:
+            cancel = self._rehearsal_cancel
+            if cancel is not None:
+                cancel.set()
+            return {"cancelled": cancel is not None}
+
+    def rehearsal_history(self, limit=20):
+        return self.order_journal.rehearsal_history(limit)
+
+    def clear_rehearsal_history(self):
+        # Serialize with manual/automatic rehearsal admission and completion.
+        with self._task_lock:
+            if self.is_monitoring or self._browser_busy or self._rehearsal_cancel is not None:
+                raise RuntimeError("请等待当前任务或彩排结束后再清除记录。")
+            return self.order_journal.clear_rehearsal_history()
+
+    def run_review(self, run_id):
+        from railwatch_run_review import build_run_review
+        events = self.order_journal.run_events(run_id)
+        if not any(event["stage"] == "target_sale" for event in events):
+            raise ValueError("未找到该任务的起售记录。")
+        review = build_run_review(events, self.order_journal.rehearsal_for_run(run_id))
+        if self._task and self._task.run_id == run_id and self._task.active:
+            review["conclusion"] = "进行中"
+        return review
+
+    def run_reviews(self, limit=20, cursor=None):
+        from railwatch_run_review import run_conclusion
+        page = self.order_journal.recent_runs(limit, cursor)
+        outcomes = self.order_journal.run_outcomes([item["run_id"] for item in page["items"]])
+        active = self._task.run_id if self._task and self._task.active else None
+        for item in page["items"]:
+            item["conclusion"] = "进行中" if item["run_id"] == active else run_conclusion(outcomes[item["run_id"]])
+        return page
 
     @idle_browser_command
     def analyze_query(self, raw_config: dict, request_id: Optional[str] = None) -> dict:
@@ -809,19 +943,10 @@ class RailWatchBridge:
         config = validate_config(raw_config)
         if self.order_journal.pending():
             raise RuntimeError("存在待支付或待核对订单，请点击继续处理，不能重复启动提交。")
-        if config.get("auto_submit") or config.get("auto_alternate"):
-            from railwatch_config_contract import parse_passenger_names
-            names = parse_passenger_names(config.get("passengers", ""))
-            selections = config.get("passenger_selections", [])
-            if any(item["name"] not in names or item["ticket_type"] != "adult" for item in selections):
-                raise ValueError("自动交易仅支持已核对为成人的乘客；学生、儿童和未知票种请在官方页面处理。")
-            if not names or len(names) != len(set(names)) or not config.get("seat_keyword", "").strip() or not config.get("train_code", "").strip():
-                raise ValueError("自动提交需要明确的目标车次、可接受席别及不重复的乘车人姓名。")
-            if config.get("auto_alternate") and len(names) > 19:
-                raise ValueError("候补单最多支持19名乘车人。")
-            validate_automation_seats(config.get("seat_keyword", ""),
-                                      regular=bool(config.get("auto_submit")),
-                                      alternate=bool(config.get("auto_alternate")))
+        from railwatch_config_contract import automation_config_issue
+        issue = automation_config_issue(config)
+        if issue:
+            raise ValueError(issue)
         confirmation = self._automation_confirmation(config)
         if confirmation and not confirmed:
             return confirmation
@@ -834,10 +959,11 @@ class RailWatchBridge:
                 raise ValueError("执行日期已变化，请重新核对启动摘要。")
             task = MonitorTask(config, target, started_at=requested_at)
             self._task = task
-            self.order_journal.mark(task.run_id, "target_sale", detail={"target_at": target})
+            from railwatch_rehearsal import public_trip
+            self.order_journal.mark(task.run_id, "target_sale", detail={"target_at": target, "trip": public_trip(config)})
             self.state = replace(self.state.with_safety(config["auto_submit"], config["auto_alternate"]).with_monitoring(True), human_action={})
             self._transition(task, "preparing")
-            task.thread = threading.Thread(target=lambda: self._monitor_worker(deepcopy(config), task), name=f"railwatch-monitor-{task.run_id[:8]}", daemon=True)
+            task.thread = threading.Thread(target=lambda: self._run_task_worker(task, lambda: self._monitor_worker(deepcopy(config), task)), name=f"railwatch-monitor-{task.run_id[:8]}", daemon=True)
             task.thread.start()
             threading.Thread(target=lambda: self._finish_task(task), name="railwatch-task-finalizer", daemon=True).start()
             return state_to_payload(self.state)
@@ -887,7 +1013,7 @@ class RailWatchBridge:
             task = MonitorTask(pending["config"])
             self._task = task
             self._transition(task, "reconciling", message="正在核对原订单")
-            task.thread = threading.Thread(target=lambda: self._resume_order_worker(task, pending), daemon=True)
+            task.thread = threading.Thread(target=lambda: self._run_task_worker(task, lambda: self._resume_order_worker(task, pending)), daemon=True)
             task.thread.start()
             threading.Thread(target=lambda: self._finish_task(task), daemon=True).start()
             return state_to_payload(self.state)
@@ -996,10 +1122,30 @@ class RailWatchBridge:
             except Exception:
                 self.log("订单核对时间保存失败，将在后续核对或退出时重试。", "WARN")
 
+    def _run_task_worker(self, task, worker):
+        try:
+            worker()
+        finally:
+            self._record_task_finished(task)
+
+    def _record_task_finished(self, task):
+        # Persist before the worker announces completion; otherwise clear-data
+        # can race the finalizer's last SQLite write after the worker has exited.
+        with self._task_lock:
+            if task.finish_recorded:
+                return
+            terminal = task.status if task.status in ("human_action", "error", "hit", *STAGES.keys()) else "stopped"
+            try:
+                self.order_journal.mark(task.run_id, "task_finished", detail={"status": terminal})
+            except Exception:
+                self.log("任务结束状态保存失败，复盘可能不完整。", "WARN")
+            task.finish_recorded = True
+
     def _finish_task(self, task):
         if task.thread:
             task.thread.join()
         with self._task_lock:
+            self._record_task_finished(task)
             task.done.set()
             if task is self._task:
                 terminal = task.status if task.status in ("human_action", "error", "hit", *STAGES.keys()) else "stopped"
@@ -1049,25 +1195,52 @@ class RailWatchBridge:
             return {
                 "requires_confirmation": True,
                 "title": "清除本地数据",
-                "message": "此操作将删除本地数据目录中的 RailWatch 配置、日志和 Chrome 配置。源代码目录不受影响。",
+                "message": "将关闭 RailWatch 受控浏览器，并删除本地配置、登录信息、订单与复盘记录、日志和下载的驱动。不会取消官方订单。是否继续？",
             }
         if self.is_monitoring:
             raise RuntimeError("监控运行中，请先停止监控后再清除本地数据。")
         if self.order_journal.pending():
             raise RuntimeError("仍有未完成订单，请先核对官方订单状态，避免清除记录后重复提交。")
-        target = os.path.abspath(self.data_dir)
-        if os.path.basename(target) != APP_SLUG:
-            self.log(f"拒绝清除意外的数据目录: {target}", "ERROR")
-            raise RuntimeError(f"拒绝清除意外的数据目录: {target}")
+        target = checked_data_path(self.data_dir)
+        process = getattr(getattr(self.driver, "service", None), "process", None)
+        owned_pid = getattr(process, "pid", 0)
         if self.driver:
             self._release_driver()
-        if os.path.exists(target):
-            shutil.rmtree(target)
-        os.makedirs(target, exist_ok=True)
-        self.order_journal = OrderJournal(os.path.join(target, "orders.sqlite3"))
-        self.state = replace(self.state, order={})
-        self.log("本地 RailWatch 数据已清除。", "SUCCESS")
-        return {"cleared": True, "data_dir": target}
+            self.state = replace(self.state, login_ready=False, query_ready=False)
+            self.emit_state()
+        release_orphan_browsers(target, owned_pid if isinstance(owned_pid, int) else 0)
+        self.order_journal.flush_checks()
+        self.order_journal.flush_telemetry()
+        with self._settings_lock:
+            previous_notifications = dict(self.notification_service.settings)
+            self.notification_service.close()
+            try:
+                journal, remaining = reset_directory(target, lambda: OrderJournal(os.path.join(target, "orders.sqlite3")))
+            except Exception:
+                self.notification_service = NotificationService(previous_notifications, log_callback=self.log)
+                raise
+            self.order_journal = journal
+            self.notification_service = NotificationService(log_callback=self.log)
+            self.config_manager = ConfigManager(self.data_dir) if CORE_AVAILABLE and ConfigManager else None
+        self._task = None
+        self._last_rehearsal_at = float("-inf")
+        self._param_filler = None
+        self.behavior_simulator = None
+        self.device_id_protector = None
+        self._chromedriver_repair_failed = False
+        self.chromedriver_path = PACKAGED_CHROMEDRIVER_PATH if os.path.exists(PACKAGED_CHROMEDRIVER_PATH) else str(target / "chromedriver.exe")
+        self._keep_alive_last_state = None
+        self._keep_alive_unknown_count = 0
+        self.query_results = []
+        self.state = RailWatchState.initial()
+        self.clear_log()
+        self.emit("results", {"rows": []})
+        self.emit_state()
+        warning = ("配置与运行状态已重置，但部分旧文件仍被占用，尚未彻底清除。关闭相关程序后再次点击清除数据可重试。"
+                   if remaining else "")
+        self.log(warning or "本地 RailWatch 数据已清除，请重新检查环境并登录。", "WARN" if remaining else "SUCCESS")
+        return {"cleared": True, "data_dir": str(target), "cleanup_pending": bool(remaining),
+                "remaining_paths": remaining, "warning": warning}
 
     def export_log(self, path: Optional[str] = None, entries: Optional[list] = None) -> dict:
         if entries is None:
@@ -1104,8 +1277,12 @@ class RailWatchBridge:
             }
 
     def save_preferences(self, theme: Optional[str] = None, notification_settings: Optional[dict] = None,
-                         close_to_tray: Optional[bool] = None) -> dict:
+                         close_to_tray: Optional[bool] = None, auto_rehearsal: Optional[bool] = None) -> dict:
         ui_patch = {}
+        if auto_rehearsal is not None:
+            if not isinstance(auto_rehearsal, bool):
+                raise ValueError("自动彩排必须为布尔值。")
+            ui_patch["auto_rehearsal"] = auto_rehearsal
         if theme is not None:
             if theme not in ("system", "light", "dark"):
                 raise ValueError("主题必须为 system、light 或 dark。")
@@ -1212,6 +1389,24 @@ class RailWatchBridge:
                 raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
             with self._driver_lock:
                 driver = self._ensure_driver()
+                auto_rehearsal = (config.get("timer_enabled") and task.target_timestamp
+                                  and task.target_timestamp - time.time() > 900
+                                  and load_ui_preferences(self.data_dir).get("auto_rehearsal", False))
+                if auto_rehearsal and time.monotonic() - self._last_rehearsal_at < 120:
+                    self.log("刚完成过彩排，本次任务跳过自动彩排；复盘不会包含本任务的预测。", "WARN")
+                elif auto_rehearsal:
+                    self._last_rehearsal_at = time.monotonic()
+                    # Not exposed through cancelRehearsal: that would stop the task.
+                    # Stopping the task or shutdown still cancels via task.cancel.
+                    report = self._run_rehearsal(config, task.cancel, run_id=task.run_id)
+                    if report["verdict"] == "blocked" and not task.cancel.is_set():
+                        self._handle_human_action({"message": "起售彩排发现关键问题，请查看彩排报告；余票监控仍会继续。"}, stop_task=False)
+                    if task.target_timestamp - time.time() < 600:
+                        self.log("自动彩排结束时距起售不足十分钟，将立即准备查询页。", "WARN")
+                    if task.cancel.is_set():
+                        return
+                    if self.driver is not driver:
+                        raise RuntimeError("彩排后浏览器已失效，请重新打开登录页。")
                 with guard_browser(driver, task, lambda: self._transition(task)):
                     driver.set_page_load_timeout(30)
                     driver.set_script_timeout(3)
@@ -1269,6 +1464,7 @@ class RailWatchBridge:
                 self.order_journal.flush_telemetry()
             except Exception as exc:
                 self.log(f"查询遥测写入失败: {exc}", "WARN")
+            self._record_task_finished(task)
             task.done.set()
             if task.thread is None:
                 self._finish_task(task)
@@ -1607,7 +1803,7 @@ $targets.Count
         if self._task:
             self._transition(self._task, "hit", message=title)
 
-    def _handle_human_action(self, payload: dict) -> None:
+    def _handle_human_action(self, payload: dict, *, stop_task: bool = True) -> None:
         if not self._owns_context():
             return
         title = str(payload.get("title", "需要人工操作"))
@@ -1616,7 +1812,7 @@ $targets.Count
         action = {"title": title, "message": message, "train_code": str(payload.get("train_code", "")),
                   "priority": "urgent", "event_id": f"verification:{self._task.run_id if self._task else 'idle'}:{title}:{message}"}
         self.state = replace(self.state, human_action=action)
-        if self._task:
+        if self._task and stop_task:
             self._task.cancel.set()
             self._transition(self._task, "human_action", message=status)
         self.log(f"{title}: {message}", "WARN")
@@ -1632,7 +1828,7 @@ $targets.Count
         )
         self._notify_async(title, message)
         # 非错误的警示状态，让界面在停止后仍显示「需要人工核验」，而不是普通的「监控已停止」
-        self.emit_state(replace(self.state.with_human_action(status), monitoring=self.is_monitoring))
+        self.emit_state(replace(self.state.with_human_action(status), monitoring=self.is_monitoring) if stop_task else self.state)
 
     def _automation_confirmation(self, config: dict) -> Optional[dict]:
         enabled = []

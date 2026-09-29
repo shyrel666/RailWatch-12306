@@ -353,6 +353,12 @@ def parse_passenger_names(value: str) -> List[str]:
     return [name.strip() for name in re.split(r"[,，、]+", str(value or "")) if name.strip()]
 
 
+def parse_codes(value: str, *, upper: bool = False) -> List[str]:
+    """Train or seat targets, split identically for monitoring and rehearsal."""
+    items = (item.strip() for item in re.split(r"[,，、;；\s]+", str(value or "")))
+    return list(dict.fromkeys(item.upper() if upper else item for item in items if item))
+
+
 def redact_sensitive_text(value: str, keep_start: int = 2, keep_end: int = 1) -> str:
     text = str(value or "").strip()
     if not text:
@@ -381,3 +387,31 @@ def config_for_persistence(config: Mapping[str, Any]) -> Dict[str, Any]:
     payload = deepcopy(validated)
     payload.pop("query_jobs", None)
     return payload
+
+
+def automation_config_issue(config) -> Optional[str]:
+    """Return the same automation admission issue for monitor and rehearsal."""
+    if not (config.get("auto_submit") or config.get("auto_alternate")):
+        return None
+    from railwatch_seats import validate_automation_seats
+    names = parse_passenger_names(config.get("passengers", ""))
+    try:
+        # Keep this order identical to src/lib/automationReadiness.ts; the
+        # shared cases in tests/fixtures/automation-readiness-cases.json pin it.
+        if not config.get("train_code", "").strip():
+            raise ValueError("自动化需要明确的目标车次，请在行程设置中选择车次。")
+        if not names:
+            raise ValueError("自动化需要乘车人姓名，请在行程设置中添加乘客。")
+        if len(names) != len(set(names)):
+            raise ValueError("乘车人姓名重复，请在行程设置中删除重复乘客。")
+        selections = config.get("passenger_selections", [])
+        if any(item["name"] not in names or item["ticket_type"] != "adult" for item in selections):
+            raise ValueError("自动交易仅支持已核对为成人的乘客；学生、儿童和未知票种请在官方页面处理。")
+        if config.get("auto_alternate") and len(names) > 19:
+            raise ValueError("候补单最多支持19名乘车人。")
+        validate_automation_seats(config.get("seat_keyword", ""),
+                                  regular=bool(config.get("auto_submit")),
+                                  alternate=bool(config.get("auto_alternate")))
+    except ValueError as exc:
+        return str(exc)
+    return None

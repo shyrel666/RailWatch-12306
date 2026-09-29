@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic passenger book based on official DOM observed 2026-09-28</title>
+<style>td,th{padding:8px}.verification-status-common{display:inline-block;width:16px;height:16px}.list-operation a{display:inline-block;width:16px;height:16px}</style>
+<!-- Every passenger and document below is synthetic. No account snapshot is stored. -->
+<input id="_search_name" value="请输入乘客姓名">
+<div id="content_list">
+  <table class="order-panel-head"><tr><th>序号</th><th>姓名</th><th>证件类型</th><th>证件号码</th><th>手机／电话</th><th>核验状态</th><th>操作</th></tr></table>
+  <div class="order-item"><div class="order-item-bd"><table class="order-item-table"></table></div></div>
+</div>
+<div class="pagination mt-lg"></div>
+<script>
+const fixture={page:1, pages:[[
+  {name:'测试甲',self:true,type:'1',status:'已通过'},
+  {name:'测试乙',self:false,type:'1',status:'已通过'}
+]], clicks:[]};
+function element(tag, cls, value){const e=document.createElement(tag);e.className=cls||'';if(value!==undefined)e.textContent=value;return e;}
+function render(){
+ const table=document.querySelector('.order-item-table');table.replaceChildren();
+ for(const [i,p] of fixture.pages[fixture.page-1].entries()){
+  const row=element('tr');table.append(row);
+  const cells=Array.from({length:7},()=>{const c=element('td','br-none');row.append(c);return c;});
+  const input=element('input',p.self?'UserSelf':'');input.type='checkbox';input.disabled=!!p.self;input.value='SENSITIVE-CHECKBOX-MUST-NOT-RETURN';cells[0].append(input,element('span','',i+1));
+  const name=element('div','name-yichu',p.name);name.title=p.name;cells[1].append(name);
+  cells[2].append(element('div','','居民身份证'));cells[3].append(element('div','',p.identity||'11**************99'));cells[4].append(element('div','','(+86)13*******00'));
+  const box=element('div','verification-status-box');cells[5].append(box);
+  const identity=element('span','verification-status-common verification-status-user '+(['已通过','预通过'].includes(p.status)?'user-check-success':'user-check-error'));identity.title=p.status;box.append(identity);
+  const phone=element('span','verification-status-common verification-status-phone mobile-check-success');phone.title='手机核验通过';box.append(phone);
+  const ops=element('div','list-operation');cells[6].append(ops);
+  if(!p.self){const edit=element('a','one-edit');edit.href='javascript:;';edit.dataset.val=[p.name,'1','11**************99',p.type,'SENSITIVE-TOKEN','CN','SENSITIVE-UUID'].join('#');edit.onclick=()=>fixture.clicks.push('edit');ops.append(edit);}
+ }
+ const pager=document.querySelector('.pagination');pager.replaceChildren();pager.style.display=fixture.pages.length===1?'none':'';
+ const all=element('div','page-all','共');all.append(element('strong','',fixture.pages.length));pager.append(all);
+ const nums=element('ul','page-num');const active=element('li','active',fixture.page);nums.append(active);pager.append(nums);
+ if(fixture.page<fixture.pages.length){const next=element('a','next','下一页');next.href='javascript:;';next.onclick=()=>{fixture.clicks.push('next');fixture.page++;render();};nums.append(next);}
+}
+render();
+</script>

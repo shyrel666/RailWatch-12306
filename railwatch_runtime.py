@@ -6,6 +6,7 @@ import json
 import sys
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from railwatch_bridge import RailWatchBridge, dumps_json
@@ -27,6 +28,9 @@ class RailWatchRuntime:
         max_workers: int = 4,
     ):
         self._write_lock = threading.Lock()
+        self._maintenance_guard = threading.Lock()
+        self._active_commands = 0
+        self._clearing_data = False
         self.writer = writer or self._stdout_writer
         self.bridge = bridge or RailWatchBridge(event_callback=self.emit_event)
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="railwatch-cmd")
@@ -67,7 +71,8 @@ class RailWatchRuntime:
 
     def _run_command(self, request_id, command: str, payload: dict) -> None:
         try:
-            result = self._dispatch(command, payload)
+            with self._command_slot(command):
+                result = self._dispatch(command, payload)
             self._write({"type": "response", "id": request_id, "ok": True, "result": result})
         except Exception as exc:
             self._write(
@@ -78,6 +83,25 @@ class RailWatchRuntime:
                     "error": {"message": str(exc), "class": exc.__class__.__name__},
                 }
             )
+
+    @contextmanager
+    def _command_slot(self, command):
+        clearing = command == "clearLocalData"
+        with self._maintenance_guard:
+            if self._clearing_data:
+                raise RuntimeError("正在清除本地数据，请等待清理完成。")
+            if clearing and self._active_commands:
+                raise RuntimeError("其他操作尚未结束，尚未清除数据，请稍后重试。")
+            self._active_commands += 1
+            if clearing:
+                self._clearing_data = True
+        try:
+            yield
+        finally:
+            with self._maintenance_guard:
+                self._active_commands -= 1
+                if clearing:
+                    self._clearing_data = False
 
     def _dispatch(self, command: str, payload: dict):
         handlers = {
@@ -96,6 +120,12 @@ class RailWatchRuntime:
             "downloadChromeDriver": lambda: self.bridge.download_chromedriver(),
             "openLogin": lambda: self.bridge.open_login(),
             "checkLogin": lambda: self.bridge.check_login(),
+            "runReviews": lambda: self.bridge.run_reviews(payload.get("limit", 20), payload.get("cursor")),
+            "runReview": lambda: self.bridge.run_review(payload.get("run_id")),
+            "rehearse": lambda: self.bridge.rehearse(payload.get("config") or payload, payload.get("options")),
+            "cancelRehearsal": lambda: self.bridge.cancel_rehearsal(),
+            "rehearsalHistory": lambda: self.bridge.rehearsal_history(payload.get("limit", 20)),
+            "clearRehearsalHistory": lambda: self.bridge.clear_rehearsal_history(),
             "analyzeQuery": lambda: self.bridge.analyze_query(payload.get("config") or payload, request_id=payload.get("request_id")),
             "startMonitor": lambda: self.bridge.start_monitor(
                 payload.get("config") or payload,
@@ -120,6 +150,7 @@ class RailWatchRuntime:
                 payload.get("theme"),
                 payload.get("notification_settings"),
                 close_to_tray=payload.get("close_to_tray"),
+                auto_rehearsal=payload.get("auto_rehearsal"),
             ),
             "notificationStatus": lambda: self.bridge.notification_status(),
             "testNotification": lambda: self.bridge.test_notification(),

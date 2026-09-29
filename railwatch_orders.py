@@ -110,6 +110,14 @@ class OrderJournal:
                     WHERE stage='order_result' AND json_extract(detail,'$.official')=1;
                 CREATE TABLE IF NOT EXISTS order_checks (
                     intent_id TEXT PRIMARY KEY, checked_at REAL NOT NULL, status TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS rehearsals (
+                    rehearsal_id TEXT PRIMARY KEY, run_id TEXT, trigger TEXT NOT NULL,
+                    started_at REAL NOT NULL, finished_at REAL, verdict TEXT NOT NULL, report TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS rehearsals_recent ON rehearsals(started_at DESC);
+                CREATE INDEX IF NOT EXISTS rehearsals_run ON rehearsals(run_id,started_at DESC);
+                CREATE INDEX IF NOT EXISTS order_events_run_sequence ON order_events(run_id,sequence);
+                CREATE INDEX IF NOT EXISTS order_events_run_markers ON order_events(run_id,sequence)
+                    WHERE stage NOT IN ('query_click','query_result');
             """)
             self._prune_telemetry(db)
         # An OS lock survives threads but is released on process exit. Only its
@@ -141,6 +149,91 @@ class OrderJournal:
             lease.close()
             return None
         return lease
+
+    def save_rehearsal(self, report):
+        with self.connection() as db:
+            db.execute("INSERT OR REPLACE INTO rehearsals VALUES(?,?,?,?,?,?,?)", (
+                report["rehearsal_id"], report.get("run_id"), report["trigger"], report["started_at"],
+                report["finished_at"], report["verdict"], json.dumps(report, ensure_ascii=False)))
+            db.execute("DELETE FROM rehearsals WHERE rehearsal_id NOT IN "
+                       "(SELECT rehearsal_id FROM rehearsals ORDER BY started_at DESC,rehearsal_id DESC LIMIT 20)")
+
+    def clear_rehearsal_history(self):
+        with self.connection() as db:
+            deleted = db.execute("DELETE FROM rehearsals").rowcount
+        return {"cleared": deleted}
+
+    def rehearsal_history(self, limit=20):
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("彩排数量须为 1–20。")
+        with self.connection() as db:
+            return {"items": [json.loads(row[0]) for row in db.execute(
+                "SELECT report FROM rehearsals ORDER BY started_at DESC,rehearsal_id DESC LIMIT ?", (limit,))]}
+
+    def run_events(self, run_id):
+        import re
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+            raise ValueError("任务标识无效。")
+        self.flush_telemetry()
+        with self.connection() as db:
+            db.row_factory = sqlite3.Row
+            rows = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage NOT IN ('query_click','query_result') ORDER BY sequence", (run_id,)))
+            wake = next((row["sequence"] for row in rows if row["stage"] == "scheduler_wake"), 0)
+            hit = next((row["sequence"] for row in rows if row["stage"] in ("inventory_found", "no_inventory")), 2**63-1)
+            clicks = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_click' AND sequence>? ORDER BY sequence LIMIT 5", (run_id, wake)))
+            clicks += list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_click' AND sequence<? ORDER BY sequence DESC LIMIT 5", (run_id, hit)))
+            for click in {row["sequence"]: row for row in clicks}.values():
+                rows.append(click)
+                # Pair only within this click's own interval; never across a lost round.
+                next_click = db.execute("SELECT min(sequence) FROM order_events WHERE run_id=? AND stage='query_click' AND sequence>?", (run_id, click["sequence"])).fetchone()[0]
+                end = db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_result' AND sequence>? AND sequence<? ORDER BY sequence LIMIT 1", (run_id, click["sequence"], next_click or 2**63-1)).fetchone()
+                if end:
+                    rows.append(end)
+            first_click = min((row["sequence"] for row in clicks if row["sequence"] > wake), default=None)
+            # Global sequence gaps expose pruning; surviving clicks alone cannot
+            # establish that they were the first queries after the wake.
+            first_known = first_click is not None and db.execute(
+                "SELECT count(*) FROM order_events WHERE sequence>? AND sequence<?", (wake, first_click)
+            ).fetchone()[0] == first_click - wake - 1
+        events = [{**dict(row), "detail": json.loads(row["detail"])} for row in sorted(rows, key=lambda row: row["sequence"])]
+        for event in events:
+            if event["stage"] == "scheduler_wake":
+                event["detail"]["first_query_known"] = first_known
+        return events
+
+    def run_outcomes(self, run_ids):
+        """Conclusion-deciding markers per run, without telemetry or full reviews."""
+        from railwatch_run_review import CONCLUSION_STAGES
+        grouped = {run_id: [] for run_id in run_ids}
+        if not grouped:
+            return grouped
+        # The literal NOT IN term lets SQLite use the order_events_run_markers partial index.
+        with self.connection() as db:
+            rows = db.execute(
+                f"SELECT run_id,sequence,stage,detail FROM order_events WHERE run_id IN ({','.join('?' * len(grouped))})"
+                f" AND stage NOT IN ('query_click','query_result') AND stage IN ({','.join('?' * len(CONCLUSION_STAGES))})"
+                " ORDER BY sequence", (*grouped, *CONCLUSION_STAGES)).fetchall()
+        for run_id, sequence, stage, detail in rows:
+            grouped[run_id].append({"sequence": sequence, "stage": stage, "detail": json.loads(detail)})
+        return grouped
+
+    def recent_runs(self, limit=20, cursor=None):
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("复盘数量须为 1–50。")
+        point = self._cursor_decode(cursor)
+        condition, args = "", []
+        if point:
+            condition = " AND (at<? OR (at=? AND run_id<?))"
+            args = [point[0], point[0], point[1]]
+        with self.connection() as db:
+            rows = db.execute("SELECT run_id,at,detail FROM order_events WHERE stage='target_sale'" + condition + " ORDER BY at DESC,run_id DESC LIMIT ?", (*args, limit + 1)).fetchall()
+        return {"items": [{"run_id": row[0], "started_at": row[1], **json.loads(row[2])} for row in rows[:limit]],
+                "next_cursor": self._cursor_encode(rows[limit-1][1], rows[limit-1][0]) if len(rows) > limit else None}
+
+    def rehearsal_for_run(self, run_id):
+        with self.connection() as db:
+            row = db.execute("SELECT report FROM rehearsals WHERE run_id=? ORDER BY started_at DESC LIMIT 1", (run_id,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     @contextmanager
     def connection(self):

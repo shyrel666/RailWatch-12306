@@ -29,6 +29,7 @@ export function dashboardAction(
   status: RailWatchStatus,
   human: HumanActionPayload | null,
   tripValid: boolean,
+  rehearsalNeeded = false,
 ): NextAction {
   if (hasUnresolvedOrder(status.order))
     return {
@@ -97,6 +98,8 @@ export function dashboardAction(
       section: "trip-basics",
       tone: "normal",
     };
+  if (rehearsalNeeded) return { title: "开售前先彩排一次", description: "检查登录、乘车人和执行路径，提前发现可修复的问题。",
+    label: "前往起售彩排", page: "购票监控", section: "monitor-rehearsal", tone: "normal" };
   return {
     title: "一切就绪，准备出发",
     description: "你的行程已经准备好，进入监控页开始关注余票变化。",

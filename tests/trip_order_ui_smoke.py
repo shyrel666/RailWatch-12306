@@ -87,6 +87,13 @@ def main():
                 wait.until(lambda d: "恢复草稿" in d.find_element("tag name", "body").text)
                 assert "本路线收藏" in driver.find_element("tag name", "body").text
                 driver.save_screenshot(str(OUTPUT / f"trip-{width}.png"))
+                driver.find_element("css selector", "#trip-automation summary").click()
+                deadline = driver.find_element("css selector", '[aria-label="候补截止"]')
+                deadline.click()
+                option = wait.until(lambda d: d.find_element("xpath", "//div[contains(@class,'ant-select-item-option-content') and text()='开车前20分钟']"))
+                driver.save_screenshot(str(OUTPUT / f"deadline-options-{width}.png"))
+                option.click()
+                assert deadline.get_attribute("value") == "开车前20分钟"
                 driver.find_element("css selector", '[aria-label="订单中心"]').click()
                 wait.until(lambda d: "E123" in d.find_element("tag name", "body").text)
                 assert "当前不会周期性自动复查" in driver.find_element("tag name", "body").text

@@ -46,7 +46,7 @@ def validate_automation_seats(value: str, *, regular: bool, alternate: bool) -> 
     import re
 
     seats = list(dict.fromkeys(item for item in re.split(r"[,，、;；\s]+", str(value or "").strip()) if item))
-    if not seats:
+    if not seats or "不限" in seats:
         raise ValueError("自动交易必须选择明确席别，不能使用“不限”。")
     for name in seats:
         seat = CAPABILITIES_BY_NAME.get(name)

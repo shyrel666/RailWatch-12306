@@ -34,6 +34,7 @@ export type RequestOptions = {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const LONG_RUNNING_COMMANDS = new Set([
+  "rehearse",
   "checkEnvironment",
   "openLogin",
   "checkLogin",
@@ -241,7 +242,8 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
       if (this.child !== child) return;
       this.emit("started");
       const recovering = this.restartAttempts > 0 || this.manualRecovery;
-      void this.request("getRuntimeInfo", {}, { timeoutMs: 10000 }).then(info => {
+      // Frozen startup plus connectivity fallbacks can exceed ten seconds.
+      void this.request("getRuntimeInfo", {}, { timeoutMs: 30000 }).then(info => {
         if (this.child !== child) return;
         if (!info || typeof info !== "object" || !("state" in info) || !info.state || typeof info.state !== "object") {
           throw new Error("Runtime readiness response is invalid");

@@ -97,6 +97,26 @@ class TripChoicesTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "浏览器正在操作"):
                 bridge.read_passengers()
 
+    def test_passenger_read_supports_personal_centre_list_without_paging(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_order_page import READ_PASSENGER_BOOK_JS
+
+        scripts = []
+        def execute(self, script):
+            scripts.append(script)
+            return {"recognized": True, "page": 1, "total_pages": 2, "has_next": True, "complete": False, "pagination_valid": True,
+                    "items": [{"name": "张三", "ticket_type": "adult", "type_source": "profile_metadata", "identity_hint": "11***22"},
+                              {"name": "王五", "ticket_type": "unknown", "type_source": "unavailable", "identity_hint": "33***44"}]}
+        with tempfile.TemporaryDirectory() as data_dir:
+            bridge = RailWatchBridge(data_dir=data_dir)
+            bridge.driver = type("Driver", (), {"window_handles": ["one"], "current_url": "https://kyfw.12306.cn/otn/view/passengers.html?x=1",
+                                                 "execute_script": execute})()
+            result = bridge.read_passengers()
+        self.assertEqual(scripts, [READ_PASSENGER_BOOK_JS])
+        self.assertEqual([(item["name"], item["ticket_type"], item["ambiguous"]) for item in result["items"]],
+                         [("张三", "adult", False), ("王五", "unknown", False)])
+        self.assertIn("仅读取了当前页", result["warning"])
+
 
 if __name__ == "__main__":
     unittest.main()

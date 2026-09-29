@@ -67,3 +67,13 @@ describe("ipcSecurity", () => {
     expect(isExportPathAllowed("exportLog", {}, grants)).toBe(true);
   });
 });
+
+test("rehearsal commands are restricted and explain the offline boundary", () => {
+  expect(isRailWatchCommand("clearRehearsalHistory")).toBe(true);
+  expect(getCommandConfirmation("clearRehearsalHistory", {})?.message).toContain("订单和实战复盘记录会保留");
+  for (const command of ["rehearse", "cancelRehearsal", "rehearsalHistory", "runReviews", "runReview"]) expect(isRailWatchCommand(command)).toBe(true);
+  const prompt = getCommandConfirmation("rehearse", { config: { sale_at: new Date(Date.now() + 600_000).toISOString() } });
+  expect(prompt?.message).toContain("不会创建订单");
+  expect(prompt?.message).toContain("不足 15 分钟");
+  expect(getCommandConfirmation("cancelRehearsal", {})).toBeNull();
+});

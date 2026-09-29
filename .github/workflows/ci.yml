@@ -42,7 +42,7 @@ jobs:
         run: python -m unittest discover -s tests -p "test_*.py"
 
       - name: Compile Python modules
-        run: python -m py_compile railwatch_state.py gui_12306_0.py anti_detect.py chromedriver_manager.py railwatch_preferences.py railwatch_bridge.py railwatch_runtime.py
+        run: python -m py_compile railwatch_rehearsal.py railwatch_rehearsal_checks.py railwatch_rehearsal_drill.py railwatch_run_review.py railwatch_state.py gui_12306_0.py anti_detect.py chromedriver_manager.py railwatch_preferences.py railwatch_bridge.py railwatch_runtime.py
 
       - name: Run Electron and renderer tests
         run: npm run test

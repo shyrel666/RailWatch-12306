@@ -456,6 +456,12 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
   }
   consumeExportPathGrant(command, requestPayload, grantedExportPaths);
   const result = await pythonRuntime.request(command, requestPayload);
+  if (command === "clearLocalData" && isRecord(result) && result.cleared === true) {
+    stagedDraft = null;
+    draftGeneration++;
+    cleanupUrgentAlert();
+    try { applyAlertPreferences(await pythonRuntime.request("loadPreferences")); } catch { /* Reload retries preferences. */ }
+  }
   if (command === "savePreferences" || command === "loadPreferences") applyAlertPreferences(result);
   return result;
 });

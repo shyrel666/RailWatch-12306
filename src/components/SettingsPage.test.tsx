@@ -14,6 +14,7 @@ import type { RailWatchStatus } from "../types";
 
 function resetStore() {
   railwatchStore.setState({
+    rehearsalEnabled: false,
     runtime: {
       ...defaultRuntimeInfo,
       data_dir: "C:/RailWatch/data",
@@ -100,5 +101,26 @@ describe("SettingsPage", () => {
     await userEvent.click(toggle);
     await waitFor(() => expect(command).toHaveBeenCalledWith("savePreferences", { close_to_tray: true }));
     expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  test("rehearsal is opt-in and a failed save preserves the current visibility", async () => {
+    const command = vi.spyOn(railwatchApi, "command").mockImplementation(async (_name, payload = {}) => ({
+      theme: "light", close_to_tray: false, auto_rehearsal: payload.auto_rehearsal,
+      notification_settings: {},
+    }) as never);
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const toggle = screen.getByRole("switch", { name: "启用起售彩排" });
+    await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await userEvent.click(toggle);
+    expect(command).toHaveBeenCalledWith("savePreferences", { auto_rehearsal: true });
+    await waitFor(() => expect(railwatchStore.getState().rehearsalEnabled).toBe(true));
+    command.mockRejectedValueOnce(new Error("save failed"));
+    await userEvent.click(toggle);
+    await screen.findByText("自动彩排偏好未保存，请重试。");
+    expect(railwatchStore.getState().rehearsalEnabled).toBe(true);
+    await userEvent.click(toggle);
+    await waitFor(() => expect(railwatchStore.getState().rehearsalEnabled).toBe(false));
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
   });
 });

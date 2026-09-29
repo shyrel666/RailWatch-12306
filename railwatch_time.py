@@ -11,7 +11,9 @@ from railwatch_dates import beijing_now
 import urllib.error
 import urllib.request
 
-DEFAULT_12306_TIME_URL = "https://kyfw.12306.cn/otn/resources/login.html"
+# Dynamic page: the static login.html is served by the CDN with Age > 0 and
+# would always be rejected by the cache guard below (verified 2026-09-28).
+DEFAULT_12306_TIME_URL = "https://kyfw.12306.cn/otn/leftTicket/init"
 DEFAULT_SYNC_INTERVAL_SECONDS = 300.0
 DEFAULT_BURST_WINDOW_SECONDS = 45.0
 
@@ -52,10 +54,11 @@ class ServerTimeSync:
             return self._offset_seconds
 
         try:
+            separator = "&" if "?" in self.time_url else "?"
             request = urllib.request.Request(
-                self.time_url,
+                f"{self.time_url}{separator}_={int(time.time() * 1000)}",
                 method="HEAD",
-                headers={"User-Agent": "RailWatch/1.0"},
+                headers={"User-Agent": "RailWatch/1.0", "Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
             started_wall, started_mono = time.time(), time.monotonic()
             with urllib.request.urlopen(request, timeout=5) as response:

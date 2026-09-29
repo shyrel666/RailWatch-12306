@@ -1,3 +1,4 @@
+import { RunReviews } from "./RunReviews";
 import { useEffect, useState } from "react";
 import { Button, Select } from "antd";
 import { RefreshCw } from "lucide-react";
@@ -101,5 +102,6 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
           结束本地核对（不取消官方订单）</Button> : null}
       </div> : null}
     </section> : null}
+    <RunReviews />
   </div>;
 }

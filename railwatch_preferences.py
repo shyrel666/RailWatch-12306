@@ -112,16 +112,19 @@ def load_ui_preferences(data_dir: str) -> dict:
         return {
             "theme": normalize_theme(data.get("theme", "system")),
             "close_to_tray": data.get("close_to_tray") is True,
+            "auto_rehearsal": data.get("auto_rehearsal") is True,
         }
 
 
 def save_ui_preferences(data_dir: str, patch: dict) -> dict:
-    if not isinstance(patch, dict) or set(patch) - {"theme", "close_to_tray"}:
+    if not isinstance(patch, dict) or set(patch) - {"theme", "close_to_tray", "auto_rehearsal"}:
         raise ValueError("界面偏好更新字段无效。")
     if "theme" in patch and patch["theme"] not in ("system", "light", "dark"):
         raise ValueError("主题必须为 system、light 或 dark。")
     if "close_to_tray" in patch and not isinstance(patch["close_to_tray"], bool):
         raise ValueError("关闭到托盘必须为布尔值。")
+    if "auto_rehearsal" in patch and not isinstance(patch["auto_rehearsal"], bool):
+        raise ValueError("自动彩排必须为布尔值。")
     with PREFERENCES_LOCK:
         if patch:
             existing = _read_ui_preferences(data_dir)

@@ -63,6 +63,33 @@ describe("Python runtime lifecycle", () => {
     expect(spawn).toHaveBeenCalledTimes(2);
   });
 
+  test("slow startup can become ready without killing a healthy runtime", async () => {
+    const first = child();
+    spawn.mockReturnValue(first);
+    const ready = vi.fn();
+    client.on("ready", ready);
+    client.start();
+    first.emit("spawn");
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(first.kill).not.toHaveBeenCalled();
+    first.stdout.write('{"type":"response","id":"1","ok":true,"result":{"state":{}}}\n');
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(ready).toHaveBeenCalledOnce();
+    expect(first.kill).not.toHaveBeenCalled();
+    expect(spawn).toHaveBeenCalledOnce();
+  });
+
+  test("a runtime that never becomes ready still times out and restarts", async () => {
+    const first = child(), second = child();
+    spawn.mockReturnValueOnce(first).mockReturnValueOnce(second);
+    client.start();
+    first.emit("spawn");
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(first.kill).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
   test("stopping rejects pending work and cancels scheduled restart", async () => {
     const first = child();
     spawn.mockReturnValue(first);

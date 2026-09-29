@@ -77,6 +77,7 @@ export type NotificationSettingsPatch = Partial<Omit<NotificationSettings,
 export type RailWatchPreferences = {
   theme: "system" | "light" | "dark";
   close_to_tray: boolean;
+  auto_rehearsal?: boolean;
   notification_settings: NotificationSettings;
 };
 
@@ -84,6 +85,7 @@ export type RailWatchPreferences = {
 export type PreferencesPatch = {
   theme?: RailWatchPreferences["theme"];
   close_to_tray?: boolean;
+  auto_rehearsal?: boolean;
   notification_settings?: NotificationSettingsPatch;
 };
 
@@ -432,3 +434,5 @@ export type ConfirmRequestPayload = {
 export type ExportLocation = { name: string; path: string };
 export type ExportLocations = { directory: string; fileName: string; shortcuts: ExportLocation[] };
 export type ExportDirectory = { directory: string; parent: string; folders: ExportLocation[]; files: string[] };
+
+export type { RehearsalCheck, RehearsalReport, RunReviewSummary, RunReviewDetail } from "./lib/rehearsal";

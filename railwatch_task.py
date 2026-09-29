@@ -38,6 +38,7 @@ class MonitorTask:
     started_at: float = field(default_factory=time.time)
     status: str = "preparing"
     sequence: int = 0
+    finish_recorded: bool = False
     next_query_at: float = None
     cancel: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)

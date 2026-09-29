@@ -36,6 +36,56 @@ class OrderBrowserTests(unittest.TestCase):
         self.page = OrderPage(self.driver, allow_fixture=True)
         self.intent = OrderIntent("regular", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",), "18:00")
 
+    def load_unpaid_card(self):
+        self.driver.get((Path(__file__).parent / "fixtures/regular-unpaid-order.html").resolve().as_uri())
+        self.intent = OrderIntent("regular", "G9", "2026-10-12", "北京南", "上海虹桥", "二等座", ("张三",))
+        self.js("window.orderActions=0;document.addEventListener('click',()=>window.orderActions++);")
+
+    def test_unpaid_card_reads_scoped_button_identity_and_ticket_status_without_clicking(self):
+        self.load_unpaid_card()
+        result = self.page.result(self.intent, submitted=True)
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertTrue(result.evidence["matched"])
+        self.assertEqual(result.evidence["state"], "待支付")
+        self.assertEqual(self.js("return window.orderActions"), 0)
+
+    def test_unpaid_card_still_requires_exact_saved_trip_and_order_identity(self):
+        self.load_unpaid_card()
+        for changed in (replace(self.intent, train_code="G90"), replace(self.intent, date="2026-09-28"),
+                        replace(self.intent, from_station="北京"), replace(self.intent, to_station="上海"),
+                        replace(self.intent, seat="一等座"), replace(self.intent, passengers=("李四",))):
+            with self.subTest(intent=changed):
+                self.assertEqual(self.page.result(changed, submitted=True).status, "unknown")
+        self.assertEqual(self.page.result(self.intent, known_id="E999999").status, "unknown")
+        self.assertEqual(self.page.result(self.intent, known_id="E123456").status, "pending_payment")
+
+    def test_unpaid_card_conflicting_or_missing_identity_never_confirms_an_order(self):
+        for mutation in (
+            "document.querySelector('#cancelBtn').dataset.sequence='E999999'",
+            "document.querySelector('#cancelBtn').dataset.sequence=''",
+            "document.querySelector('.order-item-hd').append('订单号：E999999')",
+            "document.querySelectorAll('[data-sequence]').forEach(e=>e.removeAttribute('data-sequence'))",
+            "document.querySelectorAll('[data-sequence]').forEach(e=>e.style.display='none')",
+        ):
+            with self.subTest(mutation=mutation):
+                self.load_unpaid_card()
+                self.js(mutation)
+                self.assertEqual(self.page.result(self.intent, submitted=True).status, "unknown")
+
+    def test_unpaid_card_cannot_borrow_another_cards_identity(self):
+        self.load_unpaid_card()
+        self.js("""document.querySelectorAll('[data-sequence]').forEach(e=>e.removeAttribute('data-sequence'));
+          document.body.insertAdjacentHTML('beforeend','<div class="order-item"><div class="order-item-ft"><a data-sequence="E999999">去支付</a></div></div>');""")
+        self.assertEqual(self.page.result(self.intent, submitted=True).status, "unknown")
+
+    def test_unpaid_card_conflicting_ticket_states_are_not_treated_as_complete(self):
+        self.load_unpaid_card()
+        self.js("""document.querySelector('.ticket-status-name').insertAdjacentHTML('afterend',
+          '<div class="ticket-status-name">已取消</div>')""")
+        result = self.page.result(self.intent, submitted=True)
+        self.assertEqual((result.status, result.order_id), ("unknown", "E123456"))
+        self.assertIn("车票状态不一致", result.reason)
+
     def js(self, script, *args):
         return self.driver.execute_script(script, *args)
 
@@ -339,8 +389,66 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(result.status, "verification")
         self.assertEqual(self.js("return fixture.regularClicks"), 0)
 
-    def test_unknown_or_nonadult_passenger_never_reaches_submit(self):
-        for label in ("张三", "张三（学生）", "张三（儿童）"):
+    def test_collapsed_passenger_rows_are_part_of_selection_safety(self):
+        for row, reason in (('<label title=张三><input type=checkbox>张三</label>', "同名"),
+                            ('<label title=李四><input type=checkbox checked>李四</label>', "折叠区")):
+            with self.subTest(reason=reason):
+                self.setUp()
+                self.js("document.getElementById('normal_passenger_id').insertAdjacentHTML('beforeend','<div style=\"display:none\">'+arguments[0]+'</div>')", row)
+                result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+                self.assertEqual(result.status, "verification")
+                self.assertIn(reason, result.reason)
+                self.assertEqual(self.js("return fixture.regularClicks"), 0)
+
+    def test_alternate_passenger_failure_keeps_specific_reason(self):
+        self.js("document.querySelector('#passenge_list label').lastChild.textContent='张三'")
+        result = self.page.alternate(self.driver.find_element("id", "candidate"), replace(self.intent, kind="alternate"))
+        self.assertEqual(result.status, "verification")
+        self.assertIn("未明确票种", result.reason)
+
+    def test_name_only_list_uses_selected_passenger_adult_ticket_readback(self):
+        from railwatch_order_page import READ_PASSENGER_CANDIDATES_JS
+        self.js("document.querySelector('#normal_passenger_id label').lastChild.textContent='张三'")
+        self.driver.find_element("id", "book").click()
+        candidates = self.driver.execute_script(READ_PASSENGER_CANDIDATES_JS)
+        self.assertEqual(candidates[0]["ticket_type"], "unknown")
+        result = self.page.regular(None, self.intent)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return fixture.regularClicks"), 1)
+        self.assertEqual(self.js("return fixture.confirmClicks"), 1)
+
+    def test_name_only_list_rejects_nonadult_or_missing_ticket_readback(self):
+        for ticket in ("学生票", "儿童票", ""):
+            with self.subTest(ticket=ticket):
+                self.setUp()
+                self.js("""const input=document.querySelector('#normal_passenger_id input');
+                  input.parentElement.lastChild.textContent='张三';
+                  const original=input.onchange;
+                  input.onchange=()=>{original();const select=el('ticketType_0');
+                    if(arguments[0]) select.options[0].textContent=arguments[0];else select.remove();};
+                """, ticket)
+                result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
+                self.assertEqual(result.status, "verification")
+                self.assertIn("成人票种", result.reason)
+                self.assertEqual(self.js("return fixture.regularClicks"), 0)
+
+    def test_name_only_alternate_list_requires_explicit_adult_evidence(self):
+        self.js("document.querySelector('#passenge_list label').lastChild.textContent='张三'")
+        result = self.page.alternate(self.driver.find_element("id", "candidate"), replace(self.intent, kind="alternate"))
+        self.assertEqual(result.status, "verification")
+        self.assertEqual(self.js("return fixture.alternateClicks"), 0)
+
+    def test_separate_name_label_does_not_borrow_blank_row_adult_ticket(self):
+        self.driver.find_element("id", "book").click()
+        self.js("""el('normal_passenger_id').innerHTML='<input id="person" type="checkbox"><label for="person">张三</label>';
+          el('normal-selected').innerHTML='<input id="passenger_name_0" value=""><select id="ticketType_0"><option>成人票</option></select>';
+        """)
+        self.assertTrue(self.page.prepare_people(self.intent))
+        self.assertFalse(self.page.verify_form(self.intent))
+        self.assertEqual(self.js("return fixture.regularClicks"), 0)
+
+    def test_nonadult_passenger_never_reaches_submit(self):
+        for label in ("张三（学生）", "张三（儿童）"):
             with self.subTest(label=label):
                 self.setUp()
                 self.js("document.querySelector('#normal_passenger_id label').lastChild.textContent=arguments[0]", label)

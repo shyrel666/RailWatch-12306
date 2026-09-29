@@ -18,6 +18,12 @@ export const RAILWATCH_COMMANDS = [
   "downloadChromeDriver",
   "openLogin",
   "checkLogin",
+  "rehearse",
+  "cancelRehearsal",
+  "rehearsalHistory",
+  "clearRehearsalHistory",
+  "runReviews",
+  "runReview",
   "analyzeQuery",
   "startMonitor",
   "stopMonitor",
@@ -81,6 +87,15 @@ export function isAllowedExternalUrl(value: unknown): value is string {
 }
 
 export function getCommandConfirmation(command: RailWatchCommandName, payload: Record<string, unknown>): ConfirmationPrompt | null {
+  if (command === "clearRehearsalHistory") {
+    return { title: "清除彩排记录", message: "清除全部本地彩排报告及其预测数据？清除后无法恢复，订单和实战复盘记录会保留。" };
+  }
+  if (command === "rehearse") {
+    const config = isRecord(payload.config) ? payload.config : payload;
+    const remaining = typeof config.sale_at === "string" ? Date.parse(config.sale_at) - Date.now() : Infinity;
+    return { title: "开始起售彩排", message: "彩排会打开 12306 乘车人页面和余票查询页，并进行 1 次查询；交易步骤只在本地断网页面中演练，不会在官方页面点击预订或提交，也不会创建订单。是否继续？"
+      + (remaining >= 0 && remaining < 900_000 ? "\n距离起售不足 15 分钟，请留意准备时间。" : "") };
+  }
   if (command === "dismissOrder") {
     return {
       title: "结束本次核对",
@@ -91,7 +106,7 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
     return {
       title: "清除本地数据",
       okText: "清除数据", danger: true,
-      message: "此操作将删除本地 RailWatch 配置、日志和 Chrome 配置。是否继续？",
+      message: "将关闭 RailWatch 受控浏览器，并删除本地配置、登录信息、订单与复盘记录、日志和下载的驱动。不会取消官方订单。是否继续？",
     };
   }
   if (command === "closeBrowser") {

@@ -10,6 +10,7 @@ import { queryConfig, querySnapshot } from "../test/queryFixtures";
 
 function resetStore() {
   railwatchStore.setState({
+    rehearsalEnabled: false,
     runtime: { ...defaultRuntimeInfo, state: { ...defaultStatus } },
     status: { ...defaultStatus },
     config: { ...defaultConfig, train_code: "G101" },
@@ -34,6 +35,45 @@ function resetStore() {
 describe("MonitorPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
+
+  test("rehearsal is hidden until enabled and disappears when disabled", () => {
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.queryByRole("region", { name: "起售彩排" })).toBeNull();
+    act(() => railwatchStore.getState().setRehearsalEnabled(true));
+    expect(screen.getByRole("region", { name: "起售彩排" })).toBeTruthy();
+    act(() => railwatchStore.getState().setRehearsalEnabled(false));
+    expect(screen.queryByRole("region", { name: "起售彩排" })).toBeNull();
+  });
+
+  test("explains an unrestricted seat before starting automation and recovers after selection", async () => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ config: { ...defaultConfig, date: todayIso(), train_code: "G9",
+      passengers: "测试乘客", auto_submit: true, seat_keyword: "" } });
+    render(<MonitorPage busy={null} runCommand={runCommand} />);
+    expect(screen.getByText("自动化配置待完善")).toBeTruthy();
+    expect(screen.getByText(/请选择明确席别/)).toBeTruthy();
+    expect(screen.queryByText("行程已配置，可启动监控")).toBeNull();
+    const start = screen.getByRole("button", { name: /启动监控/ }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    await userEvent.click(start);
+    expect(runCommand).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "完善自动化配置" }));
+    expect(railwatchStore.getState().pageSection).toBe("trip-basics");
+    act(() => railwatchStore.getState().setConfig({ seat_keyword: "二等座" }));
+    expect(start.disabled).toBe(false);
+    expect(screen.queryByText("自动化配置待完善")).toBeNull();
+    await userEvent.click(start);
+    expect(runCommand).toHaveBeenCalledWith("startMonitor", expect.objectContaining({
+      config: expect.objectContaining({ seat_keyword: "二等座", auto_submit: true }),
+    }));
+  });
+
+  test("allows unrestricted seats for monitoring without automation", () => {
+    railwatchStore.setState({ config: { ...defaultConfig, date: todayIso(), seat_keyword: "",
+      train_code: "", passengers: "", auto_submit: false, auto_alternate: false } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect((screen.getByRole("button", { name: /启动监控/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
 
   test("running route results cannot be applied to a different next-run draft route", () => {
     const snapshot = querySnapshot();

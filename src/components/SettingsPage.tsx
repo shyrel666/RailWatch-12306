@@ -32,6 +32,9 @@ export function SettingsPage({
   const loginReady = useRailWatchStore((state) => state.status.login_ready);
   const [checkingLogin, setCheckingLogin] = useState(false);
   const [loginResult, setLoginResult] = useState<{ ready: boolean; message: string } | null>(null);
+  const autoRehearsal = useRailWatchStore(state => state.rehearsalEnabled);
+  const setAutoRehearsal = useRailWatchStore(state => state.setRehearsalEnabled);
+  const [rehearsalSaving, setRehearsalSaving] = useState(false);
   const [closeToTray, setCloseToTray] = useState(false);
   const [traySaving, setTraySaving] = useState(false);
   const [trayReady, setTrayReady] = useState(false);
@@ -39,10 +42,10 @@ export function SettingsPage({
   useEffect(() => {
     let alive = true;
     void railwatchApi.command<RailWatchPreferences>("loadPreferences").then((value) => {
-      if (alive) { setCloseToTray(value.close_to_tray === true); setTrayReady(true); }
+      if (alive) { setCloseToTray(value.close_to_tray === true); setAutoRehearsal(value.auto_rehearsal === true); setTrayReady(true); }
     }).catch((error) => { if (alive) setTrayError(error instanceof Error ? error.message : "无法加载关闭偏好。"); });
     return () => { alive = false; };
-  }, []);
+  }, [setAutoRehearsal]);
   const saveTrayPreference = async (next: boolean) => {
     setTraySaving(true);
     setTrayError("");
@@ -126,6 +129,12 @@ export function SettingsPage({
           <Switch aria-label="关闭到托盘" checked={closeToTray} disabled={!trayReady || traySaving} loading={traySaving} onChange={(next) => void saveTrayPreference(next)} />
         </div>
       </section>
+      <section className="settings-section"><div className="setting-row"><div><strong>启用起售彩排</strong>
+        <p>定时任务开始等待前，仅在距起售超过 15 分钟时自动彩排。</p></div>
+        <Switch aria-label="启用起售彩排" checked={autoRehearsal} disabled={!trayReady || rehearsalSaving} loading={rehearsalSaving}
+          onChange={next => { setRehearsalSaving(true); void railwatchApi.command<RailWatchPreferences>("savePreferences", { auto_rehearsal: next })
+            .then(saved => { if (saved.auto_rehearsal !== next) throw new Error("彩排偏好未保存"); setAutoRehearsal(saved.auto_rehearsal === true); setTrayError(""); })
+            .catch(() => setTrayError("自动彩排偏好未保存，请重试。" )).finally(() => setRehearsalSaving(false)); }} /></div></section>
       <NotificationSettingsPanel />
       <section
         className="settings-section"
@@ -237,7 +246,7 @@ export function SettingsPage({
         <div className="setting-row">
           <div>
             <strong>清除数据</strong>
-            <p>删除本地缓存与配置文件，操作无法撤销。</p>
+            <p>关闭受控浏览器，删除本地配置、登录信息和历史记录；不会取消官方订单。</p>
           </div>
           <Button
             danger
