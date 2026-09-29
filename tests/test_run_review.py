@@ -11,6 +11,28 @@ def event(sequence, stage, at, detail=None):
 
 
 class RunReviewTests(unittest.TestCase):
+    def test_order_breakdown_is_separate_from_totals_and_legacy_records_stay_empty(self):
+        before = [event(1, "inventory_found", 0), event(2, "regular_submit", 7)]
+        legacy = build_run_review(before)
+        steps = [{"id": "page_load", "start_ms": 0, "duration_ms": 6000},
+                 {"id": "passengers", "start_ms": 6000, "duration_ms": 1000}]
+        review = build_run_review(before + [event(3, "order_timing", 8, {"kind": "regular", "steps": steps})])
+        self.assertEqual(review["segments"], legacy["segments"])
+        self.assertEqual(review["conclusion"], legacy["conclusion"])
+        self.assertEqual(legacy["order_timings"], [])
+        self.assertEqual(review["order_timings"][0]["segments"][0]["label"], "打开并等待下单页")
+        self.assertEqual(sum(s["duration_ms"] for s in review["order_timings"][0]["segments"]), 7000)
+
+    def test_separate_attempts_and_invalid_order_timing_values(self):
+        valid = {"id": "page_load", "start_ms": 0, "duration_ms": 1000}
+        invalid = [None, {}, {**valid, "id": "private"}, {**valid, "duration_ms": float("nan")},
+                   {**valid, "start_ms": -1}, {**valid, "duration_ms": True}]
+        events = [event(1, "order_timing", 1, {"kind": "regular", "steps": invalid + [valid]}),
+                  event(2, "order_timing", 2, {"kind": "alternate", "steps": [valid]})]
+        groups = build_run_review(events)["order_timings"]
+        self.assertEqual([group["kind"] for group in groups], ["regular", "alternate"])
+        self.assertEqual([len(group["segments"]) for group in groups], [1, 1])
+
     def test_regular_segments_and_missing_evidence(self):
         events = [event(1, "target_sale", 0, {"target_at": 1020}), event(2, "prepared", 1),
                   event(3, "scheduler_wake", 20.01, {"late_ms": 10}), event(4, "query_click", 20.02),

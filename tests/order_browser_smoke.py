@@ -5,12 +5,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import tempfile
 import unittest
 from dataclasses import replace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from railwatch_bridge import CHROMEDRIVER_PATH
 from railwatch_order_page import OrderPage, ConfirmationOutcome
-from railwatch_orders import OrderIntent
+from railwatch_orders import OrderIntent, OrderJournal
+from railwatch_task import MonitorTask, guard_browser
+from selenium.webdriver.remote.command import Command
 from railwatch_submit_flow import SubmitFlow
 
 
@@ -83,7 +85,7 @@ class OrderBrowserTests(unittest.TestCase):
         self.js("""document.querySelector('.ticket-status-name').insertAdjacentHTML('afterend',
           '<div class="ticket-status-name">已取消</div>')""")
         result = self.page.result(self.intent, submitted=True)
-        self.assertEqual((result.status, result.order_id), ("unknown", "E123456"))
+        self.assertEqual((result.status, result.order_id), ("unknown", ""))
         self.assertIn("车票状态不一致", result.reason)
 
     def js(self, script, *args):
@@ -141,6 +143,8 @@ class OrderBrowserTests(unittest.TestCase):
                 self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
 
     def test_official_processing_dialog_waits_for_matching_order(self):
+        self.page.RESULT_UNKNOWN_TIMEOUT = 0.2
+        self.page.RESULT_POLL_INTERVAL = 0.05
         self.js("""
           const submit=el('submitOrder_id').onclick;
           el('submitOrder_id').onclick=()=>{
@@ -180,6 +184,27 @@ class OrderBrowserTests(unittest.TestCase):
         self.js("el('records').insertAdjacentHTML('beforeend','<p>订单号：E999999</p>')")
         self.assertEqual(self.page.result(self.intent).status, "unknown")
 
+    def test_alternate_queue_and_payment_navigation_wait_without_resubmitting(self):
+        self.page.RESULT_UNKNOWN_TIMEOUT = 0.4
+        self.page.RESULT_POLL_INTERVAL = 0.05
+        self.js("""
+          el('toPayBtn').onclick=e=>{
+            e.preventDefault();
+            fixture.alternateClicks++;
+            el('dialog').innerHTML='<div class="order-queue">订单处理中，请稍候</div>';
+            show('dialog');
+            setTimeout(()=>el('dialog').classList.add('hidden'),1000);
+            setTimeout(()=>record(),1200);
+          };
+        """)
+        self.page.reconcile = Mock()
+        result = self.page.alternate(self.driver.find_element("id", "candidate"),
+                                     replace(self.intent, kind="alternate"))
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertEqual(self.js("return fixture.alternateClicks"), 1)
+        self.assertIn("orders.html", self.driver.current_url)
+        self.page.reconcile.assert_not_called()
+
     def test_official_queue_and_hidden_dialogs_are_not_unknown_prompts(self):
         for title in ("订单已经提交，系统正在处理中，请稍等。", "订单已经提交，预计等待时间超过30分钟，请耐心等待。", "订单已经提交，最新预估等待时间10秒，请耐心等待。"):
             self.js("""el('dialog').innerHTML='<i id="iamge_status_id" class="icon i-queue"></i><div id="orderResultInfo_id"><div class="tit"></div></div>';show('dialog');document.querySelector('.tit').textContent=arguments[0];""", title)
@@ -214,6 +239,7 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(self.js("return [fixture.regularClicks,fixture.nativeConfirmClicks,fixture.confirmClicks]"), [1, 1, 1])
 
     def test_official_disabled_anchor_never_receives_a_confirmation_click(self):
+        self.page.RESULT_UNKNOWN_TIMEOUT = 0.2
         self.js("""
           const submit=el('submitOrder_id').onclick;
           fixture.nativeConfirmClicks=0;
@@ -226,8 +252,8 @@ class OrderBrowserTests(unittest.TestCase):
           };
         """)
         original_poll = self.page.poll
-        self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
-            predicate, min(timeout, 0.2), ignore_stop=ignore_stop)
+        self.page.poll = lambda predicate, timeout=10: original_poll(
+            predicate, min(timeout, 0.2))
         self.page.regular(self.driver.find_element("id", "book"), self.intent)
         self.assertEqual(self.js("return [fixture.regularClicks,fixture.nativeConfirmClicks,fixture.confirmClicks]"), [1, 0, 0])
 
@@ -566,10 +592,11 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
 
     def test_timeout_or_stop_after_submit_never_replays_or_reports_sold_out(self):
+        self.page.RESULT_UNKNOWN_TIMEOUT = 0.2
         self.js("fixture.mode='timeout'")
         original_poll = self.page.poll
-        self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
-            predicate, min(timeout, 0.2), ignore_stop=ignore_stop)
+        self.page.poll = lambda predicate, timeout=10: original_poll(
+            predicate, min(timeout, 0.2))
         result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
         self.assertEqual(result.status, "unknown")
         self.assertFalse(result.can_fallback)
@@ -578,13 +605,12 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(self.page.wait_result(self.intent).status, "unknown")
         self.assertEqual(self.js("return fixture.regularClicks"), 1)
 
-    def test_stop_request_between_submit_and_confirm_still_completes_submission(self):
-        # 抢票语义：提交已在途，停止请求不得放弃已到场的官方确认弹窗。
+    def test_stop_request_between_submit_and_confirm_preserves_without_confirming(self):
         state = {"stopped": False}
         self.page.stop = lambda: state["stopped"]
         original_poll = self.page.poll
-        self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
-            predicate, min(timeout, 0.2), ignore_stop=ignore_stop)
+        self.page.poll = lambda predicate, timeout=10: original_poll(
+            predicate, min(timeout, 0.2))
         original_button = self.page.button
         def button(selectors):
             found = original_button(selectors)
@@ -598,15 +624,15 @@ class OrderBrowserTests(unittest.TestCase):
         messages = []
         self.page.log = messages.append
         result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
-        self.assertEqual(result.status, "pending_payment")
-        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
-        self.assertTrue(any("仍完成本次确认" in message for message in messages))
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 0])
+        self.assertIn("已停止后续操作", result.reason)
 
     def test_swallowed_native_click_dispatches_confirmation_automatically(self):
         self.js("fixture.mode='normal'")
         original_poll = self.page.poll
-        self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
-            predicate, min(timeout, 0.2), ignore_stop=ignore_stop)
+        self.page.poll = lambda predicate, timeout=10: original_poll(
+            predicate, min(timeout, 0.2))
         original_button = self.page.button
         def button(selectors):
             found = original_button(selectors)
@@ -623,6 +649,7 @@ class OrderBrowserTests(unittest.TestCase):
         self.page.reconcile.assert_not_called()
 
     def test_delivered_click_without_order_is_not_dispatched_again(self):
+        self.page.RESULT_UNKNOWN_TIMEOUT = 0.2
         self.js("""
           const submit=el('submitOrder_id').onclick;
           el('submitOrder_id').onclick=()=>{
@@ -631,8 +658,8 @@ class OrderBrowserTests(unittest.TestCase):
           };
         """)
         original_poll = self.page.poll
-        self.page.poll = lambda predicate, timeout=10, ignore_stop=False: original_poll(
-            predicate, min(timeout, 0.2), ignore_stop=ignore_stop)
+        self.page.poll = lambda predicate, timeout=10: original_poll(
+            predicate, min(timeout, 0.2))
         result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
         self.assertEqual(result.status, "verification")
         self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
@@ -642,6 +669,169 @@ class OrderBrowserTests(unittest.TestCase):
         result = self.page.alternate(self.driver.find_element("id", "candidate"), replace(self.intent, kind="alternate", deadline="开车前60分钟"))
         self.assertEqual(result.status, "pending_payment")
         self.assertEqual(self.js("return document.getElementById('dafaultTime').innerText"), "开车前1小时")
+
+    def test_official_adult_metadata_and_icheck_label_are_supported(self):
+        self.driver.find_element("id", "candidate").click()
+        self.js("""
+          const input=document.querySelector('#passenge_list input'), label=input.closest('label');
+          label.lastChild.textContent='张三';
+          input.setAttribute('passengerInfo','1#张三#1#PRIVATE_DOCUMENT#false#0#PRIVATE_TOKEN#');
+          // Reproduce iCheck: input clicks are cancelled, label clicks toggle.
+          input.addEventListener('click',e=>e.preventDefault());
+          label.addEventListener('click',e=>{if(e.target===label){e.preventDefault();
+            input.checked=!input.checked;input.dispatchEvent(new Event('change',{bubbles:true}));}});
+        """)
+        target = replace(self.intent, kind="alternate")
+        self.assertTrue(self.page.prepare_people(target), self.page._people_error)
+        self.assertTrue(self.page.verify_form(target))
+        self.assertNotIn("PRIVATE", self.page._people_error)
+        self.assertEqual(self.js("return fixture.alternateClicks"), 0)
+
+    def test_candidate_metadata_missing_conflicting_or_nonadult_never_selects(self):
+        cases = [(None, '张三'), ('1#张三#1', '张三'), ('4#张三#1#redacted', '张三'),
+                 ('1#张三丰#1#redacted', '张三'), ('2#张三#1#redacted', '张三'),
+                 ('3#张三#1#redacted', '张三'), ('1#张三#1#redacted', '张三（学生）'),
+                 ('2#张三#1#redacted', '张三（成人）')]
+        for metadata, text in cases:
+            with self.subTest(metadata=metadata, text=text):
+                self.setUp()
+                self.driver.find_element('id', 'candidate').click()
+                self.js("""const input=document.querySelector('#passenge_list input');
+                  input.closest('label').lastChild.textContent=arguments[1];
+                  if(arguments[0]!==null)input.setAttribute('passengerInfo',arguments[0]);
+                """, metadata, text)
+                self.assertFalse(self.page.prepare_people(replace(self.intent, kind='alternate')))
+                self.assertEqual(self.js("return document.querySelectorAll('#passenge_list input:checked').length"), 0)
+                self.assertEqual(self.js('return fixture.alternateClicks'), 0)
+
+    def load_candidate_payment_card(self):
+        self.driver.get((Path(__file__).parent / 'fixtures/candidate-unpaid-order.html').resolve().as_uri())
+        self.intent = replace(self.intent, kind='alternate')
+
+    def test_candidate_countdown_recognizes_payment_without_clicking(self):
+        self.load_candidate_payment_card()
+        result = self.page.result(self.intent, submitted=True)
+        self.assertEqual((result.status, result.order_id), ('pending_payment', 'E123456'))
+        self.assertTrue(result.evidence['matched'])
+        self.assertEqual(self.js('return paymentClicks'), 0)
+        for target in (replace(self.intent, train_code='G102'), replace(self.intent, passengers=('李四',)),
+                       replace(self.intent, seat='一等座'), replace(self.intent, date='2026-09-11')):
+            self.assertEqual(self.page.result(target, submitted=True).status, 'unknown')
+        self.assertEqual(self.page.result(self.intent, known_id='ANOTHER').status, 'unknown')
+
+    def test_countdown_exception_is_scoped_to_visible_official_candidate_control(self):
+        for change in ("document.querySelector('.pay_order').className=''",
+                       "document.querySelector('.pay_order').style.display='none'",
+                       "document.querySelector('.pay_order').textContent='支付成功(36分58秒)'",
+                       "document.querySelector('#J-payment-showTime').textContent='未知'",
+                       "document.querySelector('.order-item-hd').textContent='订单号：E123456'"):
+            with self.subTest(change=change):
+                self.load_candidate_payment_card()
+                self.js(change)
+                self.assertEqual(self.page.result(self.intent, submitted=True).status, 'unknown')
+                self.assertEqual(self.js('return paymentClicks'), 0)
+
+    def test_countdown_cannot_borrow_payment_from_another_order(self):
+        self.load_candidate_payment_card()
+        self.js("""const card=document.querySelector('.order-item'),other=card.cloneNode(true);
+          other.querySelector('.order-item-hd').textContent='候补单号：OTHER';
+          card.querySelector('.pay_order').remove();document.body.append(other);""")
+        self.assertEqual(self.page.result(self.intent, known_id='E123456').status, 'unknown')
+        self.assertEqual(self.js('return paymentClicks'), 0)
+
+    def recover_on_local_tabs(self, kind='regular', target=1, state='已支付', order='E123456', known='E123456', mutate=''):
+        self.driver.get('about:blank')
+        navigate = self.driver.get
+        self.page.RECOVERY_TAB_TIMEOUT = .15
+        def load(_url):
+            navigate((Path(__file__).parent / 'fixtures/order-recovery.html').resolve().as_uri())
+            self.js('configure(arguments[0],arguments[1],arguments[2],arguments[3])', kind, target, state, order)
+            if mutate:
+                self.js(mutate)
+        with patch.object(self.driver, 'get', side_effect=load) as navigation:
+            result = self.page.reconcile(replace(self.intent, kind=kind), known_id=known, navigate=True)
+        self.assertEqual(navigation.call_count, 1)
+        return result
+
+    def test_known_orders_recover_across_read_only_tabs(self):
+        for kind, index, state, expected, clicks in (
+                ('regular', 1, '已支付', 'fulfilled', ['未出行订单']),
+                ('regular', 2, '已取消', 'cancelled', ['未出行订单','历史订单']),
+                ('alternate', 1, '待兑现', 'active', ['待兑现订单']),
+                ('alternate', 2, '兑现成功', 'fulfilled', ['待兑现订单','已处理订单'])):
+            with self.subTest(kind=kind, state=state):
+                result = self.recover_on_local_tabs(kind, index, state)
+                self.assertEqual((result.status,result.order_id), (expected,'E123456'))
+                self.assertEqual(self.js('return tabClicks'), clicks)
+
+    def test_recovery_requires_bound_identity_and_rejects_wrong_or_ambiguous_tabs(self):
+        result = self.recover_on_local_tabs(known='')
+        self.assertEqual(result.status, 'unknown')
+        self.assertEqual(self.js('return tabClicks'), [])
+        result = self.recover_on_local_tabs(order='OTHER')
+        self.assertEqual(result.status, 'unknown')
+        self.assertEqual(self.js('return tabClicks'), ['未出行订单','历史订单'])
+        result = self.recover_on_local_tabs(mutate="document.querySelector('.tab-hd-list').append(document.querySelectorAll('.tab-hd-list li')[1].cloneNode(true))")
+        self.assertEqual(result.status, 'unknown')
+        self.assertEqual(self.js('return tabClicks'), [])
+
+    def test_recovery_keeps_current_official_queue_or_confirmation(self):
+        for marker in ('confirmation', 'processing'):
+            with self.subTest(marker=marker), patch.object(self.page, 'snapshot', return_value={marker:True}), patch.object(self.driver, 'get') as navigation:
+                result = self.page.reconcile(self.intent, known_id='E123456', navigate=True)
+                self.assertEqual(result.status,'unknown')
+                navigation.assert_not_called()
+
+    def test_real_cancel_guard_preserves_submitted_intent_and_never_replays(self):
+        for stop_at, expected_confirm in (('#submitOrder_id', 0), ('#qr_submit_id', 1), ('#toPayBtn', 0)):
+            with self.subTest(stop_at=stop_at), tempfile.TemporaryDirectory() as directory:
+                self.setUp()
+                alternate = stop_at == '#toPayBtn'
+                if alternate:
+                    self.intent = replace(self.intent, kind='alternate')
+                journal = OrderJournal(Path(directory) / 'orders.sqlite3')
+                task = MonitorTask({})
+                journal.begin(task.run_id, self.intent, {})
+                self.page.mark = lambda stage, detail=None: journal.mark(task.run_id, stage, self.intent.intent_id, detail)
+                self.page.stop = task.cancel.is_set
+                find_button = self.page.button
+                cancel_id = [None]
+                def button(selectors):
+                    element = find_button(selectors)
+                    if element is not None and selectors == (stop_at,):
+                        cancel_id[0] = element.id
+                    return element
+                self.page.button = button
+                book = self.driver.find_element('id','candidate' if alternate else 'book')
+                execute = self.driver.execute
+                def cancel_after_click(command, params=None):
+                    value = execute(command, params)
+                    if command == Command.CLICK_ELEMENT and (params or {}).get('id') == cancel_id[0]:
+                        task.cancel.set()
+                    return value
+                self.driver.execute = cancel_after_click
+                try:
+                    with guard_browser(self.driver, task, lambda: None):
+                        result = self.page.alternate(book, self.intent) if alternate else self.page.regular(book, self.intent)
+                finally:
+                    self.driver.execute = execute
+                self.assertEqual(result.status, 'unknown')
+                journal.record(self.intent, result)
+                self.assertEqual(OrderJournal(journal.filename).pending()['result']['status'], 'unknown')
+                self.assertFalse(journal.claim_resume('resume', self.intent.intent_id))
+                self.assertEqual(self.js('return [fixture.regularClicks,fixture.confirmClicks,fixture.alternateClicks]'),
+                                 [0 if alternate else 1,expected_confirm,1 if alternate else 0])
+                if expected_confirm or alternate:
+                    reconciled = OrderPage(self.driver, allow_fixture=True).result(self.intent, submitted=True)
+                    self.assertEqual(reconciled.status, 'pending_payment')
+
+    def test_stop_before_submission_does_not_open_booking_form(self):
+        self.page.stop = lambda: True
+        result = self.page.regular(self.driver.find_element('id','book'), self.intent)
+        self.assertEqual(result.status,'not_submitted')
+        self.assertTrue(result.no_order)
+        self.assertFalse(self.page.snapshot()['formReady'])
+        self.assertEqual(self.js('return [fixture.regularClicks,fixture.confirmClicks]'), [0,0])
 
 
 if __name__ == "__main__":

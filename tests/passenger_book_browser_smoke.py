@@ -9,7 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from railwatch_bridge import CHROMEDRIVER_PATH
+from railwatch_bridge import CHROMEDRIVER_PATH, RailWatchBridge
 from railwatch_order_page import READ_PASSENGER_BOOK_JS
 
 
@@ -94,6 +94,44 @@ class PassengerBookBrowserTests(unittest.TestCase):
         result = self.read()
         self.assertEqual(result["items"][1]["identity_hint"], "11***99")
         self.assertNotIn("110000200001019999", json.dumps(result))
+
+    def test_import_opens_its_own_tab_reads_all_pages_and_restores_original(self):
+        from railwatch_rehearsal_checks import PASSENGERS_URL
+        driver = self.driver
+        original = driver.current_window_handle
+        original_url = driver.current_url
+        original_handles = driver.window_handles
+        original_timeout = driver.timeouts.page_load
+        driver.execute_script("document.querySelector('#_search_name').value='保留原页面输入'")
+        fixture_url = (Path(__file__).parent / "fixtures/passengers-page.html").resolve().as_uri()
+
+        class LocalPassengerBrowser:
+            @property
+            def current_url(self):
+                return PASSENGERS_URL if driver.current_url == fixture_url else driver.current_url
+
+            def get(self, url):
+                assert url == PASSENGERS_URL
+                assert driver.current_window_handle != original
+                driver.get(fixture_url)
+                driver.execute_script("fixture.pages=[[{name:'测试乙',type:'1',status:'已通过'}],"
+                                      "[{name:'测试乙',type:'1',status:'已通过'}]];render()")
+
+            def __getattr__(self, key):
+                return getattr(driver, key)
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            bridge = RailWatchBridge(data_dir=data_dir)
+            bridge.driver = LocalPassengerBrowser()
+            result = bridge.read_passengers()
+        self.assertIsNone(result["warning"])
+        self.assertEqual(len(result["items"]), 2)
+        self.assertTrue(all(item["ambiguous"] for item in result["items"]))
+        self.assertEqual(driver.current_window_handle, original)
+        self.assertEqual(driver.current_url, original_url)
+        self.assertEqual(driver.window_handles, original_handles)
+        self.assertEqual(driver.timeouts.page_load, original_timeout)
+        self.assertEqual(driver.execute_script("return document.querySelector('#_search_name').value"), "保留原页面输入")
 
     def test_blocking_is_tab_scoped_and_restores_original_on_error(self):
         requests = []

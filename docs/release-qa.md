@@ -7,8 +7,8 @@
 - `npm run test`
 - `python -m unittest discover -s tests -p "test_*.py"`
 - `npm run build`
-- `.\package-windows.cmd 0.5.0`
-- 仅在依赖缺失或需要重装时使用 `.\package-windows.cmd 0.5.0 --install-deps`
+- `.\package-windows.cmd 0.5.3`
+- 仅在依赖缺失或需要重装时使用 `.\package-windows.cmd 0.5.3 --install-deps`
 - 启动 `release/win-unpacked/RailWatch 12306.exe`，确认窗口、React renderer、preload API 和 Python runtime 都能启动。
 - 发布时只上传同一次构建生成的 `release/*.exe`、`release/*.blockmap` 和 `release/latest.yml`。
 

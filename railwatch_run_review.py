@@ -6,6 +6,32 @@ LABELS = {"wake": "唤醒迟到", "first_query": "首次查询", "query": "查�
           "readback": "下单页与核对", "confirm": "确认弹窗", "official": "官方处理",
           "alternate_open": "候补路径准备", "alternate_submit": "候补核对", "alternate_official": "候补处理"}
 
+ORDER_STEP_LABELS = {"page_load": "打开并等待下单页", "passengers": "选择乘车人",
+                     "seats": "选择席别", "deadline": "选择候补截止时间", "readback": "提交前核对",
+                     "submit": "提交操作", "confirmation_wait": "等待确认弹窗",
+                     "confirmation_action": "操作确认弹窗", "result_wait": "等待并核对订单结果"}
+
+
+def order_timing_details(events):
+    groups = []
+    for event in events:
+        if event["stage"] != "order_timing":
+            continue
+        detail = event["detail"]
+        if detail.get("kind") not in ("regular", "alternate"):
+            continue
+        segments = []
+        for step in detail.get("steps", []):
+            if not isinstance(step, dict) or step.get("id") not in ORDER_STEP_LABELS:
+                continue
+            if any(type(step.get(key)) not in (int, float) or not math.isfinite(step[key]) or step[key] < 0
+                   for key in ("start_ms", "duration_ms")):
+                continue
+            segments.append({**step, "label": ORDER_STEP_LABELS[step["id"]], "source": "本机观察"})
+        if segments:
+            groups.append({"kind": detail["kind"], "segments": segments})
+    return groups
+
 
 def duration(start, end):
     if not start or not end or end["sequence"] <= start["sequence"]:
@@ -107,6 +133,7 @@ def build_run_review(events, report=None):
     return {"run_id": (target or (ordered[0] if ordered else {})).get("run_id", ""), "target_at": target_at,
             "trip": (target or {}).get("detail", {}).get("trip", (report or {}).get("trip", {})), "conclusion": conclusion,
             "segments": segments, "slowest": max(known, key=lambda s: s["duration_ms"])["label"] if known else None,
+            "order_timings": order_timing_details(ordered),
             "preparation_margin_ms": margin, "query_median_ms": median(rounds) if rounds and first_known else None,
             "history_complete": all(s["duration_ms"] is not None for s in segments),
             "note": "未记录的阶段不推测补齐；可能未命中、未执行对应路径，或查询遥测已按 20,000 条上限清理。官方处理为本机观察时间。",

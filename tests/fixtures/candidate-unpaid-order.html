@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>Sanitized official waitlist payment card</title>
+<!-- Structural fixture from the public lineUp_order.html template (2026-09-29).
+     All journey, identity and order values are invented. No network resources. -->
+<div class="order-item">
+  <div class="order-item-hd">
+    <div class="order-hd-info"><span class="txt-light">候补单号：</span>E123456</div>
+    <div class="order-hd-info"><span class="txt-light">下单日期：</span>2026-09-01</div>
+  </div>
+  <div class="order-item-bd order-item-bd-houbu">
+    <p>G101 2026-09-10 北京 上海 二等座</p>
+    <div class="passenger-name"><strong title="张三">张三</strong></div>
+    <div class="order-item-ft-houbu">
+      <a href="#" class="btn btn-primary pay_order">继续支付(<span class="txt-lightest" id="J-payment-showTime">36分58秒</span>)</a>
+    </div>
+  </div>
+</div>
+<script>window.paymentClicks=0;document.querySelector('.pay_order').onclick=e=>{e.preventDefault();paymentClicks++;};</script>

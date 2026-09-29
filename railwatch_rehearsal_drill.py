@@ -147,12 +147,13 @@ function selected(area,target,regular){
  if(regular){const seat=make('select');seat.id='seatType_'+i;seat.append(make('option',data.seat+'（1.00元）'));const type=make('select');type.id='ticketType_'+i;type.append(make('option','成人票'));el(target).append(seat,type);}});
 }
 for(const [area,target,regular] of [['normal_passenger_id','normal-selected',true],['passenge_list','candidate-selected',false]]){
- for(const name of data.passengers){const l=make('label',name+'（成人）');l.title=name;const input=make('input');input.type='checkbox';if(!regular)input.className='chose-pass-dom';l.prepend(input);input.onchange=()=>selected(area,target,regular);el(area).append(l);}
+ for(const name of data.passengers){const l=make('label',name+(regular?'（成人）':''));l.title=name;const input=make('input');input.type='checkbox';if(!regular){input.className='chose-pass-dom';input.setAttribute('passengerInfo','1#'+name+'#1#FIXTURE#false#0#FIXTURE#');}l.prepend(input);input.onchange=()=>selected(area,target,regular);el(area).append(l);}
 }
 el('book').onclick=()=>show('regular');el('candidate').onclick=()=>{fixture.kind='alternate';show('candidate-form');};
 function record(){
  for(const id of ['regular','candidate-form','dialog'])el(id).classList.add('hidden');
- const item=make('div',undefined,'order-item');const heading=make('div',(fixture.kind==='alternate'?'候补单号':'订单号')+'：E123456 ','order-item-hd');heading.append(make('span','待支付','order-status'));item.append(heading,make('p',`${data.train_code} ${data.date} ${data.from_station} ${data.to_station} ${data.seat}`));
+ const item=make('div',undefined,'order-item');const heading=make('div',(fixture.kind==='alternate'?'候补单号':'订单号')+'：E123456 ','order-item-hd');if(fixture.kind==='regular')heading.append(make('span','待支付','order-status'));item.append(heading,make('p',`${data.train_code} ${data.date} ${data.from_station} ${data.to_station} ${data.seat}`));
+ if(fixture.kind==='alternate'){const pay=make('a',undefined,'btn btn-primary pay_order'),clock=make('span','36分58秒','txt-lightest');clock.id='J-payment-showTime';pay.append('继续支付(',clock,')');item.append(pay);}
  for(const name of data.passengers){const p=make('div',undefined,'passenger-name'),n=make('strong',name);n.title=name;p.append(n);item.append(p);}el('records').replaceChildren(item);
 }
 el('submitOrder_id').onclick=()=>{fixture.regularClicks++;el('dialog').replaceChildren();const a=make('a','本地确认','btn92s');a.id='qr_submit_id';a.href='javascript:;';

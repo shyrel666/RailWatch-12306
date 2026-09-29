@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>Offline read-only order recovery</title>
+<div class="panel-tab">
+  <div class="tab-hd"><ul class="tab-hd-list">
+    <li class="active"><a href="#">未完成订单</a></li>
+    <li><a href="#">未出行订单</a></li>
+    <li><a href="#">历史订单</a></li>
+  </ul></div>
+  <div class="tab-bd">
+    <div class="tab-item">暂无待支付订单</div>
+    <div class="tab-item" style="display:none"></div>
+    <div class="tab-item" style="display:none"></div>
+  </div>
+</div>
+<script>
+window.tabClicks=[];
+window.configure=(kind='regular',target=1,state='已支付',order='E123456')=>{
+ document.querySelectorAll('.tab-item').forEach((panel,i)=>panel.textContent=i===0?'暂无待支付订单':'暂无订单');
+ const labels=kind==='alternate'?['待支付订单','待兑现订单','已处理订单']:['未完成订单','未出行订单','历史订单'];
+ document.querySelectorAll('.tab-hd-list a').forEach((link,i)=>{
+  link.textContent=labels[i];link.onclick=e=>{
+   e.preventDefault();tabClicks.push(labels[i]);
+   document.querySelectorAll('.tab-item').forEach((panel,j)=>panel.style.display=i===j?'block':'none');
+   document.querySelectorAll('.tab-hd-list li').forEach((li,j)=>li.classList.toggle('active',i===j));
+  };
+ });
+ document.querySelectorAll('.tab-item')[target].innerHTML=`<div class="order-item"><div class="order-item-hd">${kind==='alternate'?'候补单号':'订单号'}：${order} <span class="order-status">${state}</span></div><p>G101 2026-09-10 北京 上海 二等座</p><div class="passenger-name"><strong title="张三">张三</strong></div></div>`;
+};
+configure();
+</script>

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import time
 from dataclasses import replace
 from urllib.parse import urlparse
@@ -79,10 +80,8 @@ def check_passengers(config, book):
             elif verification != "passed":
                 status, message = "warn", "身份状态需按证件情况人工核对，未认定为官方拒绝购票"
             elif kind != "adult":
-                # The account holder's row never exposes a ticket type on the
-                # official page; that is a known display gap, not a risk. The
-                # order page still re-reads the type before submitting.
-                message = "本人行官方页面不显示票种，视为成人；下单页或候补页仍会按原规则核对"
+                status = "warn"
+                message = "官方列表未提供票种证据；须在下单页或候补页核对成人票，彩排不能确认"
             saved = selections.get(name, {}).get("identity_hint")
             actual = person.get("identity_hint")
             if saved and actual and saved != actual:
@@ -106,8 +105,13 @@ def read_passenger_book(driver, cancel):
         while True:
             if cancel.is_set():
                 raise TaskCancelled()
+            current = urlparse(driver.current_url)
+            if "login" in current.path.lower():
+                return {"complete": False, "items": items, "reason": "login_required"}
+            if current.scheme != "https" or current.netloc != "kyfw.12306.cn" or current.path != "/otn/view/passengers.html":
+                return {"complete": False, "items": items, "reason": "unexpected_page"}
             book = driver.execute_script(READ_PASSENGER_BOOK_JS)
-            if book.get("recognized") and book.get("page") == expected:
+            if isinstance(book, dict) and book.get("recognized") and book.get("page") == expected:
                 break
             if time.monotonic() >= deadline:
                 return {"complete": False, "items": items}
@@ -167,10 +171,21 @@ def probe_date(target, today, last_released):
 
 
 def check_clock(offset, uncertainty, error=""):
-    if error or uncertainty is None:
+    if (error or any(type(value) not in (int, float) or not math.isfinite(value)
+                     for value in (offset, uncertainty)) or uncertainty < 0):
         return result("unknown", "HTTP 时间辅助检查不可用；定时仍使用系统时钟")
-    status = "pass" if abs(offset) <= 1 else "warn" if abs(offset) <= 3 else "fail"
-    return result(status, f"系统时钟偏差约 {offset:+.2f}s，不确定度 ±{uncertainty:.2f}s；请开启系统自动对时")
+    details = [f"HTTP 辅助估计偏差 {offset:+.2f}s，不确定度至少 ±{uncertainty:.2f}s。",
+               "此测量不是精密授时，不用于提前查询或自动调整电脑时间；请在启动定时任务前完成系统对时。"]
+    if uncertainty > 1:
+        return result("unknown", "时间测量误差过大，无法判断电脑时钟是否准确；定时仍使用系统时钟", details=details)
+    lower, upper = max(0, abs(offset) - uncertainty), abs(offset) + uncertainty
+    if upper <= 1:
+        return result("pass", "辅助检查未发现明显时钟偏差；不代表毫秒级准确", details=details)
+    if lower > 3:
+        return result("fail", "辅助检查提示较大时钟偏差，请先核对系统自动对时", details=details)
+    if lower > 1:
+        return result("warn", "辅助检查提示时钟可能有偏差，请核对系统自动对时", details=details)
+    return result("unknown", "时间测量范围跨越判断阈值，无法确认时钟准确性", details=details)
 
 
 def check_scheduler(sample):

@@ -13,12 +13,30 @@ from urllib.parse import urlparse
 from selenium.common.exceptions import ElementClickInterceptedException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from railwatch_orders import OrderResult
+from railwatch_task import TaskCancelled
 
 
 class ConfirmationOutcome(Enum):
     REJECTED = "rejected_before_dispatch"
     DISPATCHED = "dispatched"
     UNKNOWN = "unknown"
+
+
+class _OrderTiming:
+    """In-memory checkpoints; no browser calls or writes on the submit path."""
+
+    def __init__(self):
+        self.started = self.last = time.monotonic()
+        self.current = None
+        self.steps = []
+
+    def step(self, name=None):
+        now = time.monotonic()
+        if self.current is not None:
+            self.steps.append({"id": self.current,
+                               "start_ms": round((self.last - self.started) * 1000, 3),
+                               "duration_ms": round((now - self.last) * 1000, 3)})
+        self.current, self.last = name, now
 
 
 SNAPSHOT_JS = r"""
@@ -73,7 +91,15 @@ const orders=all('.order-item').map(root=>{
  const orderId=ids.length&&ids.every(id=>/^[A-Za-z0-9]+$/.test(id))&&new Set(ids).size===1?ids[0]:'';
  const ticketStates=all('.ticket-status-name',root).map(txt);
  const state=ticketStates.length?ticketStates.join(' '):all('.order-item-hd .pull-right,.order-item-hd .txt-second,.order-status',root).map(txt).join(' ');
- const payment=all('a,button',root).some(e=>/^(去支付|立即支付|网上支付|继续支付|支付)$/.test(txt(e)));
+ const payment=all('a,button',root).some(e=>{
+   if (/^(去支付|立即支付|网上支付|继续支付|支付)$/.test(txt(e))) return true;
+   // The official waitlist control includes a countdown. Scope this exception
+   // to its own order card and control; never match arbitrary payment text.
+   if (!header.includes('候补单号') || !e.matches('a.pay_order')) return false;
+   const clocks=all('#J-payment-showTime',e);
+   if (clocks.length!==1 || !/^\d+分\d{1,2}秒$/.test(txt(clocks[0]))) return false;
+   return /^继续支付\s*[(（]\s*\d+分\d{1,2}秒\s*[)）]$/.test(txt(e));
+ });
  const body=[];
  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
  while(walker.nextNode()) {
@@ -130,7 +156,17 @@ const name=e=> {const l=label(e);
  return (l?.getAttribute('title') || l?.innerText || '').replace(/[（(](?:学生|儿童|成人)[）)]/g,'').trim();};
 const ticketType=e=> {
  const l=label(e), text=[e.dataset.ticketType,l?.dataset.ticketType,l?.innerText].filter(Boolean).join(' ');
- return /学生|\bstudent\b/i.test(text)?'student':/儿童|\bchild\b/i.test(text)?'child':/成人|\badult\b/i.test(text)?'adult':'unknown';
+ const kinds=[[/学生|\bstudent\b/i,'student'],[/儿童|\bchild\b/i,'child'],[/成人|\badult\b/i,'adult']]
+   .filter(([pattern])=>pattern.test(text)).map(([,kind])=>kind);
+ if (e.matches('#passenge_list input.chose-pass-dom') && e.hasAttribute('passengerInfo')) {
+   // Official adult labels omit the type. Read only the type/name prefix of
+   // this DOM attribute; never transport its document/token fields to Python.
+   const prefix=/^([123])#([^#]+)#[^#]+#/.exec(e.getAttribute('passengerInfo')||'');
+   const kind=prefix && ({'1':'adult','2':'child','3':'student'})[prefix[1]];
+   if (!kind || prefix[2]!==name(e)) return 'unknown';
+   kinds.push(kind);
+ }
+ return kinds.length && new Set(kinds).size===1 ? kinds[0] : 'unknown';
 };
 """
 
@@ -151,7 +187,9 @@ for(const n of wanted) {
 }
 const changes=inputs.filter(e=>e.checked!==wanted.includes(name(e)));
 if(changes.some(e=>e.disabled)) return '乘客勾选项不可操作，请检查官方页面';
-for(const input of changes) if(input.checked!==wanted.includes(name(input))) input.click();
+// iCheck cancels native input clicks; its visible label is the user control.
+// A normal HTML label also toggles its associated checkbox exactly once.
+for(const input of changes) if(input.checked!==wanted.includes(name(input))) (label(input)||input).click();
 const actual=inputs.filter(e=>e.checked).map(name);
 return actual.length===wanted.length && wanted.every(n=>actual.includes(n)) || '乘客勾选结果与目标名单不一致';
 """
@@ -340,6 +378,9 @@ def record_matches(record, intent):
 
 
 class OrderPage:
+    RESULT_UNKNOWN_TIMEOUT = 60.0
+    RESULT_POLL_INTERVAL = 0.5
+
     def __init__(self, driver, stop=lambda: False, wait=None, mark=None, *, allow_fixture=False, log=None):
         self.driver, self.stop = driver, stop
         self.allow_fixture = allow_fixture
@@ -347,6 +388,14 @@ class OrderPage:
         self.mark = mark or (lambda stage, detail=None: None)
         self.log = log or (lambda message: None)
         self._people_error = ""
+
+    def _save_timing(self, intent, timing):
+        timing.step()
+        try:
+            self.mark("order_timing", {"kind": intent.kind, "steps": timing.steps})
+        except Exception:
+            # Timing evidence is optional and cannot change an order's outcome.
+            pass
 
     def apply_seat_preference(self, preference, passenger_count):
         if preference not in ("靠窗优先", "靠过道优先"):
@@ -365,7 +414,10 @@ class OrderPage:
             return {}
 
     def result(self, intent, *, submitted=False, known_id="", allow_empty=False):
-        snap = self.snapshot()
+        return self._result_from_snapshot(self.snapshot(), intent, submitted=submitted,
+                                          known_id=known_id, allow_empty=allow_empty)
+
+    def _result_from_snapshot(self, snap, intent, *, submitted=False, known_id="", allow_empty=False):
         if not snap:
             return OrderResult("unknown", "无法读取订单页面")
         # Only an identified, matching order can establish payment or fulfillment.
@@ -383,12 +435,17 @@ class OrderPage:
             elif re.search("待兑现|候补中", state) and intent.kind == "alternate": stage = "active"
             elif record.get("payment") or re.search("待支付|等待支付", state): stage = "pending_payment"
             if stage:
+                # A historical completed/cancelled order can have exactly the
+                # same trip. It cannot establish the outcome of an unbound
+                # submission, even when it is the only visible matching card.
+                if stage in ("fulfilled", "cancelled", "expired", "failed") and not known_id:
+                    return OrderResult("unknown", "尚未取得本次提交的订单号，历史订单不能证明本次结果，请人工核对")
                 return OrderResult(stage, order_id=record["order_id"], evidence={
                     "matched": True, "url": snap.get("url", "").split("?")[0],
                     "observed_at": time.time(), "state": state[:100]})
         if len(matching) == 1 and matching[0].get("state_conflict"):
             return OrderResult("unknown", "已匹配到订单，但订单内车票状态不一致（如部分退票或改签），请在官方订单详情人工核对",
-                               order_id=matching[0]["order_id"])
+                               order_id=known_id)
         dialogs = " ".join(snap.get("dialogs", []))
         if snap.get("verification") or re.search(r"登录|核验|验证码|滑块|频繁|操作过快|稍后再试|候补.*(?:上限|限额)", dialogs) or re.search(r"login\.html|/login/init", snap.get("url", "")):
             return OrderResult("verification", "请在官方页面完成登录、核验或处理限制")
@@ -404,9 +461,9 @@ class OrderPage:
         # order does not exist. Only a known pre-submit failure releases ownership.
         return OrderResult("unknown", "未获得匹配的订单证据，请打开官方订单详情核对")
 
-    def poll(self, predicate, timeout=10, ignore_stop=False):
+    def poll(self, predicate, timeout=10):
         deadline = time.monotonic() + timeout
-        while ignore_stop or not self.stop():
+        while not self.stop():
             value = predicate()
             if value:
                 return value
@@ -550,16 +607,40 @@ class OrderPage:
                 return bool(self.poll(lambda: self.deadline_matches(self.snapshot().get("deadline", ""), deadline, travel_date), 2))
         return False
 
-    def wait_result(self, intent, submitted=True, timeout=10):
-        def terminal():
-            result = self.result(intent, submitted=submitted)
-            return result if result.status != "unknown" else None
-        return self.poll(terminal, timeout) or self.result(intent, submitted=submitted)
+    def wait_result(self, intent, submitted=True, timeout=None, *, known_id=""):
+        """Observe in-flight orders; only an unrecognized page can time out.
+
+        A visible official queue is ongoing work, not missing evidence. Keep
+        watching it without navigating or submitting again, and allow a fresh
+        grace period when it disappears while the payment page loads. Read the
+        result and progress from the same snapshot to avoid a navigation race.
+        """
+        timeout = self.RESULT_UNKNOWN_TIMEOUT if timeout is None else timeout
+        started = time.monotonic()
+        deadline = started + timeout
+        next_progress_log = started
+        while True:
+            snap = self.snapshot()
+            result = self._result_from_snapshot(snap, intent, submitted=submitted, known_id=known_id)
+            if result.status != "unknown" or self.stop():
+                return result
+            now = time.monotonic()
+            if snap.get("processing"):
+                deadline = now + timeout
+                if now >= next_progress_log:
+                    self.log(f"官方仍在排队或处理订单，已等待 {int(now - started)} 秒，正在自动核对结果。")
+                    next_progress_log = now + 30
+            elif now >= deadline:
+                self.log("暂未读到匹配的官方订单，已保留原订单记录，请在官方页面核对后继续处理。")
+                return result
+            self.wait(min(self.RESULT_POLL_INTERVAL, max(0.01, deadline - now)))
 
     def _click_regular_confirmation(self, confirm, intent):
         """Retry only clicks rejected before dispatch; ambiguous receipts are observed."""
         def click():
             nonlocal confirm
+            if self.stop():
+                return ConfirmationOutcome.REJECTED
             if confirm is None:
                 result = self.result(intent, submitted=True)
                 if result.status != "unknown":
@@ -572,6 +653,8 @@ class OrderPage:
                 observed = self.driver.execute_script(CONFIRM_RECEIPT_JS, token, "observe") is True
             except Exception:
                 observed = False
+            if self.stop():
+                return ConfirmationOutcome.REJECTED
             self.mark("regular_confirm_attempt")
             try:
                 confirm.click()
@@ -587,9 +670,13 @@ class OrderPage:
                 try:
                     delivered = self.driver.execute_script(CONFIRM_RECEIPT_JS, token, "read")
                     if delivered is False:
+                        if self.stop():
+                            return ConfirmationOutcome.REJECTED
                         result = self.result(intent, submitted=True)
                         if result.status != "unknown":
                             return result
+                        if self.stop():
+                            return ConfirmationOutcome.REJECTED
                         self.log("浏览器点击未触发确认按钮，正在直接触发该按钮的点击事件。")
                         delivered = self.driver.execute_script(CONFIRM_RECEIPT_JS, token, "dispatch")
                     if delivered is True:
@@ -601,24 +688,24 @@ class OrderPage:
             self.log("确认点击结果未知，将保留当前页面并核对订单，不重复点击。")
             return ConfirmationOutcome.UNKNOWN
 
-        return click() or self.poll(click, timeout=5, ignore_stop=True) or ConfirmationOutcome.REJECTED
+        return click() or self.poll(click, timeout=5) or ConfirmationOutcome.REJECTED
 
     def _post_submit(self, intent, confirmed_clicked):
         """Resolve the outcome after the official submit/confirm step.
 
-        Grab semantics: once the submission is in flight, resolving it is the
-        only task left. A still-waiting official dialog is kept untouched for
-        the user; a completed confirmation is reconciled on the official order
-        page so a created order surfaces as pending payment, not as doubt.
+        Continue observing an official queue until it resolves or the user
+        stops. An unrecognized page gets a bounded grace period, after which a
+        completed confirmation can be reconciled on the official order page.
         """
-        result = self.wait_result(intent, submitted=True, timeout=20)
+        result = self.wait_result(intent, submitted=True)
         if result.status != "unknown":
             return result
-        if self.snapshot().get("confirmation"):
+        snap = self.snapshot()
+        if snap.get("processing"):
+            return result  # Do not navigate away while the official queue is active.
+        if snap.get("confirmation"):
             return OrderResult("verification",
                                "官方确认流程尚未结束，请保留当前页面核对官方订单，再点击“继续处理”；请勿重复提交。")
-        if self.snapshot().get("processing"):
-            return result  # Do not navigate away while the official queue is active.
         if confirmed_clicked and not self.stop():
             reconciled = self.reconcile(intent, navigate=True)
             if reconciled.status != "unknown":
@@ -626,18 +713,57 @@ class OrderPage:
         return result
 
     def reconcile(self, intent, known_id="", navigate=False, allow_empty=False):
-        result = self.result(intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
+        snap = self.snapshot()
+        result = self._result_from_snapshot(snap, intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
         if result.status not in ("unknown", "verification") or not navigate:
             return result
+        if snap.get("processing") or snap.get("confirmation"):
+            return OrderResult("unknown", "官方处理或确认流程尚未结束，请保留当前页面核对，请勿重复提交", order_id=known_id)
         # Explicit recovery action only: normal payment observation never navigates away.
         if self.stop():
             return result
         url = "https://kyfw.12306.cn/otn/view/" + ("lineUp_order.html" if intent.kind == "alternate" else "train_order.html")
         try:
             self.driver.get(url)
-            return self.poll(lambda: self._resolved(intent, known_id, allow_empty)) or self.result(intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
+            result = self.poll(lambda: self._resolved(intent, known_id, allow_empty), self.RECOVERY_TAB_TIMEOUT)
+            if result:
+                return result
+            # Only a previously bound identity may be sought in paid/history
+            # tabs. A similar historical trip cannot establish a new order.
+            if known_id:
+                labels = (("待兑现订单", "已处理订单") if intent.kind == "alternate"
+                          else ("未出行订单", "历史订单"))
+                for label in labels:
+                    if self.stop():
+                        break
+                    current = self.snapshot()
+                    if current.get("processing") or current.get("confirmation"):
+                        return OrderResult("unknown", "官方仍在处理或确认订单，请保留当前页面核对", order_id=known_id)
+                    tab = self._recovery_tab(label, url)
+                    if tab is None:
+                        break
+                    tab.click()
+                    result = self.poll(lambda: self._resolved(intent, known_id, allow_empty), self.RECOVERY_TAB_TIMEOUT)
+                    if result:
+                        return result
+            return OrderResult("unknown", "未找到匹配订单；请在官方未完成／未出行／历史订单中核对后继续处理"
+                               if intent.kind == "regular" else "未找到匹配候补；请在官方待支付／待兑现／已处理订单中核对后继续处理",
+                               order_id=known_id)
         except Exception:
             return OrderResult("unknown", "订单核对失败，请保留当前订单并在官方页面核查", order_id=known_id)
+
+    RECOVERY_TAB_TIMEOUT = 5.0
+
+    def _recovery_tab(self, label, url):
+        current = urlparse(self.driver.current_url)
+        expected = urlparse(url)
+        if not ((current.scheme, current.netloc, current.path) == (expected.scheme, expected.netloc, expected.path)
+                or self.allow_fixture and current.scheme == "file"):
+            return None
+        tabs = [element for element in self.driver.find_elements(By.CSS_SELECTOR, ".panel-tab .tab-hd-list > li > a")
+                if element.is_displayed() and element.text.strip() == label and element.is_enabled()
+                and element.get_attribute("aria-disabled") != "true"]
+        return tabs[0] if len(tabs) == 1 else None
 
     def _resolved(self, intent, known_id, allow_empty=False):
         result = self.result(intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
@@ -646,7 +772,11 @@ class OrderPage:
     def regular(self, button, intent, *, seat_preference="无偏好", preference_handler=None):
         submitted = False
         stage = "打开乘车人页面"
+        timing = _OrderTiming()
+        timing.step("page_load")
         try:
+            if self.stop():
+                return self._stopped_result(submitted)
             if button is not None:
                 button.click()
             def ready():
@@ -657,12 +787,15 @@ class OrderPage:
             stage = "选择乘车人"
             if not ready_result:
                 return OrderResult("verification", "乘客表单尚未加载，请检查官方页面")
+            timing.step("passengers")
             if not self.prepare_people(intent):
                 return OrderResult("verification", self._people_error)
             stage = "选择席别"
+            timing.step("seats")
             if not self.select_regular_seats(intent):
                 return OrderResult("verification", "尚未点击提交订单：席别选项未能唯一匹配，请检查官方页面")
             stage = "核对订单信息"
+            timing.step("readback")
             if not self.poll(lambda: self.verify_form(intent), 6):
                 self.log("回读核对未通过，已停止自动提交：" + self.form_mismatch_report(intent))
                 return OrderResult("verification", "车次、日期、区间、乘客、成人票种或席别回读不一致，尚未提交订单")
@@ -670,23 +803,25 @@ class OrderPage:
             if not submit: return OrderResult("not_submitted", "提交按钮不可用", no_order=True)
             if self.stop(): return OrderResult("not_submitted", "提交前已停止", no_order=True)
             stage = "提交订单"
+            timing.step("submit")
             self.mark("regular_submit")
             submitted = True  # Set before click: a transport error may follow a successful action.
             submit.click()
+            timing.step("confirmation_wait")
             def confirm_or_result():
                 result = self.result(intent, submitted=True)
                 return result if result.status != "unknown" else self.button(("#qr_submit_id",))
-            # The submission is already in flight: keep waiting for the official
-            # dialog even across a stop request, so the grab window is spent on
-            # completing the order instead of abandoning a submitted form.
-            # The official dialog may arrive after the initial server-side
-            # checks. Keep the entire wait actionable, not just its first 10s.
-            confirm = self.poll(confirm_or_result, timeout=30, ignore_stop=True)
+            # Stop cancels further clicks, including confirmation. The durable
+            # submit marker remains available for read-only reconciliation.
+            confirm = self.poll(confirm_or_result, timeout=30)
+            if self.stop():
+                return self._stopped_result(submitted)
             if isinstance(confirm, OrderResult): return confirm
             confirmed_clicked = False
             if confirm is None:
                 confirm = self.button(("#qr_submit_id",))
             if confirm:
+                timing.step("confirmation_action")
                 if seat_preference != "无偏好":
                     try:
                         applied = (preference_handler(seat_preference) if preference_handler else
@@ -698,15 +833,18 @@ class OrderPage:
                 # 核对已在点击“提交订单”前完成。弹窗打开时再回读会把乘客在背景页
                 # 和弹窗表格里各读一遍（名单必然不一致），只会白白错失抢票窗口，
                 # 因此自动化模式下弹窗出现后直接确认提交。
-                self.log("官方确认弹窗已出现，直接点击“确认”提交订单。")
                 if self.stop():
-                    self.log("已请求停止，但官方确认弹窗已出现：仍完成本次确认，之后只需人工支付。")
+                    return self._stopped_result(submitted)
+                self.log("官方确认弹窗已出现，直接点击“确认”提交订单。")
                 stage = "确认订单"
                 confirmation = self._click_regular_confirmation(confirm, intent)
                 if isinstance(confirmation, OrderResult):
                     return confirmation
                 confirmed_clicked = confirmation is ConfirmationOutcome.DISPATCHED
+            timing.step("result_wait")
             return self._post_submit(intent, confirmed_clicked)
+        except TaskCancelled:
+            return self._stopped_result(submitted)
         except Exception as exc:
             # Exception text can contain passenger data and browser internals.
             self.log(f"自动提交在{stage}阶段中断（{type(exc).__name__}）；"
@@ -715,10 +853,16 @@ class OrderPage:
             if not submitted and result.status == "unknown":
                 return OrderResult("verification", f"尚未点击提交订单：{stage}失败，请检查官方页面后继续处理")
             return result
+        finally:
+            self._save_timing(intent, timing)
 
     def alternate(self, button, intent):
         submitted = False
+        timing = _OrderTiming()
+        timing.step("page_load")
         try:
+            if self.stop():
+                return self._stopped_result(submitted)
             # One seat-specific button has already been chosen by the query adapter.
             if button is not None:
                 self.mark("alternate_first_action")
@@ -734,18 +878,33 @@ class OrderPage:
                 next_step.click()
             if not self.poll(lambda: self.snapshot().get("details")):
                 return OrderResult("verification", "请检查候补需求清单并进入候补订单页")
+            timing.step("passengers")
             if not self.prepare_people(intent):
                 return OrderResult("verification", self._people_error)
+            timing.step("deadline")
             if not self.set_deadline(intent.deadline, intent.date):
                 return OrderResult("verification", "截止兑现时间未能回读确认")
+            timing.step("readback")
             if not self.verify_form(intent):
                 return OrderResult("verification", "候补组合不匹配，或包含额外车次、席别、无座设置")
             submit = self.button(("#toPayBtn",))
             if not submit: return OrderResult("not_submitted", "候补提交按钮不可用", no_order=True)
             if self.stop(): return OrderResult("not_submitted", "提交前已停止", no_order=True)
+            timing.step("submit")
             self.mark("alternate_submit")
             submitted = True
             submit.click()
+            timing.step("result_wait")
             return self.wait_result(intent)
+        except TaskCancelled:
+            return self._stopped_result(submitted)
         except Exception:
             return self.result(intent, submitted=submitted)
+        finally:
+            self._save_timing(intent, timing)
+
+    @staticmethod
+    def _stopped_result(submitted):
+        return OrderResult("unknown" if submitted else "not_submitted",
+                           "已停止后续操作；已尝试提交，请在当前官方页面核对原订单，请勿重复提交"
+                           if submitted else "已停止，尚未点击提交订单", no_order=not submitted)

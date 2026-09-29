@@ -11,6 +11,18 @@ from railwatch_preferences import load_ui_preferences, save_ui_preferences
 
 
 class RehearsalRunnerTests(unittest.TestCase):
+    def test_timed_rehearsal_requires_clock_evidence_without_claiming_clock_failure(self):
+        for timer, clock_status, expected in ((True, "unknown", "risky"), (True, "skipped", "risky"),
+                                               (True, "fail", "risky"), (True, "pass", "ready"),
+                                               (False, "unknown", "ready")):
+            with self.subTest(timer=timer, clock_status=clock_status):
+                checks = {key: (lambda *_: {"status": "pass", "summary": "ok"}) for key, _ in CHECKS}
+                checks["clock"] = lambda *_: {"status": clock_status, "summary": "clock"}
+                with patch("railwatch_rehearsal.sample_scheduler_lateness", return_value={}):
+                    report = RehearsalRunner({"timer_enabled": timer}, checks).run()
+                self.assertEqual(report["verdict"], expected)
+                self.assertFalse(next(c for c in report["checks"] if c["id"] == "clock")["critical"])
+
     def test_rehearsal_defaults_off_and_preserves_explicit_choice(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertFalse(load_ui_preferences(directory)["auto_rehearsal"])

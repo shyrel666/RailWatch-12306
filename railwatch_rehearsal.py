@@ -30,7 +30,8 @@ def verdict(checks, cancelled=False):
         return "cancelled"
     if any(c["critical"] and c["status"] == "fail" for c in checks):
         return "blocked"
-    if any(c["status"] in ("warn", "fail") or c["critical"] and c["status"] in ("unknown", "skipped") for c in checks):
+    if any(c["status"] in ("warn", "fail") or (c["critical"] or c.get("required_evidence"))
+           and c["status"] in ("unknown", "skipped") for c in checks):
         return "risky"
     return "ready"
 
@@ -87,7 +88,9 @@ class RehearsalRunner:
         auto = bool(self.config.get("auto_submit") or self.config.get("auto_alternate"))
         definitions = [{"id": key, "title": title, "critical": key in ("browser", "login")
                        or key == "sale_time" and bool(self.config.get("timer_enabled"))
-                       or key in ("config", "passengers", "train_seat", "drill") and auto} for key, title in CHECKS]
+                       or key in ("config", "passengers", "train_seat", "drill") and auto,
+                        "required_evidence": key == "clock" and bool(self.config.get("timer_enabled"))}
+                       for key, title in CHECKS]
         report = {"schema_version": 1, "rehearsal_id": uuid.uuid4().hex, "trigger": trigger,
                   "started_at": time.time(), "trip": public_trip(self.config), "checks": [], "measurements": {}}
         if run_id:

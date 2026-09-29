@@ -45,6 +45,14 @@ export function RunReviews() {
       <p className={detail.preparation_margin_ms !== null && detail.preparation_margin_ms < 10_000 ? "rehearsal-warning" : ""}>准备余量：{detail.preparation_margin_ms === null ? "未记录" : `${(detail.preparation_margin_ms / 1000).toFixed(2)} 秒`}</p>
       <p>唤醒后前五轮查询中位数：{detail.query_median_ms == null ? "未记录" : `${(detail.query_median_ms / 1000).toFixed(2)} 秒`}</p>
       <TimelineWaterfall segments={detail.segments} prediction={detail.prediction} /><p>{detail.note}</p>
+      {detail.order_timings?.length ? <section aria-label="下单分步耗时">
+        <h4>下单分步耗时</h4>
+        <p>每组从进入下单流程计时，细分上方已有阶段，不重复计入总耗时。中断时仅显示已观察的部分；包含页面和本机操作的等待。</p>
+        {detail.order_timings.map((group, index) => <div key={index}>
+          <h5>{group.kind === "alternate" ? "候补订单" : "普通订单"} · 第 {index + 1} 段流程</h5>
+          <TimelineWaterfall segments={group.segments} />
+        </div>)}
+      </section> : <p>本次没有下单分步记录；历史任务无法补算各步骤耗时。</p>}
       <Button onClick={() => setDetail(null)}>关闭复盘</Button></article> : null}
     </div> : null}
   </section>;

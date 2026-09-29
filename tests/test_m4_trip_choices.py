@@ -2,11 +2,72 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from railwatch_trip_choices import load_trip_choices, remember_route, save_train_favorites
 from railwatch_config_contract import validate_config
 from railwatch_seats import validate_automation_seats, public_seat_capabilities
+
+
+class PassengerBrowser:
+    """A tab-aware browser double that rejects unrelated scripts and clicks."""
+    def __init__(self, pages):
+        self.urls = {"original": "https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc"}
+        self.current_window_handle = "original"
+        self.switch_to = SimpleNamespace(window=self.switch_window)
+        self.timeouts = SimpleNamespace(page_load=300)
+        self.pages = pages
+        self.page = 0
+        self.visited = []
+        self.scripts = []
+        self.clicks = 0
+
+    @property
+    def window_handles(self):
+        return list(self.urls)
+
+    @property
+    def current_url(self):
+        return self.urls[self.current_window_handle]
+
+    def execute(self, command, payload):
+        assert command == "newWindow" and payload == {"type": "tab"}
+        self.urls["passengers"] = "about:blank"
+        return {"value": {"handle": "passengers"}}
+
+    def switch_window(self, handle):
+        assert handle in self.urls
+        self.current_window_handle = handle
+
+    def set_page_load_timeout(self, value):
+        self.timeouts.page_load = value
+
+    def get(self, url):
+        self.visited.append(url)
+        self.urls[self.current_window_handle] = url
+        self.page = 0
+
+    def execute_script(self, script):
+        from railwatch_order_page import READ_PASSENGER_BOOK_JS
+        assert script == READ_PASSENGER_BOOK_JS
+        self.scripts.append(script)
+        return self.pages[self.page]
+
+    def find_elements(self, by, selector):
+        assert (by, selector) == ("css selector", ".pagination a.next")
+        def click():
+            self.clicks += 1
+            self.page += 1
+        return [SimpleNamespace(is_displayed=lambda: True, is_enabled=lambda: True, click=click)]
+
+    def close(self):
+        del self.urls[self.current_window_handle]
+
+
+def passenger_page(items, page=1, total=1):
+    return {"recognized": True, "page": page, "total_pages": total, "has_next": page < total,
+            "complete": page == total, "pagination_valid": True, "items": items}
 
 
 class TripChoicesTests(unittest.TestCase):
@@ -84,11 +145,11 @@ class TripChoicesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             bridge = RailWatchBridge(data_dir=data_dir)
             self.assertIn("未打开", bridge.read_passengers()["warning"])
-            driver = type("Driver", (), {"window_handles": ["one"], "execute_script": lambda self, script: [
+            driver = PassengerBrowser([passenger_page([
                 {"name": "张三", "ticket_type": "adult", "identity_hint": "11***22"},
                 {"name": "张三", "ticket_type": "student", "identity_hint": "33***44"},
                 {"name": "李四", "ticket_type": "unknown", "identity_hint": "123456789012345678"},
-            ]})()
+            ])])
             bridge.driver = driver
             items = bridge.read_passengers()["items"]
             self.assertTrue(items[0]["ambiguous"])
@@ -97,25 +158,79 @@ class TripChoicesTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "浏览器正在操作"):
                 bridge.read_passengers()
 
-    def test_passenger_read_supports_personal_centre_list_without_paging(self):
+    def test_passenger_read_navigates_and_reads_all_pages_then_restores_original(self):
         from railwatch_bridge import RailWatchBridge
-        from railwatch_order_page import READ_PASSENGER_BOOK_JS
-
-        scripts = []
-        def execute(self, script):
-            scripts.append(script)
-            return {"recognized": True, "page": 1, "total_pages": 2, "has_next": True, "complete": False, "pagination_valid": True,
-                    "items": [{"name": "张三", "ticket_type": "adult", "type_source": "profile_metadata", "identity_hint": "11***22"},
-                              {"name": "王五", "ticket_type": "unknown", "type_source": "unavailable", "identity_hint": "33***44"}]}
+        from railwatch_rehearsal_checks import PASSENGERS_URL
+        person = {"name": "张三", "ticket_type": "adult", "identity_hint": "11***22"}
+        driver = PassengerBrowser([passenger_page([person], 1, 2), passenger_page([
+            {**person, "identity_hint": "33***44"},
+            {"name": "王五", "ticket_type": "unknown", "identity_hint": "55***66"},
+        ], 2, 2)])
+        # Even when the original page is a filtered/later passenger page, start a fresh tab.
+        driver.urls["original"] = PASSENGERS_URL + "?page=2"
+        original_urls = dict(driver.urls)
         with tempfile.TemporaryDirectory() as data_dir:
             bridge = RailWatchBridge(data_dir=data_dir)
-            bridge.driver = type("Driver", (), {"window_handles": ["one"], "current_url": "https://kyfw.12306.cn/otn/view/passengers.html?x=1",
-                                                 "execute_script": execute})()
+            bridge.driver = driver
             result = bridge.read_passengers()
-        self.assertEqual(scripts, [READ_PASSENGER_BOOK_JS])
         self.assertEqual([(item["name"], item["ticket_type"], item["ambiguous"]) for item in result["items"]],
-                         [("张三", "adult", False), ("王五", "unknown", False)])
-        self.assertIn("仅读取了当前页", result["warning"])
+                         [("张三", "adult", True), ("张三", "adult", True), ("王五", "unknown", False)])
+        self.assertIsNone(result["warning"])
+        self.assertEqual(driver.visited, [PASSENGERS_URL])
+        self.assertEqual(driver.clicks, 1)
+        self.assertEqual(driver.urls, original_urls)
+        self.assertEqual(driver.current_window_handle, "original")
+        self.assertEqual(driver.timeouts.page_load, 300)
+
+    def test_passenger_read_failure_always_restores_tab_and_releases_browser(self):
+        from railwatch_bridge import RailWatchBridge, LOGIN_URL
+        from selenium.common.exceptions import TimeoutException
+        for failure, expected in [("login", "登录"), ("timeout", "超时"), ("script", "读取官方乘车人失败"),
+                                  ("incomplete", "完整读取"), ("empty", "没有可读取的乘客"),
+                                  ("switch", "读取官方乘车人失败")]:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as data_dir:
+                bridge = RailWatchBridge(data_dir=data_dir)
+                driver = PassengerBrowser([passenger_page([])])
+                bridge.driver = driver
+                original_urls = dict(driver.urls)
+                if failure == "login":
+                    driver.get = lambda _url: driver.urls.update(passengers=LOGIN_URL)
+                elif failure == "timeout":
+                    driver.get = lambda _url: (_ for _ in ()).throw(TimeoutException("private account data"))
+                elif failure == "script":
+                    driver.execute_script = lambda _script: (_ for _ in ()).throw(RuntimeError("private account data"))
+                elif failure == "incomplete":
+                    driver.pages = [{**passenger_page([{ "name": "张三", "ticket_type": "adult"}]),
+                                     "complete": False, "pagination_valid": False}]
+                elif failure == "switch":
+                    original_switch = driver.switch_to.window
+                    calls = []
+                    def switch(handle):
+                        calls.append(handle)
+                        if len(calls) == 1:
+                            raise RuntimeError("switch failed after creating the tab")
+                        original_switch(handle)
+                    driver.switch_to.window = switch
+                result = bridge.read_passengers()
+                self.assertEqual(result["items"], [])
+                self.assertIn(expected, result["warning"])
+                self.assertNotIn("private account data", str(result))
+                self.assertEqual(driver.urls, original_urls)
+                self.assertEqual(driver.current_window_handle, "original")
+                self.assertEqual(driver.timeouts.page_load, 300)
+                self.assertFalse(bridge._browser_busy)
+
+    def test_passenger_read_restores_original_even_when_temporary_tab_will_not_close(self):
+        from railwatch_bridge import RailWatchBridge
+        with tempfile.TemporaryDirectory() as data_dir:
+            bridge = RailWatchBridge(data_dir=data_dir)
+            driver = bridge.driver = PassengerBrowser([passenger_page([])])
+            with patch.object(driver, "close", side_effect=RuntimeError("close failed")):
+                result = bridge.read_passengers()
+            self.assertIn("未能完全恢复", result["warning"])
+            self.assertEqual(driver.current_window_handle, "original")
+            self.assertEqual(driver.timeouts.page_load, 300)
+            self.assertFalse(bridge._browser_busy)
 
 
 if __name__ == "__main__":

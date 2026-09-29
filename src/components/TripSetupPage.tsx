@@ -211,6 +211,7 @@ export function TripSetupPage({
   const [passengerDraft, setPassengerDraft] = useState("");
   const [passengerError, setPassengerError] = useState("");
   const [passengerCandidates, setPassengerCandidates] = useState<PassengerCandidates | null>(null);
+  const [readingPassengers, setReadingPassengers] = useState(false);
   const [choices, setChoices] = useState<TripChoices>({ recent_routes: [], favorites: [] });
   const [trainNotice, setTrainNotice] = useState("");
   const [stationRevision, setStationRevision] = useState(0);
@@ -338,6 +339,20 @@ export function TripSetupPage({
       passenger_count: Math.max(1, nextNames.length || 1),
       passenger_selections: (config.passenger_selections ?? []).filter(item => item.name !== passengerNames[index]),
     });
+  };
+
+  const readPassengers = async () => {
+    if (readingPassengers || busy || monitoring) return;
+    setReadingPassengers(true);
+    setPassengerCandidates(null);
+    try {
+      const result = await runCommand<PassengerCandidates>("readPassengers");
+      setPassengerCandidates(result ?? { items: [], warning: "读取未完成，请检查浏览器状态后重试。" });
+    } catch {
+      setPassengerCandidates({ items: [], warning: "读取未完成，请检查浏览器状态后重试。" });
+    } finally {
+      setReadingPassengers(false);
+    }
   };
 
   const addCandidate = (candidate: PassengerCandidates["items"][number]) => {
@@ -612,9 +627,11 @@ export function TripSetupPage({
                 </div>
                 {passengerError ? <small className="trip-date-hint" role="alert">{passengerError}</small> : null}
                 <small className="field-help">姓名不代表票种。普通订单按完整姓名勾选后，须回读确认为成人票才会提交；候补须在乘客列表明确标为成人。学生、儿童请在官方页面处理。</small>
-                <button type="button" className="trip-station-refresh" onClick={() => void runCommand<PassengerCandidates>("readPassengers").then(result => {
-                  if (result) setPassengerCandidates(result);
-                })}>从官方当前页面读取乘客</button>
+                <button type="button" className="trip-station-refresh" disabled={readingPassengers || !!busy || monitoring}
+                  aria-busy={readingPassengers} onClick={() => void readPassengers()}>
+                  {readingPassengers ? "正在读取官方乘客…" : "从官方页面读取乘客"}
+                </button>
+                <small className="field-help">{monitoring ? "监控运行中，请停止监控后读取乘客。" : "自动打开官方乘车人列表，读取后返回原页面。"}</small>
                 {passengerCandidates?.warning ? <small className="field-help" role="status">{passengerCandidates.warning}</small> : null}
                 {passengerCandidates?.items.length ? <div className="trip-route-choices" aria-label="官方页面乘客候选">
                   {passengerCandidates.items.map((candidate, index) => <button type="button" key={`${candidate.name}-${candidate.identity_hint}-${index}`}
@@ -739,6 +756,7 @@ export function TripSetupPage({
                   <span>智能轮询</span>
                 </label>
               </div>
+              <p className="field-help">保持会话会定期检查登录，临近起售暂停检查；登录失效仍需重新登录。智能轮询在超时或限频时放慢查询，不延迟首次查询。</p>
             </PreferenceSection>
             <TimerSettings config={config} update={update} windowDays={windowDays} />
             <PreferenceSection

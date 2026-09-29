@@ -561,27 +561,54 @@ class RailWatchBridge:
 
     @idle_browser_command
     def read_passengers(self) -> dict:
-        """Read visible official candidates only while the controlled browser is idle.
-
-        Supported pages: the personal-centre passenger list (passengers.html, current
-        page only, no pagination clicks), the regular order page and the alternate page.
-        """
-        from urllib.parse import urlparse
-        from railwatch_order_page import READ_PASSENGER_BOOK_JS, READ_PASSENGER_CANDIDATES_JS
-        unsupported = "当前官方页面没有可读取的乘客列表；请在受控浏览器打开「常用乘车人」页、下单页或候补页后再试，或继续手动填写姓名。"
+        """Read the account's passenger book in a temporary tab, preserving the trip page."""
+        from selenium.common.exceptions import TimeoutException
+        from railwatch_rehearsal_checks import read_passenger_book
         if self.driver is None or not driver_session_alive(self.driver):
-            return {"items": [], "warning": "受控浏览器未打开；登录后请在官方页面打开乘客列表。"}
-        has_next = False
-        current_url = getattr(self.driver, "current_url", "")
-        if isinstance(current_url, str) and urlparse(current_url).path == "/otn/view/passengers.html":
-            book = self.driver.execute_script(READ_PASSENGER_BOOK_JS)
-            recognized = isinstance(book, dict) and book.get("recognized")
-            raw = book.get("items") if recognized else None
-            has_next = bool(recognized and book.get("has_next"))
-        else:
-            raw = self.driver.execute_script(READ_PASSENGER_CANDIDATES_JS)
-        if not isinstance(raw, list):
-            return {"items": [], "warning": unsupported}
+            return {"items": [], "warning": "受控浏览器未打开；请先打开登录页并完成登录，再点击读取乘客。"}
+        driver = self.driver
+        original = driver.current_window_handle
+        page_timeout = driver.timeouts.page_load
+        tab = None
+        book = {}
+        warning = None
+        cleanup_failed = False
+        try:
+            # Remember the new handle before switching so a failed switch can be cleaned up.
+            tab = driver.execute("newWindow", {"type": "tab"})["value"]["handle"]
+            driver.switch_to.window(tab)
+            driver.set_page_load_timeout(15)
+            book = read_passenger_book(driver, threading.Event())
+            if book.get("reason") == "login_required":
+                warning = "12306 登录未完成或已失效，请在受控浏览器完成登录后重新读取。"
+            elif not book.get("complete"):
+                warning = "未能完整读取官方乘车人名单，页面可能尚未加载完成或列表超过 10 页；请稍后重试。"
+        except TimeoutException:
+            warning = "官方乘车人页面加载超时，请检查网络后重新读取。"
+        except Exception:
+            # Browser exception messages may contain account data; keep the UI message generic.
+            warning = "读取官方乘车人失败，请检查受控浏览器和网络后重试。"
+        finally:
+            try:
+                if tab is not None and tab in driver.window_handles:
+                    driver.switch_to.window(tab)
+                    driver.close()
+            except Exception:
+                cleanup_failed = True
+            # Restore the original tab even if closing the temporary tab failed.
+            try:
+                driver.switch_to.window(original)
+            except Exception:
+                cleanup_failed = True
+            try:
+                driver.set_page_load_timeout(page_timeout)
+            except Exception:
+                cleanup_failed = True
+        if cleanup_failed:
+            warning = (warning or "") + "读取后未能完全恢复浏览器，请检查原标签页和临时乘车人标签页后重试。"
+        if warning:
+            return {"items": [], "warning": warning}
+        raw = book.get("items", [])
         items = []
         for item in raw[:100]:
             if not isinstance(item, dict):
@@ -595,9 +622,7 @@ class RailWatchBridge:
         counts = {item["name"]: sum(candidate["name"] == item["name"] for candidate in items) for item in items}
         for item in items:
             item["ambiguous"] = counts[item["name"]] > 1
-        warning = None if items else unsupported
-        if items and has_next:
-            warning = "常用乘车人列表有多页，仅读取了当前页；同名核对以彩排与下单页为准。"
+        warning = None if items else "官方常用乘车人列表中没有可读取的乘客，请先在 12306 添加乘车人。"
         return {"items": items, "warning": warning}
 
     def _ensure_matching_chromedriver(self, force: bool = False) -> None:
@@ -1500,6 +1525,7 @@ class RailWatchBridge:
             target = resolve_sale_timestamp(config)
         wait_until = target
         self.log(f"定时启动：{beijing_now(target).isoformat(timespec='seconds')}")
+        self.log("按系统时钟到点查询；提前准备参数不提前点击，HTTP时间诊断不参与时刻补偿。")
         if self._task:
             self._transition(self._task, "waiting", next_query_at=wait_until)
         if not self._wait_for_target_timestamp(wait_until, config):

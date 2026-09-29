@@ -29,6 +29,7 @@ EVENT_LABELS = {"submitting": "订单意图已在本地保存", "regular_submit"
                 "alternate_submit": "已点击候补订单提交", "resume_claimed": "开始恢复原订单",
                 "resume_released": "原订单恢复已结束", "dismissed": "用户结束本地核对；官方订单未取消",
                 "order_result": "订单页面核对结果", "pending_payment": "官方订单待支付",
+                "order_timing": "下单分步耗时",
                 "active": "官方候补已生效", "fulfilled": "官方订单已完成"}
 
 
@@ -245,7 +246,7 @@ class OrderJournal:
             db.close()
 
     def begin(self, run_id, intent, config):
-        with self.connection() as db:
+        with self._ordered_events(), self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM orders WHERE unresolved=1").fetchone():
                 raise RuntimeError("存在未核对或待支付的订单，请先继续处理，禁止重复提交。")
@@ -257,7 +258,7 @@ class OrderJournal:
     def record(self, intent, result):
         if result.status not in STAGES:
             raise ValueError("未知订单状态")
-        with self.connection() as db:
+        with self._ordered_events(), self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT result FROM orders WHERE intent_id=?", (intent.intent_id,)).fetchone()
             if not row:
@@ -265,6 +266,16 @@ class OrderJournal:
             previous = json.loads(row[0])
             if result.status in ("pending_payment", "active", "fulfilled", "cancelled", "expired", "failed") and not (result.order_id and result.evidence.get("matched") is True):
                 result = OrderResult("unknown", "订单状态缺少匹配的订单号和页面证据")
+            if result.status in OFFICIAL_STATUSES:
+                known_id = previous.get("order_id")
+                if known_id and result.order_id != known_id:
+                    result = OrderResult("unknown", "页面订单号与原订单不一致，请继续核对原订单")
+                elif result.status in TERMINAL and not (known_id and previous.get("evidence", {}).get("matched") is True):
+                    result = OrderResult("unknown", "未绑定本次提交的订单号，不能用历史订单解除提交拦截")
+            if result.status in ("unknown", "verification") and not previous.get("order_id"):
+                # An uncertain candidate must not become a known identity on
+                # the next resume, bypassing the first-binding checks above.
+                result = replace(result, order_id="", evidence={})
             if result.status in ("sold_out", "not_submitted"):
                 attempted = db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN "
                                        "('regular_submit','alternate_submit','regular_confirm_attempt','resume_claimed') LIMIT 1",
@@ -455,7 +466,7 @@ class OrderJournal:
         if lease is None:
             raise RuntimeError("订单正在恢复处理中，请等待任务结束后再操作。")
         try:
-            with self.connection() as db:
+            with self._ordered_events(), self.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 row = db.execute("SELECT run_id,result FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone()
                 if not row:
@@ -480,7 +491,7 @@ class OrderJournal:
             if lease is None:
                 return False
             try:
-                with self.connection() as db:
+                with self._ordered_events(), self.connection() as db:
                     db.execute("BEGIN IMMEDIATE")
                     db.execute("UPDATE order_events SET stage='resume_released' WHERE stage='resume_claimed'")
                     if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
@@ -500,22 +511,28 @@ class OrderJournal:
             if self._resume_owner is None or self._resume_owner[:2] != (run_id, intent_id):
                 return
             try:
-                with self.connection() as db:
+                with self._ordered_events(), self.connection() as db:
                     db.execute("UPDATE order_events SET stage='resume_released' WHERE run_id=? AND intent_id=? AND stage='resume_claimed'", (run_id, intent_id))
             finally:
                 self._resume_owner[2].close()
                 self._resume_owner = None
 
+    @contextmanager
+    def _ordered_events(self):
+        # Hold ownership through the commit, not just buffer removal. A review
+        # read can flush concurrently with the monitor and must not let a later
+        # result/transaction marker overtake the query that produced it.
+        with self._telemetry_guard:
+            try:
+                self.flush_telemetry()
+            except sqlite3.Error:
+                # Diagnostics must not prevent a durable submission marker
+                # from making its own write attempt.
+                pass
+            yield
+
     def mark(self, run_id, stage, intent_id="", detail=None):
-        # Keep durable transaction markers ordered after any buffered query
-        # telemetry without forcing every query click through SQLite.
-        try:
-            self.flush_telemetry()
-        except sqlite3.Error:
-            # Non-critical diagnostics must never prevent a durable submission
-            # marker from making its own write attempt.
-            pass
-        with self.connection() as db:
+        with self._ordered_events(), self.connection() as db:
             if stage in ("regular_submit", "alternate_submit"):
                 db.execute("BEGIN IMMEDIATE")
                 if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
@@ -530,19 +547,17 @@ class OrderJournal:
         """Buffer non-critical query timing events and persist them in batches."""
         if stage not in QUERY_TELEMETRY_STAGES:
             raise ValueError("仅查询遥测事件可以批量写入")
-        event = (run_id, intent_id, stage, time.time(), time.monotonic(),
-                 json.dumps(detail or {}, ensure_ascii=False))
-        should_flush = False
         with self._telemetry_guard:
+            event = (run_id, intent_id, stage, time.time(), time.monotonic(),
+                     json.dumps(detail or {}, ensure_ascii=False))
             self._telemetry_batch.append(event)
             if len(self._telemetry_batch) > self._telemetry_limit:
                 self._telemetry_batch = self._telemetry_batch[-self._telemetry_limit:]
-            should_flush = len(self._telemetry_batch) >= self._telemetry_batch_size
-        if should_flush:
-            try:
-                self.flush_telemetry()
-            except sqlite3.Error:
-                return False
+            if len(self._telemetry_batch) >= self._telemetry_batch_size:
+                try:
+                    self.flush_telemetry()
+                except sqlite3.Error:
+                    return False
         return True
 
     def flush_telemetry(self):
@@ -550,18 +565,17 @@ class OrderJournal:
             if not self._telemetry_batch:
                 return 0
             batch, self._telemetry_batch = self._telemetry_batch, []
-        try:
-            with self.connection() as db:
-                db.executemany(
-                    "INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
-                    batch,
-                )
-                self._prune_telemetry(db)
-        except Exception:
-            with self._telemetry_guard:
+            try:
+                with self.connection() as db:
+                    db.executemany(
+                        "INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
+                        batch,
+                    )
+                    self._prune_telemetry(db)
+            except Exception:
                 self._telemetry_batch = batch + self._telemetry_batch
-            raise
-        return len(batch)
+                raise
+            return len(batch)
 
     def _prune_telemetry(self, db):
         db.execute(

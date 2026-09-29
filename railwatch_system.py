@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import socket
+import tempfile
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -40,10 +41,10 @@ def inspect_data_dir(data_dir: str) -> Dict[str, object]:
 
     try:
         os.makedirs(target, exist_ok=True)
-        probe_path = os.path.join(target, ".railwatch-write-probe")
-        with open(probe_path, "w", encoding="utf-8") as handle:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target,
+                                         prefix=".railwatch-write-probe-") as handle:
             handle.write("ok")
-        os.remove(probe_path)
+            handle.flush()
         writable = True
         free_bytes = shutil.disk_usage(target).free
     except OSError:

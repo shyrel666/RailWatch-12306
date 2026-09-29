@@ -455,6 +455,10 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
     requestPayload.confirmed = true;
   }
   consumeExportPathGrant(command, requestPayload, grantedExportPaths);
+  // A reloaded renderer starts its revision counter from this response. Commit
+  // any newer main-process snapshot first, including edits staged just before
+  // a renderer crash, so the new session cannot reuse an older revision.
+  if (command === "loadTripState") await flushStagedDraft();
   const result = await pythonRuntime.request(command, requestPayload);
   if (command === "clearLocalData" && isRecord(result) && result.cleared === true) {
     stagedDraft = null;

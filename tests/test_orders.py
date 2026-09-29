@@ -127,7 +127,7 @@ class OrderEvidenceTests(unittest.TestCase):
         for status, expected in [("待支付", "pending_payment"), ("已支付", "fulfilled"),
                                  ("已取消", "cancelled"), ("支付超时", "expired")]:
             with self.subTest(status=status):
-                self.assertEqual(self.read(snapshot(status)).status, expected)
+                self.assertEqual(self.read(snapshot(status), known_id="E123456").status, expected)
         for field, value in [("text", "G1010 2026-09-10 北京 上海 二等座 张三"),
                              ("text", "G101 2026-09-11 北京 上海 二等座 张三"),
                              ("text", "G101 2026-09-10 北京 上海 一等座 张三"),
@@ -141,7 +141,7 @@ class OrderEvidenceTests(unittest.TestCase):
         for state, expected in [("已支付", "active"), ("待兑现", "active"), ("兑现成功", "fulfilled"), ("兑现失败", "failed")]:
             value = snapshot(state)
             value["orders"][0]["kind"] = "alternate"
-            self.assertEqual(self.read(value, intent("alternate")).status, expected)
+            self.assertEqual(self.read(value, intent("alternate"), known_id="E123456").status, expected)
 
     def test_multi_combination_reverse_route_and_order_kind_rejected(self):
         for change in [{"text": "G101 G102 2026-09-10 北京 上海 二等座 张三"},
@@ -421,6 +421,22 @@ class DecisionTests(unittest.TestCase):
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_legacy_preparation_settings_and_http_offset_do_not_advance_query_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = RailWatchBridge(tmp)
+            try:
+                bridge.server_time_sync = Mock()
+                bridge.server_time_sync.offset_seconds = 5
+                bridge.server_time_sync.server_timestamp.return_value = 1000
+                bridge._wait_for_target_timestamp = Mock(return_value=True)
+                for prepare in (0, 2, 30):
+                    config = {"_target_timestamp": 1000, "prepare_time": prepare, "prewarm_lead_seconds": 120}
+                    self.assertTrue(bridge._wait_for_target_time(config))
+                    bridge._wait_for_target_timestamp.assert_called_with(1000, config)
+                bridge.server_time_sync.sync.assert_not_called()
+            finally:
+                bridge.notification_service.close()
+
     def test_hot_clock_never_syncs_or_applies_http_offset(self):
         clock = ServerTimeSync()
         clock._offset_seconds = 180
@@ -461,8 +477,112 @@ class ScheduleTests(unittest.TestCase):
             self.assertFalse(bridge._wait_for_target_timestamp(10**12, {}))
 
 
+class OrderResultWaitingTests(unittest.TestCase):
+    def setUp(self):
+        self.elapsed = 0.0
+        self.logs = []
+        self.page = OrderPage(Mock(), wait=self.advance, log=self.logs.append)
+        clock = patch("railwatch_order_page.time.monotonic", lambda: self.elapsed)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def advance(self, seconds):
+        self.elapsed += seconds
+
+    def test_slow_payment_page_without_recognized_progress_gets_sixty_seconds(self):
+        self.page.snapshot = lambda: snapshot() if self.elapsed >= 45 else snapshot(orders=[])
+        self.page.reconcile = Mock()
+        result = self.page._post_submit(intent(), True)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.elapsed, 45)
+        self.page.reconcile.assert_not_called()
+
+    def test_official_queue_outlives_timeout_then_payment_page_gets_fresh_grace(self):
+        def read():
+            if self.elapsed < 120:
+                return snapshot(orders=[], processing=True, confirmation=True)
+            return snapshot() if self.elapsed >= 150 else snapshot(orders=[])
+        self.page.snapshot = read
+        self.page.reconcile = Mock()
+        result = self.page._post_submit(intent(), True)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.elapsed, 150)
+        self.assertEqual(len(self.logs), 4)
+        self.page.reconcile.assert_not_called()
+
+    def test_alternate_submission_waits_for_delayed_order_without_repeating_clicks(self):
+        selected = intent("alternate")
+        submitted = [False]
+        def read():
+            if not submitted[0]:
+                return snapshot(orders=[], details=[{}])
+            if self.elapsed < 90:
+                return snapshot(orders=[], processing=True)
+            value = snapshot()
+            value["orders"][0]["kind"] = "alternate"
+            return value
+        self.page.snapshot = read
+        self.page.prepare_people = Mock(return_value=True)
+        self.page.set_deadline = Mock(return_value=True)
+        self.page.verify_form = Mock(return_value=True)
+        submit, candidate = Mock(), Mock()
+        submit.click.side_effect = lambda: submitted.__setitem__(0, True)
+        self.page.button = Mock(return_value=submit)
+        result = self.page.alternate(candidate, selected)
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertEqual(self.elapsed, 90)
+        candidate.click.assert_called_once()
+        submit.click.assert_called_once()
+        self.page.driver.get.assert_not_called()
+
+    def test_unrecognized_page_times_out_without_authorizing_fallback(self):
+        for kind in ("regular", "alternate"):
+            with self.subTest(kind=kind):
+                self.elapsed = 0
+                self.page.snapshot = lambda: snapshot(orders=[])
+                result = self.page.wait_result(intent(kind))
+                self.assertEqual(self.elapsed, 60)
+                self.assertEqual(result.status, "unknown")
+                self.assertFalse(result.can_fallback)
+                self.assertFalse(result.no_order)
+                self.page.driver.get.assert_not_called()
+
+    def test_disappeared_queue_does_not_wait_forever_on_an_unrecognized_page(self):
+        self.page.snapshot = lambda: snapshot(orders=[], processing=self.elapsed < 30)
+        result = self.page.wait_result(intent())
+        self.assertEqual(result.status, "unknown")
+        self.assertGreaterEqual(self.elapsed, 89)
+        self.assertLessEqual(self.elapsed, 90)
+
+    def test_stop_during_official_queue_preserves_page_and_order(self):
+        self.page.snapshot = lambda: snapshot(orders=[], processing=True, confirmation=True)
+        self.page.stop = lambda: self.elapsed >= 2
+        self.page.reconcile = Mock()
+        result = self.page._post_submit(intent(), True)
+        self.assertEqual(result.status, "unknown")
+        self.assertFalse(result.can_fallback)
+        self.assertEqual(self.elapsed, 2)
+        self.page.reconcile.assert_not_called()
+
+    def test_verification_interrupts_queue_wait_immediately(self):
+        self.page.snapshot = lambda: snapshot(orders=[], processing=True,
+                                             verification=self.elapsed >= 3)
+        result = self.page.wait_result(intent())
+        self.assertEqual(result.status, "verification")
+        self.assertEqual(self.elapsed, 3)
+
+    def test_queue_does_not_hide_matched_terminal_order(self):
+        for state, expected in (("待支付", "pending_payment"), ("支付超时", "expired"),
+                                ("已取消", "cancelled")):
+            with self.subTest(state=state):
+                self.page.snapshot = lambda: snapshot(state, processing=True)
+                result = self.page.wait_result(intent(), known_id="E123456")
+                self.assertEqual(result.status, expected)
+                self.assertEqual(self.elapsed, 0)
+
+
 class RegularConfirmationTests(unittest.TestCase):
-    """提交在途后的收尾语义：弹窗必完成、未知必核对、页面不乱跳。"""
+    """提交后正常确认；停止不再点击，未知保留核对，页面不乱跳。"""
 
     def _page(self):
         from railwatch_order_page import OrderPage
@@ -475,6 +595,44 @@ class RegularConfirmationTests(unittest.TestCase):
         page.wait_result = lambda target, submitted=True, timeout=10: OrderResult(
             "unknown", "未获得匹配的订单证据，请打开官方订单详情核对")
         return page
+
+    def test_timing_preserves_slow_page_and_passenger_costs_without_extra_writes(self):
+        page = self._page()
+        elapsed = [0.0]
+        events = []
+        page.mark = lambda stage, detail=None: events.append((stage, detail))
+        def delay(seconds):
+            elapsed[0] += seconds
+            self.assertFalse(any(stage == "order_timing" for stage, _ in events))
+            return True
+        book, submit, confirm = Mock(), Mock(), Mock()
+        book.click.side_effect = lambda: delay(6)
+        page.prepare_people = lambda target: delay(.5)
+        page.select_regular_seats = lambda target: delay(.25)
+        page.verify_form = lambda target: delay(.1)
+        page.button = lambda selectors: submit if selectors == ("#submitOrder_id",) else confirm
+        page.wait_result = lambda *a, **k: OrderResult("pending_payment", order_id="E123456")
+        with patch("railwatch_order_page.time.monotonic", lambda: elapsed[0]):
+            result = page.regular(book, intent())
+        self.assertEqual(result.status, "pending_payment")
+        saved = [detail for stage, detail in events if stage == "order_timing"]
+        self.assertEqual(len(saved), 1)
+        steps = {step["id"]: step["duration_ms"] for step in saved[0]["steps"]}
+        self.assertEqual((steps["page_load"], steps["passengers"], steps["seats"], steps["readback"]),
+                         (6000, 500, 250, 100))
+        submit.click.assert_called_once()
+        confirm.click.assert_called_once()
+
+    def test_timing_write_failure_does_not_change_result_and_failed_readback_is_recorded(self):
+        page = self._page()
+        page.prepare_people = lambda target: False
+        events = []
+        page.mark = lambda stage, detail=None: events.append((stage, detail))
+        result = page.regular(Mock(), intent())
+        self.assertEqual(result.status, "verification")
+        self.assertEqual([s["id"] for s in events[0][1]["steps"]], ["page_load", "passengers"])
+        page.mark = Mock(side_effect=OSError("disk full"))
+        self.assertEqual(page.regular(Mock(), intent()).status, "verification")
 
     def test_confirmation_clicks_directly_even_when_modal_readback_differs(self):
         # 弹窗打开时回读会把乘客在背景页和弹窗表格各读一遍，核对必然失败；
@@ -542,7 +700,7 @@ class RegularConfirmationTests(unittest.TestCase):
         self.assertEqual(result.status, "verification")
         confirm.click.assert_called_once()
 
-    def test_confirmation_still_completes_when_stop_is_requested(self):
+    def test_confirmation_is_not_clicked_when_stop_is_requested(self):
         page = self._page()
         state = {"stopped": False}
         page.stop = lambda: state["stopped"]
@@ -554,14 +712,14 @@ class RegularConfirmationTests(unittest.TestCase):
             submit.click.side_effect = lambda: state.update(stopped=True)
             return submit
         page.button = button
-        # 停止请求让确认弹窗 poll 立即返回空：弹窗只能靠最终直查兜住。
+        # Even if a dialog is available, stop must prevent any confirmation.
         poll_results = iter([True, True, None])
-        page.poll = lambda predicate, timeout=10, ignore_stop=False: next(poll_results, None)
+        page.poll = lambda predicate, timeout=10: next(poll_results, None)
         logs = []
         page.log = logs.append
         result = page.regular(Mock(), intent())
-        confirm.click.assert_called_once()
-        self.assertTrue(any("仍完成本次确认" in message for message in logs))
+        confirm.click.assert_not_called()
+        self.assertIn("已停止后续操作", result.reason)
         self.assertEqual(result.status, "unknown")
 
     def test_unknown_after_confirmation_reconciles_official_order_page(self):

@@ -75,8 +75,10 @@ class RuntimeReliabilityTests(unittest.TestCase):
             def read(_script):
                 entered.set()
                 release.wait(3)
-                return []
-            bridge.driver = Mock(window_handles=["one"])
+                return {"recognized": True, "page": 1, "total_pages": 1, "pagination_valid": True, "complete": True, "items": []}
+            bridge.driver = Mock(window_handles=["one"], current_url="https://kyfw.12306.cn/otn/view/passengers.html")
+            bridge.driver.execute.return_value = {"value": {"handle": "temporary"}}
+            bridge.driver.timeouts.page_load = 300
             bridge.driver.execute_script.side_effect = read
             worker = threading.Thread(target=bridge.read_passengers)
             worker.start()

@@ -22,11 +22,12 @@ from railwatch_state import RailWatchState
 
 
 def main():
+    version = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
     now = time.time()
     config = {**default_config(), "date_range": "单日", "train_code": "G101,G103",
               "seat_keyword": "二等座,一等座", "passengers": "演示乘客"}
     state = state_to_payload(RailWatchState.initial())
-    runtime = {"app_display_name": "RailWatch 12306", "app_version": "0.4.2", "state": state,
+    runtime = {"app_display_name": "RailWatch 12306", "app_version": version, "state": state,
                "date_policy": {"presale_window_days": 15}, "seat_capabilities": public_seat_capabilities(),
                "data_dir": "离线演示目录", "data_dir_writable": True, "chrome_version": "离线演示",
                "core_available": True}
@@ -55,7 +56,7 @@ def main():
       },stageDraft:()=>{},onEvent:fn=>{window.demoListeners.push(fn);return ()=>{};},
       onConfirmRequest:()=>()=>{},onUpdateState:()=>()=>{},stopUrgentAlert:()=>{},
       respondConfirmation:()=>{},openExternal:async()=>({ok:true}),
-      getUpdateState:async()=>({phase:'idle',currentVersion:'0.4.2'}),getAppInfo:async()=>({appVersion:'0.4.2'})};
+      getUpdateState:async()=>({phase:'idle',currentVersion:runtime.app_version}),getAppInfo:async()=>({appVersion:runtime.app_version})};
       window.demoEmit=(event,payload)=>window.demoListeners.forEach(fn=>fn({event,payload}));
     """
 
@@ -87,7 +88,7 @@ def main():
                     driver.execute_script("document.querySelector('.page-surface').scrollTop=0")
                     time.sleep(0.3)
                     assert driver.execute_script("return document.documentElement.scrollWidth<=innerWidth")
-                    driver.save_screenshot(str(ROOT / "docs/images" / f"{name}-v0.4.2.png"))
+                    driver.save_screenshot(str(ROOT / "docs/images" / f"{name}-v{version}.png"))
 
                 driver.find_element("css selector", '[aria-label="行程设置"]').click()
                 wait.until(lambda d: "恢复草稿" in d.find_element("tag name", "body").text)

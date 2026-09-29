@@ -12,6 +12,11 @@ from typing import Callable, Optional
 from railwatch_bridge import RailWatchBridge, dumps_json
 
 
+# These commands signal cancellation without browser/network work. Keep them
+# off the ordinary queue so slow lookups cannot postpone stopping a task.
+CONTROL_COMMANDS = frozenset({"stopMonitor", "cancelRehearsal", "systemResumed", "cancelShutdown"})
+
+
 def configure_stdio() -> None:
     for stream_name in ("stdin", "stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
@@ -34,6 +39,8 @@ class RailWatchRuntime:
         self.writer = writer or self._stdout_writer
         self.bridge = bridge or RailWatchBridge(event_callback=self.emit_event)
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="railwatch-cmd")
+        self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-control")
+        self._shutdown_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-shutdown")
 
     def emit_event(self, event: dict) -> None:
         self._write({"type": "event", **event})
@@ -67,7 +74,9 @@ class RailWatchRuntime:
                 or not isinstance(command, str) or not 0 < len(command) <= 80
                 or not isinstance(payload, dict)):
             return self._protocol_error(request_id)
-        return self._executor.submit(self._run_command, request_id, command, payload)
+        executor = (self._control_executor if command in CONTROL_COMMANDS else
+                    self._shutdown_executor if command in ("prepareShutdown", "taskActivity") else self._executor)
+        return executor.submit(self._run_command, request_id, command, payload)
 
     def _run_command(self, request_id, command: str, payload: dict) -> None:
         try:
@@ -161,6 +170,8 @@ class RailWatchRuntime:
         return handlers[command]()
 
     def shutdown(self) -> None:
+        self._control_executor.shutdown(wait=True)
+        self._shutdown_executor.shutdown(wait=True)
         self._executor.shutdown(wait=True)
 
     def _stdout_writer(self, payload: dict) -> None:

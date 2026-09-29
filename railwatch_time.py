@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import math
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Optional
@@ -53,6 +54,8 @@ class ServerTimeSync:
         ):
             return self._offset_seconds
 
+        self.rtt_seconds = None
+        self.uncertainty_seconds = None
         try:
             separator = "&" if "?" in self.time_url else "?"
             request = urllib.request.Request(
@@ -66,20 +69,27 @@ class ServerTimeSync:
                 if not date_header:
                     raise RuntimeError("12306 响应缺少 Date 头")
                 server_dt = parsedate_to_datetime(date_header)
+                if server_dt is None or server_dt.tzinfo is None:
+                    raise ValueError("HTTP时间格式无效")
                 server_ts = server_dt.timestamp()
-                self.rtt_seconds = max(0.0, time.monotonic() - started_mono)
+                finished_mono, finished_wall = time.monotonic(), time.time()
+                self.rtt_seconds = max(0.0, finished_mono - started_mono)
+                if abs((finished_wall - started_wall) - self.rtt_seconds) > 0.1:
+                    raise RuntimeError("测量期间系统时间发生变化，请对时完成后重试")
                 self.uncertainty_seconds = 0.5 + self.rtt_seconds / 2
-                if float(response.headers.get("Age", "0")) > 0:
+                age = float(response.headers.get("Age", "0"))
+                if not math.isfinite(age) or age != 0:
                     raise RuntimeError("HTTP响应来自缓存，不能用于时间检查")
                 self._offset_seconds = server_ts + 0.5 - (started_wall + self.rtt_seconds / 2)
                 self._last_sync_monotonic = now_mono
                 self._last_error = ""
                 self.log(f"HTTP时间辅助检查：偏差 {self._offset_seconds:+.3f}s，估计不确定度 ±{self.uncertainty_seconds:.3f}s；定时使用系统时钟")
-        except (urllib.error.URLError, OSError, RuntimeError, ValueError) as exc:
+        except (urllib.error.URLError, OSError, RuntimeError, ValueError, TypeError, OverflowError) as exc:
             self._last_error = str(exc)
+            self._offset_seconds = 0.0  # An old estimate is not evidence for a failed new sample.
             self.uncertainty_seconds = None
             if force or not self._last_sync_monotonic:
-                self.log(f"服务器时间校准失败，使用本地时钟：{exc}")
+                self.log(f"HTTP时间辅助检查不可用；定时仍使用系统时钟：{exc}")
             self._last_sync_monotonic = now_mono
         return self._offset_seconds
 

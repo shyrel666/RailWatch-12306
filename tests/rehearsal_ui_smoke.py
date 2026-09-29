@@ -26,6 +26,8 @@ def main():
                "summary": "本地演示检查通过", "duration_ms": 125, "details": []} for key, title in CHECKS]
     checks[4].update(status="warn", summary="列表未明确成人票种，普通订单将在下单页回读", details=["测*：本人类型未显示"],
                      fix={"page": "行程设置", "section": "trip-basics", "label": "修改乘车人"})
+    checks[7].update(status="unknown", summary="时间测量误差过大，无法判断电脑时钟是否准确；定时仍使用系统时钟",
+                     details=["HTTP 辅助估计偏差 +5.20s，不确定度至少 ±6.00s。", "请在启动定时任务前完成系统对时。"])
     report = {"schema_version": 1, "rehearsal_id": "ui", "trigger": "manual", "started_at": 1, "finished_at": 2,
               "trip": public_trip(config), "checks": checks, "verdict": "risky",
               "measurements": {"scheduler_late_ms": {"p95": 15}, "query_round_trip_ms": 230, "drill_ms": {"readback": 420}}}
@@ -33,6 +35,12 @@ def main():
     review = {"run_id": "demo", "started_at": 1, "target_at": 2, "trip": public_trip(config), "conclusion": "未命中",
               "segments": report["prediction"], "prediction": report["prediction"], "slowest": "下单页与核对",
               "preparation_margin_ms": 22000, "query_median_ms": 230, "history_complete": False, "note": "演示数据；未记录阶段不推测补齐。"}
+    review["order_timings"] = [{"kind": "regular", "segments": [
+        {"id": "page_load", "label": "打开并等待下单页", "duration_ms": 6000, "start_ms": 0, "source": "本机观察"},
+        {"id": "passengers", "label": "选择乘车人", "duration_ms": 500, "start_ms": 6000, "source": "本机观察"},
+        {"id": "seats", "label": "选择席别", "duration_ms": 250, "start_ms": 6500, "source": "本机观察"},
+        {"id": "readback", "label": "提交前核对", "duration_ms": 100, "start_ms": 6750, "source": "本机观察"},
+    ]}]
     runtime = {"state": state_to_payload(RailWatchState.initial()), "app_version": "0.5.0", "data_dir": "演示目录"}
     script = """
       const config=CONFIG, report=REPORT, review=REVIEW, runtime=RUNTIME;
@@ -98,7 +106,8 @@ def main():
                 start.click()
                 # A manual run opens the result dialog; checks light up inside it.
                 dialog_body = ".rehearsal-dialog .ant-modal-container"
-                wait.until(lambda d: len(d.find_elements("css selector", f"{dialog_body} .rehearsal-check.pass")) == 9)
+                wait.until(lambda d: len(d.find_elements("css selector", f"{dialog_body} .rehearsal-check.pass")) == 8)
+                assert len(driver.find_elements("css selector", f"{dialog_body} .rehearsal-check.unknown")) == 1
                 assert "有风险" in driver.find_element("css selector", f"{dialog_body} .rehearsal-verdict").text
                 assert "有风险" in driver.find_element("css selector", "#monitor-rehearsal .rehearsal-verdict").text
                 assert driver.execute_script("return commands.filter(c=>c==='rehearse').length") == 1
@@ -141,7 +150,11 @@ def main():
                 wait.until(lambda d: d.find_element("css selector", '#order-run-reviews .run-reviews-toggle')).click()
                 wait.until(lambda d: d.find_element("xpath", "//button[span[text()='查看复盘']]" )).click()
                 wait.until(lambda d: d.find_element("css selector", '[aria-label="复盘详情"]'))
+                breakdown = driver.find_element("css selector", '[aria-label="下单分步耗时"]')
+                assert "6.00 秒" in breakdown.text and "不重复计入总耗时" in breakdown.text
                 driver.find_element("id", "order-run-reviews").screenshot(str(output / "review-dark.png"))
+                driver.set_window_size(1180, 720)
+                assert driver.execute_script("return arguments[0].scrollWidth<=arguments[0].clientWidth+1", breakdown)
                 errors = [entry for entry in driver.get_log("browser") if entry["level"] == "SEVERE"]
                 assert not errors, errors
                 print("PASS: rehearsal events, risk/fix display, review, light/dark, 1180px layout; synthetic IPC only")

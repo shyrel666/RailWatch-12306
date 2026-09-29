@@ -92,7 +92,8 @@ export function TimerSettings({ config, update, windowDays }: {
       {config.sale_time_source === "12306" && canApply && !usingSaleTime && <p className="trip-date-warning" role="status">
         当前设置与此行程的起售时间不同，请点击“设为起售时间”更新，或手动修改。
       </p>}
-      <p>设置后，请在仪表盘点击“开始监控”，程序才会准备并等待；请保持程序运行，并提前完成登录、校准电脑时间。</p>
+      <p>点击“开始监控”后立即准备查询页，到设定时刻才发起查询，不会固定提前两秒。请保持程序运行，并在启动任务前完成登录和系统自动对时。</p>
+      <p>彩排中的时间偏差仅供检查，不会自动补偿查询时刻；测量误差过大时会显示“无法判断”。</p>
     </>}
   </PreferenceSection>;
 }

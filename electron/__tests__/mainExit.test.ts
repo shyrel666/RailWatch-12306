@@ -223,3 +223,42 @@ test("renderer crash cancels pending decisions and reloads before showing anothe
   harness.ipcListeners.get("railwatch:confirm-ready")!({ senderFrame: { url: harness.rendererUrl } });
   expect(harness.send).toHaveBeenCalledOnce();
 });
+
+test("renderer recovery loads the latest staged revision before accepting new edits", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const stage = harness.ipcListeners.get("railwatch:stage-draft")!;
+  const command = harness.ipcHandlers.get("railwatch:command")!;
+  let disk = { schema_version: 1, revision: 5, saved_at: 1, config: { train_code: "G100" } };
+  harness.request.mockImplementation(async (name, payload) => {
+    if (name === "saveTripDraft") {
+      if (payload.revision <= disk.revision) throw new Error("草稿修订号已过期，请重新加载最新草稿。");
+      disk = { ...disk, ...payload, saved_at: disk.saved_at + 1 };
+      return disk;
+    }
+    if (name === "loadTripState") return { saved_config: {}, saved_at: 0,
+      draft: { status: "available", draft: disk, warning: null } };
+    return name === "taskActivity" ? { state: "idle", unresolved_order: false } : { ready: true };
+  });
+  stage(event, { revision: 10, config: { train_code: "G101" } });
+  harness.webListeners.get("render-process-gone")!();
+  const restored = await command(event, "loadTripState");
+  expect(restored.draft.draft).toMatchObject({ revision: 10, config: { train_code: "G101" } });
+  const next = { revision: restored.draft.draft.revision + 1, config: { train_code: "G102" } };
+  stage(event, next);
+  await command(event, "saveTripDraft", next);
+  await exitAttempt();
+  expect(disk).toMatchObject(next);
+  const writes = harness.request.mock.calls.filter(call => call[0] === "saveTripDraft");
+  expect(writes.at(-1)?.[1]).toEqual(next);
+  expect(harness.quit).toHaveBeenCalledOnce();
+});
+
+test("a failed recovery flush cannot initialize the renderer with an older revision", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  harness.ipcListeners.get("railwatch:stage-draft")!(event, { revision: 8, config: { train_code: "G101" } });
+  harness.request.mockRejectedValue(new Error("disk full"));
+  await expect(harness.ipcHandlers.get("railwatch:command")!(event, "loadTripState")).rejects.toThrow("disk full");
+  expect(harness.request).not.toHaveBeenCalledWith("loadTripState", expect.anything());
+});

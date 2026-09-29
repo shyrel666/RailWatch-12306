@@ -43,10 +43,10 @@ class RehearsalChecksTests(unittest.TestCase):
                   "passenger_selections": [{"name": "测试甲", "ticket_type": "adult", "identity_hint": "11***99"}]}
         holder = {"name": "测试甲", "ticket_type": "unknown", "type_source": "unavailable",
                   "verification": "passed", "identity_hint": "11***99"}
-        # The account holder's row shows no type on the official page; treat it as adult, not a risk.
+        # A missing type is a warning, never affirmative adult evidence.
         verdict = check_passengers(config, {"complete": True, "items": [holder]})
-        self.assertEqual(verdict["status"], "pass")
-        self.assertIn("本人行", verdict["details"][0])
+        self.assertEqual(verdict["status"], "warn")
+        self.assertIn("未提供票种证据", verdict["details"][0])
         self.assertEqual(check_passengers(config, {"complete": True, "items": [{**holder, "verification": "pending"}]})["status"], "warn")
         contact = {**holder, "type_source": "profile_metadata"}
         self.assertEqual(check_passengers(config, {"complete": True, "items": [contact]})["status"], "fail")
@@ -88,7 +88,8 @@ class RehearsalChecksTests(unittest.TestCase):
         self.assertEqual(check_train_seat(config, [], {"status": "rate_limited", "retry_after_seconds": 30})["status"], "warn")
 
     def test_local_thresholds(self):
-        for value, expected in [(1, "pass"), (3, "warn"), (3.1, "fail")]:
+        for value, expected in [(.5, "pass"), (1, "unknown"), (1.6, "warn"),
+                                (3.1, "warn"), (3.6, "fail"), (-3.6, "fail")]:
             self.assertEqual(check_clock(value, .5)["status"], expected)
         self.assertEqual(check_clock(0, None)["status"], "unknown")
         for value, expected in [(100, "pass"), (250, "warn"), (251, "fail")]:
@@ -97,3 +98,11 @@ class RehearsalChecksTests(unittest.TestCase):
         self.assertEqual(check_alerts({"email_enabled": True}, {})["status"], "warn")
         official = dt.datetime.fromisoformat("2026-09-28T15:00:00+08:00")
         self.assertEqual(check_sale_time({"timer_enabled": True, "sale_at": official.isoformat()}, official, 0)["status"], "pass")
+
+    def test_clock_uncertainty_cannot_report_slow_network_as_clock_failure_or_success(self):
+        for offset, uncertainty in [(5.2, 6), (0, 6), (10, 6), (0, None), (None, .5),
+                                    (float("nan"), .5), (0, float("inf")), (0, -1), (True, .5)]:
+            with self.subTest(offset=offset, uncertainty=uncertainty):
+                self.assertEqual(check_clock(offset, uncertainty)["status"], "unknown")
+        self.assertEqual(check_clock(0, .5, "request failed")["status"], "unknown")
+        self.assertIn("不用于提前查询", " ".join(check_clock(5.2, 6)["details"]))

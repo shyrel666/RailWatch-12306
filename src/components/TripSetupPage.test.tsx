@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { isoDaysFromToday, todayIso } from "../lib/tripDate";
@@ -175,7 +175,7 @@ describe("TripSetupPage", () => {
       { name: "赵六", ticket_type: "unknown", identity_hint: "", ambiguous: false },
     ], warning: null } : undefined) as CommandRunner;
     render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
-    await user.click(screen.getByRole("button", { name: "从官方当前页面读取乘客" }));
+    await user.click(screen.getByRole("button", { name: "从官方页面读取乘客" }));
     await user.click(await screen.findByRole("button", { name: /张三.*成人/ }));
     expect(railwatchStore.getState().config.passengers).toBe("张三");
     expect(railwatchStore.getState().config.passenger_selections).toEqual([
@@ -185,6 +185,37 @@ describe("TripSetupPage", () => {
     expect(screen.getByRole("button", { name: /王五.*同名需人工核对/ }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: /赵六.*列表未标票种/ }).hasAttribute("disabled")).toBe(true);
     expect(screen.queryByText("张三 成人")).toBeNull();
+  });
+
+  test("passenger import disables repeat clicks, clears stale candidates and recovers after failure", async () => {
+    const user = userEvent.setup();
+    let rejectRead!: (reason: Error) => void;
+    const read = vi.fn().mockResolvedValueOnce({ items: [
+      { name: "张三", ticket_type: "adult", identity_hint: "11***22", ambiguous: false },
+    ], warning: null }).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRead = reject; }));
+    const runCommand = vi.fn(async (command: string) => command === "readPassengers" ? read() : undefined) as CommandRunner;
+    render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
+    await user.click(screen.getByRole("button", { name: "从官方页面读取乘客" }));
+    expect(await screen.findByRole("button", { name: /张三.*成人/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "从官方页面读取乘客" }));
+    const loading = screen.getByRole("button", { name: "正在读取官方乘客…" });
+    expect(loading.hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("button", { name: /张三.*成人/ })).toBeNull();
+    await user.click(loading);
+    expect(read).toHaveBeenCalledTimes(2);
+    await act(async () => rejectRead(new Error("unavailable")));
+    expect(screen.getByText("读取未完成，请检查浏览器状态后重试。")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "从官方页面读取乘客" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("passenger import is unavailable while monitoring owns the browser", async () => {
+    const user = userEvent.setup();
+    railwatchStore.setState({ status: { ...defaultStatus, monitoring: true } });
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
+    await user.click(screen.getByRole("button", { name: "从官方页面读取乘客" }));
+    expect(vi.mocked(runCommand).mock.calls.some(([command]) => command === "readPassengers")).toBe(false);
+    expect(screen.getByText("监控运行中，请停止监控后读取乘客。")).toBeTruthy();
   });
 
   test("draft recovery changes editing config without starting a task", async () => {

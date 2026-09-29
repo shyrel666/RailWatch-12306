@@ -155,7 +155,7 @@ class QueryConfig:
     passenger_count: int = 1    # 未指定姓名时默认勾选的乘车人数
     
     # 定时开抢增强
-    prepare_time: int = 2      # 提前准备秒数
+    prepare_time: int = 2      # 兼容字段：仅用于冲刺窗口判断，不提前定时查询
     keep_alive: bool = True     # 是否开启会话保活
     passengers: str = ""       # 目标乘车人姓名，逗号分隔
     passenger_selections: List[dict] = field(default_factory=list)
@@ -171,7 +171,7 @@ class QueryConfig:
     sale_time_source: str = "manual"
     sale_time_checked_at: str = ""
     burst_window_seconds: float = 45.0
-    prewarm_lead_seconds: float = 120.0
+    prewarm_lead_seconds: float = 120.0  # 兼容字段；桌面端在启动任务时立即准备页面
     
     # 新增：多目标支持
     targets: List[MonitorTarget] = field(default_factory=list)

@@ -1,7 +1,7 @@
 import type { RailWatchConfig, RailWatchPage } from "../types";
 
 export type RehearsalCheck = {
-  id: string; title: string; critical: boolean;
+  id: string; title: string; critical: boolean; required_evidence?: boolean;
   status?: "pass" | "warn" | "fail" | "unknown" | "skipped";
   summary?: string; details?: string[]; duration_ms?: number;
   fix?: { page: RailWatchPage; section: string; label: string; sale_at?: string; checked_at?: number };
@@ -17,6 +17,7 @@ export type RehearsalStarted = { rehearsal_id: string; trigger: "manual" | "task
 export type RunReviewSummary = { run_id: string; started_at: number; target_at: number | null; trip?: Partial<RehearsalReport["trip"]>; conclusion: string };
 export type RunReviewDetail = RunReviewSummary & {
   segments: TimelineSegment[]; prediction: TimelineSegment[]; slowest: string | null;
+  order_timings?: { kind: "regular" | "alternate"; segments: TimelineSegment[] }[];
   preparation_margin_ms: number | null; query_median_ms: number | null; history_complete: boolean; note: string;
 };
 
