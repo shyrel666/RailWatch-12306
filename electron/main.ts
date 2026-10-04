@@ -288,7 +288,7 @@ function createWindow(): void {
     minHeight: 720,
     title: "RailWatch 12306",
     icon: appIconPath(),
-    backgroundColor: "#0d1117",
+    backgroundColor: "#101113",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

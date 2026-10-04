@@ -184,7 +184,7 @@ fs.mkdirSync(output, { recursive: true });
         if (
           layout.rootWidth > width ||
           layout.contentWidth > layout.visibleWidth + 1 ||
-          (layout.footerBottom && layout.footerBottom > height - 31)
+          (layout.footerBottom && layout.footerBottom > height - 8)
         )
           throw new Error(
             "Layout overflow: " + JSON.stringify(measurements.at(-1)),
@@ -372,7 +372,7 @@ fs.mkdirSync(output, { recursive: true });
         return (
           content.scrollWidth > content.clientWidth + 1 ||
           (form && form.scrollWidth > form.clientWidth + 1) ||
-          (footer && footer.getBoundingClientRect().bottom > innerHeight - 31)
+          (footer && footer.getBoundingClientRect().bottom > innerHeight - 8)
         );
       });
       if (overflow)

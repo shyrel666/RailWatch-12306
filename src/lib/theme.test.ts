@@ -15,13 +15,28 @@ test.each([false, true])(
     const { variables: colors } = getTheme(dark);
     for (const [foreground, background] of [
       ["text", "surface"],
+      ["text", "bg"],
       ["muted", "surface"],
       ["muted", "bg"],
       ["muted", "raised"],
+      ["muted", "subtle"],
       ["muted", "accent-soft"],
-      ["accent", "accent-soft"],
+      ["accent-text", "surface"],
+      ["accent-text", "bg"],
+      ["accent-text", "accent-soft"],
+      ["on-accent", "accent"],
+      ["success", "surface"],
+      ["success", "success-soft"],
+      ["warning", "surface"],
       ["warning", "warning-soft"],
+      ["danger", "surface"],
       ["danger", "danger-soft"],
+      ["board-text", "board"],
+      ["board-muted", "board"],
+      ["board-muted", "board-raised"],
+      ["led", "board"],
+      ["led-go", "board"],
+      ["led-stop", "board"],
     ]) {
       const [low, high] = [
         luminance(colors[`--${foreground}`]),
@@ -34,3 +49,10 @@ test.each([false, true])(
     }
   },
 );
+test("status colors never reuse the action color", () => {
+  for (const dark of [false, true]) {
+    const { variables: colors } = getTheme(dark);
+    for (const tone of ["--success", "--warning", "--danger"])
+      expect(colors[tone]).not.toBe(colors["--accent"]);
+  }
+});

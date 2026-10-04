@@ -1,12 +1,11 @@
 import { needsRehearsal, rehearsalExpired } from "../lib/rehearsal";
 import { tripFingerprint } from "../store/railwatchStore";
 import { useMemo } from "react";
-import { Button, Tooltip } from "antd";
+import { Button } from "antd";
 import {
   ArrowRight,
   ArrowUpRight,
   Bell,
-  CalendarDays,
   Check,
   Clock3,
   Database,
@@ -15,7 +14,6 @@ import {
   Pencil,
   ScrollText,
   Search,
-  TrainFront,
   UserRound,
 } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
@@ -26,11 +24,13 @@ import {
   useBeijingToday,
 } from "../lib/tripDate";
 import { displayedConfig } from "../lib/taskDisplay";
-import { dashboardAction } from "../lib/dashboardState";
+import { dashboardAction, hasUnresolvedOrder } from "../lib/dashboardState";
+import { countdown } from "../lib/saleCalendar";
 import { automationConfigIssue } from "../lib/automationReadiness";
 import { formatEventTime, presentEventLogs } from "../lib/formatEventLog";
 import { useClock } from "../lib/useClock";
-import type { RailWatchStatus } from "../types";
+import type { RailWatchConfig, RailWatchStatus } from "../types";
+import { DepartureBoard, TrainCodes, type BoardTone } from "./DepartureBoard";
 import type { WorkflowStep } from "./DisplayPrimitives";
 import { TripDateWarning } from "./DisplayPrimitives";
 import { SaleCalendar } from "./SaleCalendar";
@@ -116,15 +116,78 @@ function getWorkflowSteps(
   });
 }
 
+function boardStatus(status: RailWatchStatus): {
+  tone: BoardTone;
+  label: string;
+  live: boolean;
+} {
+  if (hasUnresolvedOrder(status.order))
+    return { tone: "wait", label: "订单待处理", live: false };
+  if (status.error_message) return { tone: "stop", label: "监控异常", live: false };
+  if (status.monitoring && status.task?.status === "waiting")
+    return { tone: "wait", label: "等待定时启动", live: false };
+  if (status.monitoring) return { tone: "go", label: "监控运行中", live: true };
+  return { tone: "idle", label: "监控未运行", live: false };
+}
+
+function formatClockTime(timestamp: number) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(timestamp));
+}
+
+function boardDisplay(
+  config: RailWatchConfig,
+  status: RailWatchStatus,
+  daysFromToday: number | null,
+  loops: number,
+  now: number,
+) {
+  if (status.monitoring && status.task?.started_at) {
+    const seconds = Math.max(0, Math.floor(now / 1000 - status.task.started_at));
+    return {
+      caption: "已运行",
+      value: [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
+        .map((value) => String(value).padStart(2, "0"))
+        .join(":"),
+      note: `已查询 ${loops} 次`,
+      tone: "go" as const,
+    };
+  }
+  const saleAt = config.timer_enabled && config.sale_at ? Date.parse(config.sale_at) : NaN;
+  if (Number.isFinite(saleAt) && saleAt > now) {
+    return {
+      caption: "距定时开售",
+      value: countdown(saleAt, now),
+      note: `北京时间 ${formatClockTime(saleAt)} 起售`,
+      tone: "led" as const,
+    };
+  }
+  if (daysFromToday === null) return undefined;
+  return {
+    caption: "出发日期",
+    value: `${config.date.slice(5, 7)}/${config.date.slice(8, 10)}`,
+    note:
+      daysFromToday < 0
+        ? "已过出发日期"
+        : daysFromToday === 0
+          ? "今天出发"
+          : daysFromToday === 1
+            ? "明天出发"
+            : `${daysFromToday} 天后出发`,
+    tone: daysFromToday < 0 ? ("stop" as const) : ("led" as const),
+  };
+}
+
 export function DashboardPage() {
   const status = useRailWatchStore((state) => state.status);
   const draft = useRailWatchStore((state) => state.config);
   const config = displayedConfig(draft, status);
   const trains = config.train_code.split(/[,，、\s]+/).filter(Boolean);
-  const trainSummary =
-    trains.length > 3
-      ? `${trains.slice(0, 3).join("、")} 等 ${trains.length} 个车次`
-      : config.train_code || "车次不限";
   const hits = useRailWatchStore((state) => state.hits);
   const logs = useRailWatchStore((state) => state.logs);
   const openLogs = useRailWatchStore((state) => state.setEventPanelVisible);
@@ -162,6 +225,16 @@ export function DashboardPage() {
       : status.task?.next_query_at
         ? `${Math.max(0, Math.ceil(status.task.next_query_at - now / 1000))} 秒`
         : "—";
+  const passengerCount =
+    config.passengers.split(/[,，、]/).filter(Boolean).length ||
+    config.passenger_count ||
+    1;
+  const seatText =
+    config.seat_keyword ||
+    (config.seat_prefer === "无偏好" ? "席别不限" : config.seat_prefer);
+  const dateStatus = getTripDateStatus(config.date, today, windowDays);
+  const board = boardStatus(status);
+  const display = boardDisplay(config, status, dateStatus.daysFromToday, loops, now);
   const autoSubmit = status.monitoring
     ? status.auto_submit_enabled || config.auto_submit
     : config.auto_submit;
@@ -170,12 +243,29 @@ export function DashboardPage() {
     : config.auto_alternate;
   return (
     <div className="dashboard" aria-label="RailWatch 仪表盘">
-      <section className="journey-summary" aria-label="当前行程">
-        <div className="section-heading">
-          <span className="eyebrow">
-            {status.monitoring ? "运行中的行程" : "当前行程"}
-          </span>
-          <div className="button-row journey-actions">
+      <DepartureBoard
+        label="当前行程"
+        className="dashboard-board"
+        kicker={status.monitoring ? "运行中的行程" : "当前行程"}
+        tone={board.tone}
+        live={board.live}
+        status={board.label}
+        from={config.from_station_cn || "出发站"}
+        to={config.to_station_cn || "到达站"}
+        fromNote={`${formatTripDate(config.date)} · ${config.date_range || "单日"}`}
+        toNote={`${seatText} · 乘客 ${passengerCount} 位`}
+        trackLabel={trains.length ? `${trains.length} 车次` : "车次不限"}
+        display={display}
+        facts={[
+          {
+            label: "车次",
+            value: <TrainCodes codes={trains} highlighted={hits.map((hit) => hit.train_code)} />,
+          },
+          { label: "席别", value: seatText },
+          { label: "乘客", value: `${passengerCount} 位 · 票种待官方页核对` },
+        ]}
+        actions={
+          <>
             <Button
               type="text"
               icon={<History size={16} aria-hidden="true" />}
@@ -185,83 +275,49 @@ export function DashboardPage() {
               订单历史
             </Button>
             <Button
-              type="text"
               icon={<Pencil size={16} aria-hidden="true" />}
               onClick={() => navigate("行程设置", "trip-basics")}
             >
               编辑行程
             </Button>
-            <span className={"status-badge " + (status.monitoring ? "green" : "")}>
-              {status.monitoring ? "监控运行中" : "监控未运行"}
+          </>
+        }
+      >
+        <TripDateWarning message={dateStatus.warning} />
+      </DepartureBoard>
+      <div className={"next-card " + action.tone}>
+        <section className="next-action" aria-label="下一步">
+          <div className="next-action-copy">
+            <span className="eyebrow">
+              {action.tone === "warning" ? "需要你处理" : "下一步"}
             </span>
+            <h2>{action.title}</h2>
+            <p>{action.description}</p>
           </div>
-        </div>
-        <div className="journey-route">
-          <strong>{config.from_station_cn || "出发站"}</strong>
-          <ArrowRight size={24} />
-          <strong>{config.to_station_cn || "到达站"}</strong>
-        </div>
-        <div className="journey-facts">
-          <span>
-            <CalendarDays size={16} />
-            {formatTripDate(config.date)} · {config.date_range || "单日"}
-          </span>
-          <span>
-            <UserRound size={16} />
-            乘客 {config.passengers.split(/[,，、]/).filter(Boolean).length || config.passenger_count || 1} 位 · 票种待官方页核对
-          </span>
-          <Tooltip title={trains.length > 3 ? config.train_code : undefined}>
-            <span tabIndex={trains.length > 3 ? 0 : undefined}>
-              <TrainFront size={16} />
-              {trainSummary}
-            </span>
-          </Tooltip>
-          <span>
-            {config.seat_keyword ||
-              (config.seat_prefer === "无偏好"
-                ? "席别不限"
-                : config.seat_prefer)}
-          </span>
-        </div>
-        <TripDateWarning
-          message={getTripDateStatus(config.date, today, windowDays).warning}
-        />
-      </section>
-      <section className={"next-action " + action.tone} aria-label="下一步">
-        <div className="next-action-copy">
-          <span className="eyebrow">
-            {action.tone === "warning" ? "需要你处理" : "接下来"}
-          </span>
-          <h2>{action.title}</h2>
-          <p>{action.description}</p>
-        </div>
-        <Button
-          type="primary"
-          icon={<ArrowRight size={16} />}
-          onClick={() => navigate(action.page, action.section)}
-        >
-          {action.label}
-        </Button>
-      </section>
-      <ol className="workflow-stepper" aria-label="监控流程">
-        {steps.map((step) => (
-          <li
-            key={step.label}
-            className={"workflow-step " + step.state}
-            aria-current={step.state === "current" ? "step" : undefined}
+          <Button
+            type="primary"
+            icon={<ArrowRight size={16} />}
+            onClick={() => navigate(action.page, action.section)}
           >
-            <span className="workflow-dot">
-              {step.state === "done" ? (
-                <Check size={13} />
-              ) : (
-                <step.icon size={13} />
-              )}
-            </span>
-            <strong>{step.label}</strong>
-            <small>{step.description}</small>
-          </li>
-        ))}
-      </ol>
+            {action.label}
+          </Button>
+        </section>
+        <ol className="workflow-stepper" aria-label="监控流程">
+          {steps.map((step) => (
+            <li
+              key={step.label}
+              className={"workflow-step " + step.state}
+              aria-current={step.state === "current" ? "step" : undefined}
+            >
+              <span className="workflow-dot" aria-hidden="true">
+                {step.state === "done" ? <Check size={10} strokeWidth={3} /> : null}
+              </span>
+              <strong>{step.label}</strong>
+              <small>{step.description}</small>
+            </li>
+          ))}
+        </ol>
+      </div>
       <div className="dashboard-lower">
         <section className="panel">
           <div className="section-heading">

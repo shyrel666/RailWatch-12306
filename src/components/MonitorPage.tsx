@@ -6,19 +6,7 @@ import { hasUnresolvedOrder } from "../lib/dashboardState";
 import { automationConfigIssue } from "../lib/automationReadiness";
 import { DATE_STRATEGIES, dateStrategy, dateStrategySummary } from "../lib/dateStrategy";
 import { orderPolicySummary } from "../lib/orderPolicy";
-import {
-  Activity,
-  Bell,
-  BellRing,
-  Clock3,
-  Lock,
-  Play,
-  Radar,
-  RefreshCw,
-  Square,
-  Timer,
-  TrainFront,
-} from "lucide-react";
+import { Bell, BellRing, Lock, Play, Square } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import { railwatchStore, tripFingerprint } from "../store/railwatchStore";
 import { displayedConfig, taskLabels } from "../lib/taskDisplay";
@@ -31,6 +19,8 @@ import type { TicketHit } from "../types";
 import type { CommandRunner } from "./componentTypes";
 import { QueryResults } from "./QueryResults";
 import { queryTargets, selectableQueryTrains } from "../lib/queryResults";
+import { countdown as saleCountdown } from "../lib/saleCalendar";
+import { DepartureBoard, TrainCodes, type BoardTone } from "./DepartureBoard";
 
 function formatTripDate(date: string) {
   if (!date) return "—";
@@ -116,7 +106,6 @@ export function MonitorPage({
   const fromStation = config.from_station_cn || "未设置";
   const toStation = config.to_station_cn || "未设置";
   const tripDate = formatTripDate(config.date);
-  const trainPref = config.train_code || "不限";
   const seatPref =
     config.seat_keyword ||
     (config.seat_prefer === "无偏好" ? "" : config.seat_prefer) ||
@@ -138,6 +127,55 @@ export function MonitorPage({
       (!draftConfig.timer_enabled || draftConfig.sale_at),
   );
   const canStop = status.monitoring;
+  const trainCodes = queryTargets(config.train_code.toUpperCase());
+  const headline = unresolvedOrder
+    ? "当前订单待处理"
+    : lastHumanAction
+      ? "等待人工处理"
+      : status.error_message
+        ? "监控异常"
+        : !status.monitoring && automationIssue
+          ? "自动化配置待完善"
+          : taskLabels[status.task?.status || ""] ||
+            (canStart ? "监控就绪" : "等待就绪");
+  const message = unresolvedOrder
+    ? "请先处理当前订单，再开始下一次监控"
+    : lastHumanAction
+      ? "请按照下方提示在官方页面继续操作"
+      : status.error_message ||
+        (status.monitoring
+          ? status.status_message
+          : automationIssue ||
+            (canStart ? "行程已配置，可启动监控" : "请配置有效的行程日期"));
+  const waitingForSale = status.monitoring && status.task?.status === "waiting";
+  const boardTone: BoardTone =
+    unresolvedOrder || lastHumanAction
+      ? "wait"
+      : status.error_message
+        ? "stop"
+        : status.monitoring
+          ? waitingForSale
+            ? "wait"
+            : "go"
+          : automationIssue
+            ? "wait"
+            : "idle";
+  const saleAt = config.timer_enabled && config.sale_at ? Date.parse(config.sale_at) : NaN;
+  const display =
+    waitingForSale && Number.isFinite(saleAt) && saleAt > now
+      ? { caption: "距定时开售", value: saleCountdown(saleAt, now), note: "到点后自动开始查询", tone: "led" as const }
+      : status.monitoring
+        ? {
+            caption: "已运行",
+            value: elapsed,
+            note: status.task?.status === "querying" ? "正在查询" : `已查询 ${monitorLoops} 次`,
+            tone: "go" as const,
+          }
+        : { caption: "运行时间", value: "00:00:00", note: "监控未运行", tone: "dim" as const };
+  const refreshProgress =
+    status.monitoring && status.task?.next_query_at && config.interval > 0
+      ? Math.min(1, Math.max(0, 1 - (status.task.next_query_at - now / 1000) / config.interval))
+      : 0;
 
   const startWithSummary = async () => {
     if (!canStart) return;
@@ -149,72 +187,55 @@ export function MonitorPage({
 
   return (
     <div className="signal-tower">
-      {/* ── Command Header ── */}
-      <section
-        className="st-command-header"
+      <DepartureBoard
+        label="监控控制"
         id="monitor-controls"
-        tabIndex={-1}
-      >
-        <div className="st-signal-orb-wrapper">
-          <div
-            className={`st-signal-orb ${status.monitoring ? "active" : status.query_ready ? "armed" : "idle"}`}
-          >
-            <Radar size={26} />
-          </div>
-        </div>
-        <div className="st-signal-copy">
-          <h2>
-            {unresolvedOrder
-              ? "当前订单待处理"
-              : lastHumanAction
-                ? "等待人工处理"
-                : status.error_message
-                  ? "监控异常"
-                  : !status.monitoring && automationIssue
-                    ? "自动化配置待完善"
-                    : taskLabels[status.task?.status || ""] ||
-                    (canStart ? "监控就绪" : "等待就绪")}
-          </h2>
-          <p>
-            {unresolvedOrder
-              ? "请先处理当前订单，再开始下一次监控"
-              : lastHumanAction
-                ? "请按照下方提示在官方页面继续操作"
-                : status.error_message ||
-                  (status.monitoring
-                    ? status.status_message
-                    : automationIssue || (canStart
-                      ? "行程已配置，可启动监控"
-                      : "请配置有效的行程日期"))}
-          </p>
-        </div>
-        <div className="st-command-actions">
-          {!status.monitoring && automationIssue ? (
-            <Button onClick={() => setActivePage("行程设置", "trip-basics")}>完善自动化配置</Button>
-          ) : null}
-          <Button
-            className="st-btn-start"
-            disabled={!canStart}
-            icon={<Play size={15} />}
-            loading={busy === "startMonitor"}
-            onClick={() => void startWithSummary()}
-            type="primary"
-          >
-            启动监控
-          </Button>
-          {startError ? <span role="alert">{startError}</span> : null}
-          <Button
-            className="st-btn-stop"
-            disabled={!canStop}
-            icon={<Square size={15} />}
-            loading={busy === "stopMonitor"}
-            onClick={() => void runCommand("stopMonitor")}
-            danger
-          >
-            停止
-          </Button>
-        </div>
-      </section>
+        className="monitor-board"
+        tone={boardTone}
+        live={status.monitoring && boardTone === "go"}
+        status={<h2>{headline}</h2>}
+        message={message ? <p>{message}</p> : undefined}
+        from={fromStation}
+        to={toStation}
+        trackLabel={trainCodes.length ? `${trainCodes.length} 车次` : "车次不限"}
+        display={display}
+        facts={[
+          {
+            label: "车次",
+            value: <TrainCodes codes={trainCodes} highlighted={hits.map((hit) => hit.train_code)} />,
+          },
+          { label: "日期", value: `${tripDate} · ${config.date_range || "单日"}` },
+          { label: "席别", value: seatPref },
+        ]}
+        actions={
+          <>
+            {!status.monitoring && automationIssue ? (
+              <Button onClick={() => setActivePage("行程设置", "trip-basics")}>完善自动化配置</Button>
+            ) : null}
+            {startError ? <span role="alert">{startError}</span> : null}
+            <Button
+              className="st-btn-start"
+              disabled={!canStart}
+              icon={<Play size={15} />}
+              loading={busy === "startMonitor"}
+              onClick={() => void startWithSummary()}
+              type="primary"
+            >
+              启动监控
+            </Button>
+            <Button
+              className="st-btn-stop"
+              disabled={!canStop}
+              icon={<Square size={15} />}
+              loading={busy === "stopMonitor"}
+              onClick={() => void runCommand("stopMonitor")}
+              danger
+            >
+              停止
+            </Button>
+          </>
+        }
+      />
 
       {order?.status ? (
         <Alert
@@ -297,24 +318,12 @@ export function MonitorPage({
       ) : null}
       {/* ── Metrics Signal Strip ── */}
       {rehearsalEnabled ? <RehearsalPanel busy={busy} runCommand={runCommand} /> : null}
-      <section className="st-metrics-strip">
+      <section className="st-metrics-strip" aria-label="运行指标">
         <div className="st-metric">
-          <Timer size={14} />
-          <em>运行时间</em>
-          <strong className="st-mono">
-            {status.monitoring ? elapsed : "—"}
-          </strong>
-        </div>
-        <div className="st-metric">
-          <RefreshCw
-            size={14}
-            className={status.monitoring ? "spin-slow" : ""}
-          />
           <em>查询次数</em>
           <strong className="st-mono">{monitorLoops}</strong>
         </div>
         <div className="st-metric">
-          <Bell size={14} />
           <em>命中记录</em>
           <strong
             className={`st-mono ${hits.length > 0 ? "st-accent-green" : ""}`}
@@ -323,14 +332,15 @@ export function MonitorPage({
           </strong>
         </div>
         <div className="st-metric">
-          <Clock3 size={14} />
           <em>下次刷新</em>
           <strong className="st-mono">
             {status.monitoring ? countdown : "—"}
           </strong>
+          <span className="st-progress" aria-hidden="true">
+            <i style={{ width: `${refreshProgress * 100}%` }} />
+          </span>
         </div>
         <div className="st-metric">
-          <Activity size={14} />
           <em>刷新间隔</em>
           <strong className="st-mono">{config.interval}s</strong>
         </div>
@@ -387,28 +397,6 @@ export function MonitorPage({
                 ))}
               </div>
             )}
-          </div>
-
-          {/* Trip Config Summary */}
-          <div className="st-config-summary">
-            <div className="st-panel-head">
-              <h3>
-                <TrainFront size={15} />
-                当前行程
-              </h3>
-            </div>
-            <dl className="st-config-grid">
-              <dt>路线</dt>
-              <dd>
-                {fromStation} → {toStation}
-              </dd>
-              <dt>日期</dt>
-              <dd>{tripDate}</dd>
-              <dt>车次</dt>
-              <dd>{trainPref}</dd>
-              <dt>席别</dt>
-              <dd>{seatPref}</dd>
-            </dl>
           </div>
 
           {/* Automation Flags */}

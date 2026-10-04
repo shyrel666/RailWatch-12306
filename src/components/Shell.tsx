@@ -2,7 +2,6 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { Drawer, Tooltip } from "antd";
 import {
   Gauge,
-  ChevronRight,
   Info,
   MonitorPlay,
   PanelLeftClose,
@@ -50,12 +49,18 @@ export function SidebarNav({
   activePage,
   appName,
   collapsed = false,
+  footer,
+  monitoring = false,
+  signals,
   onToggle,
   onPageChange,
 }: {
   activePage: RailWatchPage;
   appName: string;
   collapsed?: boolean;
+  footer?: ReactNode;
+  monitoring?: boolean;
+  signals?: ReactNode;
   onToggle?: () => void;
   onPageChange: (page: RailWatchPage) => void;
 }) {
@@ -75,6 +80,9 @@ export function SidebarNav({
         >
           <Icon size={18} />
           <span>{name}</span>
+          {monitoring && name === "购票监控" ? (
+            <i className="nav-live" aria-hidden="true" />
+          ) : null}
         </button>
       </Tooltip>
     ));
@@ -88,19 +96,25 @@ export function SidebarNav({
       <nav className="nav" aria-label="工作空间">
         {items(0, 4)}
       </nav>
+      <div className="sidebar-spacer" />
+      {signals}
       <nav className="nav nav-bottom" aria-label="应用">
         {items(4, 6)}
       </nav>
-      <button
-        className="nav-item sidebar-collapse"
-        aria-label={collapsed ? "展开侧栏" : "折叠侧栏"}
-        aria-expanded={!collapsed}
-        onClick={onToggle}
-        type="button"
-      >
-        {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
-        <span>折叠侧栏</span>
-      </button>
+      <div className="sidebar-foot">
+        {footer}
+        <Tooltip title={collapsed ? "展开侧栏" : undefined} placement="right">
+          <button
+            className="statusbar-icon-button sidebar-collapse"
+            aria-label={collapsed ? "展开侧栏" : "折叠侧栏"}
+            aria-expanded={!collapsed}
+            onClick={onToggle}
+            type="button"
+          >
+            {collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+          </button>
+        </Tooltip>
+      </div>
     </aside>
   );
 }
@@ -176,6 +190,16 @@ export function ShellLayout({
         activePage={activePage}
         appName={runtime.app_display_name}
         collapsed={collapsed}
+        monitoring={status.monitoring}
+        signals={<SystemSignals runtime={runtime} status={status} />}
+        footer={
+          <>
+            <span className="sidebar-version">
+              {formatAppVersion(runtime.app_version)}
+            </span>
+            <UpdateStatusControl appVersion={runtime.app_version} />
+          </>
+        }
         onToggle={toggleSidebar}
         onPageChange={onPageChange}
       />
@@ -187,12 +211,11 @@ export function ShellLayout({
       >
         <header className="page-header">
           <div className="page-heading">
-            <span className="page-eyebrow">工作空间</span>
-            <ChevronRight className="page-breadcrumb" size={13} aria-hidden="true" />
             <h1>{activePage}</h1>
             <p>{descriptions[activePage]}</p>
           </div>
           <div className="header-actions">
+            <HeaderClock />
             <ThemeControl />
             <button
               ref={logTriggerRef}
@@ -232,59 +255,66 @@ export function ShellLayout({
       >
         {eventPanel}
       </Drawer>
-      <BottomStatusBar runtime={runtime} status={status} />
     </div>
   );
 }
 
-function BottomStatusBar({
+function HeaderClock() {
+  const now = useClock();
+  const clock = formatStatusClock(new Date(now));
+  return (
+    <time
+      className="header-clock"
+      aria-label="系统时钟"
+      title={`${clock.date} ${clock.weekday}`}
+      dateTime={new Date(now).toISOString()}
+    >
+      <span>北京时间</span>
+      <strong>{clock.time}</strong>
+    </time>
+  );
+}
+
+function SystemSignals({
   runtime,
   status,
 }: {
   runtime: RuntimeInfo;
   status: RailWatchStatus;
 }) {
-  const now = useClock();
-  const clock = formatStatusClock(new Date(now));
+  const phaseTone = getRuntimePhaseTone(status.phase);
+  const runLamp =
+    status.phase === "order"
+      ? "wait"
+      : phaseTone === "active"
+        ? "go live"
+        : phaseTone === "error"
+          ? "stop"
+          : "idle";
+  const phaseLabel = formatRuntimePhaseLabel(status.status_message, status.phase);
+  const rows = [
+    { name: "网络", label: runtime.network_label, lamp: runtime.network_ok ? "go" : "wait" },
+    { name: "12306", label: runtime.railway_label, lamp: runtime.railway_ok ? "go" : "wait" },
+    {
+      name: "运行",
+      label: phaseLabel,
+      lamp: runLamp,
+      detail: formatRuntimePhaseDetail(status.status_message, status.phase),
+    },
+  ];
   return (
-    <footer className="bottom-statusbar" aria-label="系统状态">
-      <div className="statusbar-group">
-        <span
-          className={"statusbar-chip" + (runtime.network_ok ? "" : " warning")}
+    <section className="system-signals" aria-label="系统状态">
+      {rows.map((row) => (
+        <div
+          className="signal-row"
+          key={row.name}
+          title={row.detail ?? `${row.name} ${row.label}`}
         >
-          网络 <strong>{runtime.network_label}</strong>
-        </span>
-        <span
-          className={"statusbar-chip" + (runtime.railway_ok ? "" : " warning")}
-        >
-          12306 <strong>{runtime.railway_label}</strong>
-        </span>
-        <span
-          className={
-            "statusbar-chip phase-" + getRuntimePhaseTone(status.phase)
-          }
-          title={
-            formatRuntimePhaseDetail(status.status_message, status.phase) ??
-            undefined
-          }
-        >
-          运行{" "}
-          <strong>
-            {formatRuntimePhaseLabel(status.status_message, status.phase)}
-          </strong>
-        </span>
-      </div>
-      <div className="statusbar-group right">
-        <time
-          aria-label="系统时钟"
-          title={clock.date}
-          dateTime={new Date(now).toISOString()}
-        >
-          北京时间 {clock.time}
-        </time>
-        <span>{formatAppVersion(runtime.app_version)}</span>
-        <UpdateStatusControl appVersion={runtime.app_version} />
-      </div>
-    </footer>
+          <i className={"lamp " + row.lamp} aria-hidden="true" />
+          <span>{row.name}</span>
+          <strong>{row.label}</strong>
+        </div>
+      ))}
+    </section>
   );
 }

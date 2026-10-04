@@ -1,28 +1,43 @@
+/* Light defaults for the first paint; useThemePreference replaces them from src/lib/theme.ts. */
 :root {
-  --bg: #f7f7f8;
-  --rail: #efeff1;
-  --surface: #fcfcfd;
+  --bg: #f4f3ef;
+  --rail: #f4f3ef;
+  --surface: #fff;
   --raised: #fff;
-  --subtle: #f0f0f2;
-  --text: #25262b;
-  --muted: #64656e;
-  --border: #e2e2e6;
-  --border-strong: #bcbcc5;
+  --subtle: #efede7;
+  --hover: #e9e7e0;
+  --text: #18191d;
+  --muted: #63625d;
+  --faint: #8f8d87;
+  --border: #e4e1d9;
+  --border-strong: #cfccc3;
+  --accent: #2b47d1;
+  --accent-hover: #2239b4;
+  --accent-text: #2b47d1;
+  --on-accent: #fff;
+  --accent-soft: #e8ebfb;
+  --success: #0f7a43;
+  --success-soft: #e2f2e8;
+  --warning: #985b00;
+  --warning-soft: #fbefd9;
+  --danger: #c0352a;
+  --danger-soft: #fbe7e4;
+  --board: #15171a;
+  --board-raised: #1d2024;
+  --board-line: #30333a;
+  --board-text: #f2efe8;
+  --board-muted: #9b9ea5;
+  --led: #ffb224;
+  --led-go: #5fdc9b;
+  --led-stop: #ff8a7f;
+  --card-ring: 0 0 0 1px #0000000f, 0 1px 2px #0000000a;
+  --board-ring: 0 1px 2px #0000001f;
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --control-shadow: inset 0 1px 0 #ffffff08, 0 1px 2px #00000008;
-  --accent: #07765f;
-  --accent-soft: #e2f2eb;
-  --success: #26754d;
-  --warning: #946016;
-  --warning-soft: #fcf3e2;
-  --danger: #b64040;
-  --danger-soft: #fceeee;
-  --green: var(--accent);
-  --blue: var(--accent);
-  --amber: var(--warning);
-  --red: var(--danger);
-  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Noto Sans SC", sans-serif;
-  font-size: 13px;
+  --control-shadow: 0 1px 2px #0000000a;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  font-size: 14px;
   color: var(--text);
   background: var(--bg);
 }
@@ -93,7 +108,7 @@ dl {
   margin: 0;
 }
 h2 {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.5;
 }
@@ -131,13 +146,15 @@ em {
 }
 ::-webkit-scrollbar-thumb {
   border-radius: 5px;
-  background: var(--border);
-  border: 2px solid var(--bg);
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
-.eyebrow,
-.page-eyebrow {
-  font-size: 11px;
-  letter-spacing: 0.08em;
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+.eyebrow {
+  font-size: 12px;
   color: var(--muted);
   font-weight: 600;
 }
@@ -152,11 +169,27 @@ em {
 .settings-section,
 .preference-section {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 9px;
+  border: 0;
+  border-radius: 12px;
+  box-shadow: var(--card-ring);
 }
 .panel {
-  padding: 14px 16px;
+  padding: 16px 20px;
+}
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 .quiet-button,
 .event-clear-btn,
@@ -174,11 +207,13 @@ em {
 .quiet-button:hover,
 .event-clear-btn:hover,
 .statusbar-icon-button:hover {
-  background: var(--subtle);
+  background: var(--hover);
   color: var(--text);
 }
 .quiet-button {
-  height: 32px;
+  height: 34px;
+  padding-inline: 12px;
+  color: var(--text);
 }
 .button-row,
 .form-actions {
@@ -206,12 +241,12 @@ em {
   color: var(--muted);
 }
 .header-actions .theme-toggle:hover:not(:disabled) {
-  background: var(--subtle);
+  background: var(--hover);
   border-color: transparent;
   color: var(--text);
 }
 .ant-btn-primary {
-  font-weight: 500;
+  font-weight: 600;
 }
 .ant-select {
   min-width: 0;
@@ -225,12 +260,12 @@ em {
   padding: 4px 10px;
   color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
 }
 .native-input:hover,
 .compact-select:hover {
-  border-color: var(--border-strong);
+  border-color: var(--faint);
 }
 .field,
 .trip-field {
@@ -257,15 +292,16 @@ em {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  padding: 3px 8px;
-  border-radius: 9px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 999px;
   background: var(--subtle);
   color: var(--muted);
 }
 .status-badge.green,
 .status-badge.teal {
   color: var(--success);
-  background: var(--accent-soft);
+  background: var(--success-soft);
 }
 .status-badge.amber {
   color: var(--warning);
@@ -279,9 +315,9 @@ em {
   display: flex;
   gap: 12px;
   align-items: flex-start;
-  padding: 12px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 10px;
 }
 .risk-toggle .ant-switch {
   margin-top: 3px;
@@ -313,15 +349,15 @@ em {
   color: var(--warning);
 }
 .railwatch-dialog .ant-modal-container {
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
   background: var(--raised);
-  box-shadow: 0 20px 70px #00000035, inset 0 1px 0 #ffffff08;
+  box-shadow: 0 24px 64px #00000038, 0 2px 6px #00000014;
 }
 .railwatch-dialog .ant-modal-confirm-title,
-.railwatch-dialog .ant-modal-title { color: var(--text); font-size: 15px; }
+.railwatch-dialog .ant-modal-title { color: var(--text); font-size: 16px; }
 .dialog-copy { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 13px; line-height: 1.8; max-height: 55vh; overflow-y: auto; }
-.dialog-symbol { color: var(--accent); margin: 2px 12px 0 0; }
+.dialog-symbol { color: var(--accent-text); margin: 2px 12px 0 0; }
 .dialog-symbol.danger, .dialog-error { color: var(--danger); }
 .dialog-title { display: inline-flex; align-items: center; gap: 10px; }
 .dialog-title svg { color: var(--muted); }

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, fireEvent } from "@testing-library/react";
+import { act, cleanup, render, screen, fireEvent, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { VirtualEventList } from "./VirtualEventList";
 import { MonitorPage } from "./MonitorPage";
@@ -21,8 +21,10 @@ test("running view uses the task snapshot and backend deadline", () => {
   const current = {...defaultConfig, from_station_cn:"北京", to_station_cn:"上海", date:"2026-09-06"};
   railwatchStore.setState({config:{...current, from_station_cn:"广州"}, status:{...defaultStatus, monitoring:true, current_config:current, task:{run_id:"test",status:"backoff",started_at:Date.now()/1000-65,next_query_at:Date.now()/1000+7}}, results:[],hits:[],lastHumanAction:null});
   render(<MonitorPage busy={null} runCommand={vi.fn()} />);
-  expect(screen.getByText("北京 → 上海")).toBeTruthy();
-  expect(screen.queryByText("广州 → 上海")).toBeNull();
+  const board = screen.getByRole("region", { name: "监控控制" });
+  expect(within(board).getByText("北京")).toBeTruthy();
+  expect(within(board).getByText("上海")).toBeTruthy();
+  expect(within(board).queryByText("广州")).toBeNull();
   expect(screen.getByText("00:01:05")).toBeTruthy();
   expect(screen.getByText("7s")).toBeTruthy();
   act(() => vi.advanceTimersByTime(2000));

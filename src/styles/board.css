@@ -1,0 +1,322 @@
+/* Departure board: the dark station-display hero shared by the dashboard and monitor. */
+.departure-board {
+  position: relative;
+  border-radius: 14px;
+  background: var(--board);
+  color: var(--board-text);
+  box-shadow: var(--board-ring);
+  overflow: hidden;
+  scroll-margin-top: 12px;
+}
+.departure-board:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.board-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 32px;
+  padding: 20px 26px 18px;
+}
+.board-trip {
+  min-width: 0;
+}
+.board-kicker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 14px;
+  color: var(--board-muted);
+  font-size: 12px;
+}
+.board-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #ffffff12;
+  color: var(--board-text);
+  font-size: 12px;
+  font-weight: 500;
+}
+.board-pill h2 {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: inherit;
+}
+.departure-board .lamp {
+  width: 6px;
+  height: 6px;
+  background: var(--board-muted);
+}
+.departure-board .lamp.go {
+  background: var(--led-go);
+}
+.departure-board .lamp.wait {
+  background: var(--led);
+}
+.departure-board .lamp.stop {
+  background: var(--led-stop);
+}
+.departure-board .lamp.live {
+  animation: board-pulse 1.8s ease-out infinite;
+}
+@keyframes board-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--led-go) 60%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+.departure-board p {
+  color: inherit;
+}
+.board-message {
+  margin: -6px 0 14px;
+  color: var(--board-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.board-route {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+}
+.board-station {
+  min-width: 0;
+}
+.board-station > strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-station > small {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--board-muted);
+  white-space: nowrap;
+}
+.board-track {
+  position: relative;
+  flex: 0 1 140px;
+  min-width: 48px;
+  height: 30px;
+  align-self: flex-start;
+  margin-top: 5px;
+}
+.board-track::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 6px;
+  top: 50%;
+  height: 2px;
+  background: repeating-linear-gradient(90deg, var(--board-muted) 0 6px, transparent 6px 11px);
+  opacity: 0.55;
+}
+.board-track::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: calc(50% - 5px);
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid var(--board-muted);
+}
+.board-track > em {
+  position: absolute;
+  left: 50%;
+  top: -7px;
+  transform: translateX(-50%);
+  padding: 0 6px;
+  background: var(--board);
+  color: var(--board-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
+/* Departure dot at the start of the dashed track. */
+.board-route .board-track {
+  background: radial-gradient(circle at 4px 50%, var(--board-text) 0 4px, transparent 4.5px) no-repeat;
+}
+.board-display {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 220px;
+  text-align: right;
+}
+.board-display > span {
+  color: var(--board-muted);
+  font-size: 12px;
+}
+.board-led {
+  margin: 8px 0 6px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 46px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: var(--led);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--led) 22%, transparent);
+  white-space: nowrap;
+}
+.board-led.go {
+  color: var(--led-go);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--led-go) 18%, transparent);
+}
+.board-led.stop {
+  color: var(--led-stop);
+  text-shadow: none;
+}
+.board-led.dim {
+  color: var(--board-muted);
+  text-shadow: none;
+}
+.board-display > small {
+  color: var(--board-muted);
+  font-size: 12px;
+}
+.board-foot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-height: 56px;
+  padding: 10px 26px;
+  background: var(--board-raised);
+  border-top: 1px dashed var(--board-line);
+}
+/* Ticket perforation notches. */
+.board-foot::before,
+.board-foot::after {
+  content: "";
+  position: absolute;
+  top: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg);
+}
+.board-foot::before {
+  left: -9px;
+}
+.board-foot::after {
+  right: -9px;
+}
+.board-facts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 26px;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+}
+.board-facts > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.board-facts dt {
+  color: var(--board-muted);
+  white-space: nowrap;
+}
+.board-facts dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--board-text);
+  overflow-wrap: anywhere;
+}
+.board-codes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.board-code {
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: #ffffff14;
+  color: var(--board-text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+.board-code.hit {
+  background: var(--led);
+  color: #1d1400;
+}
+.board-code.more {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--board-line);
+  color: var(--board-muted);
+  cursor: default;
+}
+.board-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+.departure-board .trip-date-warning {
+  color: var(--led);
+  margin-top: 12px;
+}
+.departure-board :focus-visible {
+  outline-color: var(--board-text);
+}
+@media (max-width: 1279px) {
+  .board-main {
+    gap: 20px;
+    padding: 18px 22px 16px;
+  }
+  .board-foot {
+    padding-inline: 22px;
+  }
+  .board-station > strong {
+    font-size: 30px;
+  }
+  .board-led {
+    font-size: 40px;
+  }
+  .board-display {
+    min-width: 180px;
+  }
+}
+@media (max-width: 900px) {
+  .board-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .board-display {
+    align-items: flex-start;
+    text-align: left;
+  }
+  .board-foot {
+    flex-wrap: wrap;
+  }
+}
