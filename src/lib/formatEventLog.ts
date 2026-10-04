@@ -23,7 +23,31 @@ export type PresentedEvent = LogEntry & {
   label: string;
   title: string;
   detail: string | null;
+  category: string;
+  /** Consecutive identical log lines collapse into one entry. */
+  repeat: number;
+  firstTime: string;
 };
+
+// Ordered: the first match wins, so specific topics come before broad ones.
+const categories: Array<[RegExp, string]> = [
+  [/订单|候补|支付|提交|核验|乘客|兑现/, "订单"],
+  [/通知|推送|Server酱|邮件|企业微信|钥匙串/, "通知"],
+  [/登录|会话|保活|RAIL_DEVICEID|设备标识/, "登录"],
+  [/站点编码|站码|车站/, "站码"],
+  [/彩排/, "彩排"],
+  [/定时|起售|开售|冲刺/, "定时"],
+  [/监控|命中|目标车次|目标席别|自动提交|自动候补/, "监控"],
+  [/查询|余票|车次|刷新/, "查询"],
+  [/Chrome|浏览器|[Dd]river|Python|Selenium|环境|平台|用户数据目录|设备指纹/, "环境"],
+  [/设置|配置|偏好|路线|收藏/, "设置"],
+  [/更新|版本|安装/, "更新"],
+  [/导出|日志|事件/, "日志"],
+];
+
+export function eventCategory(message: string) {
+  return categories.find(([pattern]) => pattern.test(message))?.[1] ?? "系统";
+}
 
 const filterLevels: Record<string, string[] | undefined> = {
   全部: undefined,
@@ -148,8 +172,8 @@ export function countEventsByFilter(logs: LogEntry[], filter: string) {
   return presentEventLogs(logs, filter).length;
 }
 
-export function summarizeEventLogs(logs: LogEntry[]) {
-  const entries = presentEventLogs(logs, "全部");
+export function summarizeEventLogs(logs: LogEntry[], verbose = false) {
+  const entries = presentEventLogs(logs, "全部", verbose);
   const counts: Record<string, number> = { 全部: entries.length, 信息: 0, 警告: 0, 错误: 0 };
   for (const entry of entries) {
     if (entry.level === "INFO" || entry.level === "SUCCESS") counts.信息++;
@@ -167,7 +191,12 @@ export function filterPresentedEvents(entries: PresentedEvent[], filter: string)
 const entryIds = new WeakMap<object, number>();
 let fallbackEntryId = -1;
 
-export function presentEventLogs(logs: LogEntry[], filter: string): PresentedEvent[] {
+/**
+ * Turns raw log lines into feed entries. By default query steps and result rows
+ * are hidden and environment details fold into their check; `verbose` keeps
+ * every line as its own entry.
+ */
+export function presentEventLogs(logs: LogEntry[], filter: string, verbose = false): PresentedEvent[] {
   const levels = filterLevels[filter];
   const presented: PresentedEvent[] = [];
 
@@ -176,13 +205,18 @@ export function presentEventLogs(logs: LogEntry[], filter: string): PresentedEve
     const clean = stripEmoji(entry.message);
     const informational = entry.level === "INFO" || entry.level === "SUCCESS";
 
-    if (informational && isQueryNoise(clean)) {
+    if (!verbose && informational && isQueryNoise(clean)) {
       continue;
     }
 
     const previous = presented[presented.length - 1];
+    if (previous && previous.level === entry.level && previous.message === entry.message && previous.run_id === entry.run_id) {
+      previous.repeat += 1;
+      previous.time = entry.time;
+      continue;
+    }
     if (
-      informational && isTechnicalDetail(clean) && previous &&
+      !verbose && informational && isTechnicalDetail(clean) && previous &&
       (previous.level === "INFO" || previous.level === "SUCCESS") &&
       previous.run_id === entry.run_id &&
       (previous.title === "环境检查" || previous.title === "环境检查通过" || isTechnicalDetail(previous.message))
@@ -200,6 +234,9 @@ export function presentEventLogs(logs: LogEntry[], filter: string): PresentedEve
       label: meta.label,
       title,
       detail,
+      category: eventCategory(clean),
+      repeat: 1,
+      firstTime: entry.time,
     });
   }
 

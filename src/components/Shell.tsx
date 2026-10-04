@@ -287,6 +287,8 @@ function SystemSignals({
   status: RailWatchStatus;
 }) {
   const phaseTone = getRuntimePhaseTone(status.phase);
+  // Ready is a healthy state, so it shares the green of the other signals;
+  // a running monitor adds the pulse.
   const runLamp =
     status.phase === "order"
       ? "wait"
@@ -294,7 +296,7 @@ function SystemSignals({
         ? "go live"
         : phaseTone === "error"
           ? "stop"
-          : "idle";
+          : "go";
   const phaseLabel = formatRuntimePhaseLabel(status.status_message, status.phase);
   const rows = [
     { name: "网络", label: runtime.network_label, lamp: runtime.network_ok ? "go" : "wait" },

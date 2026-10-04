@@ -86,6 +86,21 @@ class BridgeStationResolverTests(unittest.TestCase):
             cache_logs = [entry for entry in bridge.log_entries if "站点编码缓存已加载" in entry["message"]]
             self.assertEqual(len(cache_logs), 1)
 
+    def test_query_analyzers_share_the_bridge_resolver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = RailWatchBridge(directory, event_callback=lambda _: None)
+            self.addCleanup(bridge.notification_service.close)
+            with open(os.path.join(directory, "station_codes_cache.json"), "w", encoding="utf-8") as handle:
+                json.dump({"北京": "BJP"}, handle, ensure_ascii=False)
+            bridge.search_stations("北")
+            first = bridge._page_analyzer(object(), lambda *_: None)
+            second = bridge._page_analyzer(object(), lambda *_: None)
+            self.assertIs(first.resolver, bridge._station_resolver)
+            self.assertIs(second.resolver, bridge._station_resolver)
+            self.assertEqual(second.resolver.get_code("北京"), "BJP")
+            cache_logs = [entry for entry in bridge.log_entries if "站点编码缓存已加载" in entry["message"]]
+            self.assertEqual(len(cache_logs), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

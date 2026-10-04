@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Tooltip } from "antd";
-import { Eraser, Pause, Play, FileDown } from "lucide-react";
+import { Eraser, Pause, Play, FileDown, ListTree } from "lucide-react";
 import { summarizeEventLogs, filterPresentedEvents } from "../lib/formatEventLog";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { CommandRunner } from "./componentTypes";
@@ -23,6 +23,7 @@ export function EventPanel({
   const setLogPaused = useRailWatchStore((state) => state.setLogPaused);
   const pausedCount = useRailWatchStore((state) => state.pausedLogs.length);
   const [filter, setFilter] = useState<(typeof filterLabels)[number]>("全部");
+  const [verbose, setVerbose] = useState(false);
   const [clearing, setClearing] = useState(false);
   const clearBothLogs = async () => {
     setClearing(true);
@@ -35,7 +36,7 @@ export function EventPanel({
     }
   };
   const droppedLogs = useRailWatchStore((state) => state.droppedLogs);
-  const { entries, counts } = useMemo(() => summarizeEventLogs(logs), [logs]);
+  const { entries, counts } = useMemo(() => summarizeEventLogs(logs, verbose), [logs, verbose]);
   const visibleLogs = useMemo(() => filterPresentedEvents(entries, filter), [entries, filter]);
   const listClassName = [
     "event-list",
@@ -55,6 +56,18 @@ export function EventPanel({
             : "实时接收中"}
         </span>
         <div className="event-head-actions">
+          <Tooltip title={verbose ? "隐藏查询步骤与技术细节" : "显示查询步骤与技术细节"}>
+            <button
+              aria-label={verbose ? "精简显示" : "显示全部细节"}
+              aria-pressed={verbose}
+              className={verbose ? "event-clear-btn on" : "event-clear-btn"}
+              onClick={() => setVerbose(!verbose)}
+              type="button"
+            >
+              <ListTree size={14} />
+              <span>详细</span>
+            </button>
+          </Tooltip>
           {onExport ? (
             <button
               className="event-clear-btn"

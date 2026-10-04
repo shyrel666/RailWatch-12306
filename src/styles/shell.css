@@ -352,6 +352,10 @@
   color: var(--warning);
   background: var(--warning-soft);
 }
+.event-clear-btn.on {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
 .event-tabs {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -421,7 +425,8 @@
   grid-template-columns: 58px 20px minmax(0, 1fr) auto;
   grid-template-areas:
     "time dot title level"
-    ". . detail detail";
+    ". . detail detail"
+    ". . meta meta";
   column-gap: 6px;
   padding: 8px 12px 10px;
   border-radius: 8px;
@@ -491,6 +496,31 @@
   margin-top: 2px;
   font-size: 12.5px;
   line-height: 1.6;
+}
+.event-inline {
+  font-weight: 400;
+  color: var(--muted);
+}
+.event-meta {
+  grid-area: meta;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.event-category {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--muted);
+  line-height: 18px;
+}
+.event-repeat {
+  color: var(--muted);
+  font-weight: 500;
 }
 .event-level {
   font-size: 11px;

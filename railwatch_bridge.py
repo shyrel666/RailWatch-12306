@@ -557,6 +557,14 @@ class RailWatchBridge:
                 self._station_resolver = StationCodeResolver(self.data_dir, log=lambda message: self.log(message, "INFO"))
             return self._station_resolver
 
+    def _page_analyzer(self, driver, log_callback):
+        analyzer = PageAnalyzer(driver, log_callback=log_callback, base_dir=self.data_dir)
+        # Queries share the bridge's station resolver, so codes load (and log) once
+        # and a refresh from station search reaches the next query directly.
+        if StationCodeResolver is not None and isinstance(getattr(analyzer, "resolver", None), StationCodeResolver):
+            analyzer.resolver = self._get_station_resolver()
+        return analyzer
+
     def search_stations(self, query: str, limit: int = 12) -> dict:
         if not CORE_AVAILABLE or StationCodeResolver is None:
             return {"items": [], "warning": "站码服务不可用，仍可手动输入完整站名。"}
@@ -851,7 +859,7 @@ class RailWatchBridge:
         return result
 
     def _probe_query(self, driver, config, cancel=None):
-        analyzer = PageAnalyzer(driver, log_callback=lambda *_: None, base_dir=self.data_dir)
+        analyzer = self._page_analyzer(driver, lambda *_: None)
         if cancel is not None:
             analyzer.stop_check = cancel.is_set
             analyzer.wait_callback = cancel.wait
@@ -959,7 +967,7 @@ class RailWatchBridge:
                 if not CORE_AVAILABLE or PageAnalyzer is None:
                     raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
                 driver = self._ensure_driver()
-                analyzer = PageAnalyzer(driver, log_callback=self.log, base_dir=self.data_dir)
+                analyzer = self._page_analyzer(driver, self.log)
                 for sequence, travel_date in enumerate(self._valid_dates(config, announce=True), 1):
                     date_config = {**config, "date": travel_date}
                     self.emit("queryStarted", {"run_id": None, "request_id": request_id, "query_id": f"{request_id}:{sequence}",
@@ -1848,7 +1856,7 @@ class RailWatchBridge:
         """构造"在查询页上同步填参"的回调；站点编码在此预热缓存，避免开抢瞬间再联网下载。"""
         if not CORE_AVAILABLE or PageAnalyzer is None:
             return None
-        analyzer = PageAnalyzer(driver, log_callback=self.log, base_dir=self.data_dir)
+        analyzer = self._page_analyzer(driver, self.log)
         try:
             analyzer.resolver.load()
         except Exception as exc:

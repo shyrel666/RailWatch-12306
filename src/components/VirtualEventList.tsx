@@ -1,9 +1,10 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ScrollText } from "lucide-react";
 import { formatEventTime, type PresentedEvent } from "../lib/formatEventLog";
+import { todayIso } from "../lib/tripDate";
 
 type Entry = PresentedEvent & { id?: number };
-const ESTIMATE = 64;
+const ESTIMATE = 76;
 const OVERSCAN = 5;
 
 function MeasuredEntry({ entry, onHeight }: { entry: Entry; onHeight: (id: number, height: number) => void }) {
@@ -18,15 +19,25 @@ function MeasuredEntry({ entry, onHeight }: { entry: Entry; onHeight: (id: numbe
     return () => observer.disconnect();
   }, [entry.id, onHeight]);
   const formatted = formatEventTime(entry.time);
-  // The timeline column shows the clock; the full Beijing date stays in the tooltip.
-  const clock = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(formatted) ? formatted.slice(11) : formatted;
+  // The timeline column shows the clock; the date moves to the meta line.
+  const dated = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(formatted);
+  const clock = dated ? formatted.slice(11) : formatted;
+  const first = formatEventTime(entry.firstTime);
+  // A short fragment after the colon reads better as part of the title sentence.
+  const inline = Boolean(entry.detail && entry.detail.length <= 16 && !/[，。；,;]/.test(entry.detail));
   return (
     <article ref={ref} className={`event-entry ${entry.tone}`}>
       <span aria-hidden="true" className={`event-dot ${entry.tone}`} />
       <div className="event-body">
         <div className="event-row"><time dateTime={entry.time} title={`北京时间 · ${formatted}`}>{clock}</time><span className={`event-level ${entry.tone}`}>{entry.label}</span></div>
-        <strong>{entry.title}</strong>
-        {entry.detail ? <p>{entry.detail}</p> : null}
+        <strong>{entry.title}{inline ? <span className="event-inline">：{entry.detail}</span> : null}</strong>
+        {entry.detail && !inline ? <p>{entry.detail}</p> : null}
+        <div className="event-meta">
+          <span className="event-category">{entry.category}</span>
+          {dated && formatted.slice(0, 10) !== todayIso(new Date()) ? <span>{formatted.slice(0, 10)}</span> : null}
+          {entry.repeat > 1 ? <span className="event-repeat">重复 {entry.repeat} 次 · 首次 {first.length > 8 ? first.slice(11) : first}</span> : null}
+          {entry.run_id ? <span title={entry.run_id}>任务 {entry.run_id.slice(0, 8)}</span> : null}
+        </div>
       </div>
     </article>
   );

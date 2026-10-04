@@ -79,6 +79,21 @@ test("shows a consistent title, compact status bar, and collapsible navigation",
   expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "购票监控" })).toBeTruthy();
 });
+test("shows a ready runtime as a healthy green signal and pulses while monitoring", () => {
+  const { rerender } = render(
+    <ShellLayout activePage="仪表盘" darkMode={false} eventPanel={null} eventPanelVisible={false}
+      runtime={defaultRuntimeInfo} status={{ ...defaultStatus, phase: "idle" }}
+      onPageChange={vi.fn()} onToggleEventPanel={vi.fn()}><div /></ShellLayout>,
+  );
+  const runLamp = () => within(screen.getByRole("region", { name: "系统状态" })).getByText("运行").previousElementSibling;
+  expect(runLamp()?.className).toBe("lamp go");
+  rerender(
+    <ShellLayout activePage="仪表盘" darkMode={false} eventPanel={null} eventPanelVisible={false}
+      runtime={defaultRuntimeInfo} status={{ ...defaultStatus, phase: "monitoring", monitoring: true }}
+      onPageChange={vi.fn()} onToggleEventPanel={vi.fn()}><div /></ShellLayout>,
+  );
+  expect(runLamp()?.className).toBe("lamp go live");
+});
 test("opens logs on demand, closes with Escape, and keeps filter and feed state", async () => {
   railwatchStore.setState({
     logs: [

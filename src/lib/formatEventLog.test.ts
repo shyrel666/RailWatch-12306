@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { LogEntry } from "../types";
-import { countEventsByFilter, presentEventLogs, summarizeEventLogs, filterPresentedEvents, formatEventTime } from "./formatEventLog";
+import { countEventsByFilter, eventCategory, presentEventLogs, summarizeEventLogs, filterPresentedEvents, formatEventTime } from "./formatEventLog";
 
 test.each([
   ["2026-09-28T14:01:01+08:00", "2026-09-28 14:01:01"],
@@ -127,6 +127,41 @@ describe("presentEventLogs", () => {
     }
     expect(countEventsByFilter(logs, "警告")).toBe(1);
     expect(countEventsByFilter(logs, "错误")).toBe(1);
+  });
+
+  test("collapses consecutive identical lines and keeps the first occurrence", () => {
+    const line = { level: "INFO", message: "站点编码缓存已加载：3404 条" };
+    const events = presentEventLogs([
+      { ...line, time: "21:49:39" },
+      { ...line, time: "21:49:40" },
+      { time: "21:49:41", level: "INFO", message: "已加载保存的设置。" },
+      { ...line, time: "21:49:42" },
+    ], "全部");
+    expect(events.map((event) => [event.title, event.repeat])).toEqual([
+      ["站点编码缓存已加载", 1], ["已加载保存的设置。", 1], ["站点编码缓存已加载", 2],
+    ]);
+    expect(events[2]?.time).toBe("21:49:40");
+    expect(events[2]?.firstTime).toBe("21:49:39");
+    expect(countEventsByFilter([{ ...line, time: "1" }, { ...line, time: "2", run_id: "other" }], "全部")).toBe(2);
+  });
+
+  test("labels each entry with its topic", () => {
+    expect(eventCategory("站点编码缓存已加载：3404 条")).toBe("站码");
+    expect(eventCategory("已加载保存的设置。")).toBe("设置");
+    expect(eventCategory("起售前登录检查通过，最后10秒停止保活检查。")).toBe("登录");
+    expect(eventCategory("监控已启动：正在查询目标车次")).toBe("监控");
+    expect(eventCategory("ChromeDriver 已自动更新到匹配版本。")).toBe("环境");
+    expect(eventCategory("应用启动")).toBe("系统");
+  });
+
+  test("verbose mode keeps query steps and technical lines as separate entries", () => {
+    const logs: LogEntry[] = [
+      ...envCheckLogs,
+      { time: "20:02:18", level: "INFO", message: "G599 | 北京南 06:30 -> 上海虹桥 12:20 ..." },
+    ];
+    expect(presentEventLogs(logs, "全部")).toHaveLength(2);
+    expect(presentEventLogs(logs, "全部", true)).toHaveLength(logs.length);
+    expect(summarizeEventLogs(logs, true).counts.全部).toBe(logs.length);
   });
 
   test("does not attach technical details to unrelated events or another run", () => {

@@ -8,7 +8,7 @@ import { useBeijingToday, todayIso } from "../lib/tripDate";
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 test("virtual feed renders a bounded slice and can reach its last entry", () => {
-  const entries = Array.from({length:1000}, (_, id) => ({id, time:"12:00:00", level:"INFO", message:`event-${id}`, title:`event-${id}`, detail:null, tone:"info" as const, label:"信息"}));
+  const entries = Array.from({length:1000}, (_, id) => ({id, time:"12:00:00", level:"INFO", message:`event-${id}`, title:`event-${id}`, detail:null, tone:"info" as const, label:"信息", category:"系统", repeat:1, firstTime:"12:00:00"}));
   render(<VirtualEventList entries={entries} className="event-list" />);
   expect(screen.getAllByRole("article").length).toBeLessThan(25);
   fireEvent.scroll(screen.getByRole("feed"), {target:{scrollTop:88*995}});
