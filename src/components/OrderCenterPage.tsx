@@ -21,7 +21,9 @@ function time(value: number | null) {
 
 function officialSummary(item: OrderHistorySummary) {
   if (!item.official_status) return "尚无匹配的官方状态证据";
-  if (item.official_status === "active") return "候补已生效；当前不会周期性自动复查兑现状态";
+  if (item.official_status === "active") return item.observing
+    ? "候补已生效；正在持续核对兑现状态"
+    : "候补已生效；当前未持续核对，可点击继续核对";
   return `${statusLabels[item.official_status] ?? item.official_status} · 核对时间：${time(item.official_verified_at)}`;
 }
 
@@ -78,10 +80,18 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
         <header><strong>{item.date} · {item.train_code} · {item.from_station} → {item.to_station}</strong>
           <span>{statusLabels[item.status] ?? item.status}</span></header>
         <p>{item.kind === "alternate" ? "候补" : "普通购票"} · {item.seat} · 官方单号：{item.order_id ?? "未取得"}</p>
+        {item.choices && item.choices.length > 1 ? <details className="order-choice-list">
+          <summary>已保存的候补组合（{item.choices.length}个）</summary>
+          <ol>{item.choices.map(choice => <li key={[choice.date, choice.train_code, choice.from_station, choice.to_station, choice.seat].join(":")}>
+            {choice.date} · {choice.train_code} · {choice.from_station} → {choice.to_station} · {choice.seat}
+          </li>)}</ol>
+        </details> : null}
         <p>最近页面核对：{time(item.last_checked_at)} · {item.observing ? "本地观察中" : "当前未观察"}</p>
+        {item.observing && item.next_check_at != null ? <p>下次核对：{time(item.next_check_at)}{item.check_failures ? " · 暂未取得新证据，已放慢核对，保留最后确认状态" : ""}</p> : null}
         {item.last_check_status ? <p>最近核对结果：{item.last_check_status === "error" ? "页面读取失败" : statusLabels[item.last_check_status] ?? item.last_check_status}</p> : null}
         <p>最后确认的官方状态：{officialSummary(item)}</p>
         <div className="order-center-actions"><Button onClick={() => void showDetail(item.intent_id)}>查看时间线</Button>
+          {item.observing ? <Button loading={busy === "stopMonitor"} onClick={() => void runCommand("stopMonitor").then(refresh)}>停止本地核对</Button> : null}
           {canReview(item) ? <Button loading={busy === "continueOrder"} onClick={() => void runCommand("continueOrder", { intent_id: item.intent_id }).then(refresh)}>继续核对</Button> : null}
         </div>
       </article>)}</div>}

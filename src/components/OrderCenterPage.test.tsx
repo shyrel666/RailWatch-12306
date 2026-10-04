@@ -24,7 +24,7 @@ test("history distinguishes official status, local observation, and incomplete e
   render(<OrderCenterPage runCommand={runCommand} busy={null} />);
   expect(await screen.findByText(/D21 · 北京 → 上海/)).toBeTruthy();
   expect(screen.getByText(/当前未观察/)).toBeTruthy();
-  expect(screen.getByText(/当前不会周期性自动复查兑现状态/)).toBeTruthy();
+  expect(screen.getByText(/当前未持续核对，可点击继续核对/)).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "查看时间线" }));
   expect(await screen.findByText(/历史事件不完整/)).toBeTruthy();
   expect(vi.mocked(runCommand).mock.calls.some(([command]) => command === "continueOrder")).toBe(false);
@@ -38,6 +38,22 @@ test("terminal history remains read only", async () => {
   expect(screen.queryByRole("button", { name: /继续核对/ })).toBeNull();
 });
 
+test("multi-choice history exposes the saved set and stops only local observation", async () => {
+  railwatchStore.setState({ status: { ...defaultStatus, monitoring: true } });
+  const watching = { ...summary, observing: true, next_check_at: 1790200100, check_failures: 2,
+    choices: [{ date: summary.date, train_code: "D21", from_station: "北京", to_station: "上海", seat: "二等座" },
+      { date: "2026-09-25", train_code: "D22", from_station: "北京", to_station: "上海", seat: "二等座" }] };
+  const runCommand = vi.fn(async (command: string) => command === "orderHistory"
+    ? { items: [watching], next_cursor: null } : undefined) as CommandRunner;
+  render(<OrderCenterPage runCommand={runCommand} busy={null} />);
+  expect(await screen.findByText("已保存的候补组合（2个）")).toBeTruthy();
+  expect(screen.getByText(/2026-09-25 · D22/)).toBeTruthy();
+  expect(screen.getByText(/暂未取得新证据，已放慢核对/)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "停止本地核对" }));
+  expect(runCommand).toHaveBeenCalledWith("stopMonitor");
+  expect(vi.mocked(runCommand).mock.calls.map(call => call[0])).not.toContain("continueOrder");
+});
+
 test("active observation refreshes check results without a state transition and stops polling when monitoring ends", async () => {
   vi.useFakeTimers();
   railwatchStore.setState({ status: { ...defaultStatus, monitoring: true } });
@@ -49,7 +65,7 @@ test("active observation refreshes check results without a state transition and 
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
   expect(runCommand).toHaveBeenCalledTimes(2);
   expect(screen.getByText("最近核对结果：结果待核对")).toBeTruthy();
-  expect(screen.getByText(/候补已生效；当前不会周期性自动复查/)).toBeTruthy();
+  expect(screen.getByText(/候补已生效；正在持续核对兑现状态/)).toBeTruthy();
   latest = { ...latest, observing: false };
   await act(async () => { railwatchStore.setState({ status: { ...defaultStatus, monitoring: false } }); });
   expect(screen.getByText(/当前未观察/)).toBeTruthy();

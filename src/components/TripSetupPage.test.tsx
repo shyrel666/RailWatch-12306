@@ -37,9 +37,58 @@ function resetStore() {
   });
 }
 
+test("date strategy and budget survive leaving settings without enabling trading", async () => {
+  resetStore();
+  const user = userEvent.setup();
+  const runCommand = vi.fn(async () => undefined);
+  const mount = () => render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
+  let view = mount();
+  await user.click(screen.getByRole("combobox", { name: "多日期策略" }));
+  await user.click(await screen.findByText("限时扫描多日期现票", { selector: ".ant-select-item-option-content" }));
+  const input = screen.getByRole("spinbutton", { name: "跨日期扫描预算（秒）" });
+  await user.clear(input);
+  await user.type(input, "45");
+  await user.tab();
+  expect(railwatchStore.getState().config.date_strategy).toBe("inventory_first");
+  expect(railwatchStore.getState().config.date_scan_budget_seconds).toBe(45);
+  expect(railwatchStore.getState().config.auto_submit).toBe(false);
+  expect(railwatchStore.getState().config.auto_alternate).toBe(false);
+  view.unmount();
+  view = mount();
+  expect((screen.getByRole("spinbutton", { name: "跨日期扫描预算（秒）" }) as HTMLInputElement).value).toBe("45");
+  expect(screen.getByText(/扫描预算45秒/)).toBeTruthy();
+  view.unmount();
+});
+
 describe("TripSetupPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
+
+  test("multi-choice and order observation settings persist without enabling submission", async () => {
+    const user = userEvent.setup();
+    const mount = () => render(<TripSetupPage busy={null} confirm={async () => false} runCommand={async () => undefined} />);
+    let view = mount();
+    await user.click(screen.getByRole("heading", { name: "自动化" }));
+    await user.click(screen.getByRole("combobox", { name: "候补组合" }));
+    await user.click(await screen.findByText("多个已配置组合", { selector: ".ant-select-item-option-content" }));
+    const limit = screen.getByRole("spinbutton", { name: "候补组合上限" });
+    await user.clear(limit);
+    await user.type(limit, "8");
+    await user.tab();
+    const interval = screen.getByRole("spinbutton", { name: "订单核对间隔（秒）" });
+    await user.clear(interval);
+    await user.type(interval, "120");
+    await user.tab();
+    expect(railwatchStore.getState().config).toMatchObject({ alternate_mode: "multiple", alternate_max_combinations: 8,
+      order_watch_enabled: true, order_watch_interval_seconds: 120, auto_submit: false, auto_alternate: false });
+    view.unmount();
+    view = mount();
+    await user.click(screen.getByRole("heading", { name: "自动化" }));
+    expect((screen.getByRole("spinbutton", { name: "候补组合上限" }) as HTMLInputElement).value).toBe("8");
+    await user.click(screen.getByRole("switch", { name: "持续订单核对" }));
+    expect(railwatchStore.getState().config.order_watch_enabled).toBe(false);
+    view.unmount();
+  });
 
   test("offers deadline choices and preserves manually entered dates on remount", async () => {
     const user = userEvent.setup();
@@ -325,6 +374,7 @@ describe("TripSetupPage", () => {
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
     railwatchStore.setState({
       config: { ...defaultConfig, date: "2020-01-01" },
+      tripInitialized: true,
     });
 
     render(
@@ -348,6 +398,7 @@ describe("TripSetupPage", () => {
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
     railwatchStore.setState({
       config: { ...defaultConfig, date: "2020-01-01" },
+      tripInitialized: true,
     });
 
     render(
@@ -370,6 +421,7 @@ describe("TripSetupPage", () => {
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
     railwatchStore.setState({
       config: { ...defaultConfig, date: isoDaysFromToday(3) },
+      tripInitialized: true,
     });
 
     render(
@@ -384,5 +436,25 @@ describe("TripSetupPage", () => {
       { config: expect.anything() },
       "设置已保存",
     );
+  });
+
+  test("saving is blocked until the saved trip has been loaded", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.fn(async () => true) as ConfirmDialog;
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({
+      config: { ...defaultConfig, date: isoDaysFromToday(3) },
+      tripInitialized: false,
+    });
+
+    render(
+      <TripSetupPage busy={null} confirm={confirm} runCommand={runCommand} />,
+    );
+
+    const saveButton = screen.getByRole("button", { name: "保存配置" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+    expect(screen.getByText(/已保存的行程尚未加载/)).toBeTruthy();
+    await user.click(saveButton);
+    expect(vi.mocked(runCommand).mock.calls.some(([command]) => command === "saveConfig")).toBe(false);
   });
 });

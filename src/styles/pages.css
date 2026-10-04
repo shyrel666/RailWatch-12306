@@ -1212,5 +1212,12 @@
 .run-reviews-empty p { margin: 0; color: var(--text); }
 .run-reviews-empty small { font-size: 12px; line-height: 1.7; }
 .run-review-detail { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+.query-timing-table-wrap { max-width: 100%; overflow-x: auto; margin-block: 14px; }
+.query-timing-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.query-timing-table caption { text-align: left; color: var(--muted); padding-bottom: 8px; }
+.query-timing-table th, .query-timing-table td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.query-timing-table th:first-child { text-align: left; white-space: normal; }
+.query-timing-table thead { background: var(--subtle); }
+.query-timing-table tbody th { font-weight: 400; }
 #run-reviews-content .ant-btn { flex-shrink: 0; }
 @media (max-width: 760px) { .rehearsal-check { grid-template-columns: 64px minmax(0, 1fr); } .rehearsal-timeline-row { grid-template-columns: 90px minmax(30px, 1fr) 70px; } }

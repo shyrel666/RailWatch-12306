@@ -96,7 +96,7 @@ def main():
                 assert deadline.get_attribute("value") == "开车前20分钟"
                 driver.find_element("css selector", '[aria-label="订单中心"]').click()
                 wait.until(lambda d: "E123" in d.find_element("tag name", "body").text)
-                assert "当前不会周期性自动复查" in driver.find_element("tag name", "body").text
+                assert "当前未持续核对" in driver.find_element("tag name", "body").text
                 assert driver.execute_script("return document.querySelector('.page-surface').scrollWidth <= document.querySelector('.page-surface').clientWidth + 1")
                 driver.save_screenshot(str(OUTPUT / f"orders-{width}.png"))
     finally:

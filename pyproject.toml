@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "railwatch-12306"
-version = "0.5.3"
+version = "0.5.5"
 description = "Python runtime and Selenium core for the RailWatch 12306 Electron desktop app."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,10 +49,15 @@ py-modules = [
   "railwatch_orders",
   "railwatch_order_page",
   "railwatch_alternate_flow",
+  "railwatch_alternate_plan",
+  "railwatch_alternate_editor",
+  "railwatch_alternate_records",
   "railwatch_bridge",
   "railwatch_cleanup",
   "railwatch_config_contract",
   "railwatch_dates",
+  "railwatch_date_plan",
+  "railwatch_timing",
   "railwatch_notify",
   "railwatch_preferences",
   "railwatch_row_parser",
@@ -70,4 +75,4 @@ py-modules = [
 ]
 
 [tool.setuptools.package-data]
-railwatch_policies = ["query_strategies.json"]
+railwatch_policies = ["query_strategies.json", "date_strategies.json", "order_policies.json"]

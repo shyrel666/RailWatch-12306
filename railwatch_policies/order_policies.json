@@ -1,0 +1,10 @@
+{
+  "alternate_mode": "single",
+  "alternate_max_combinations": 5,
+  "max_combinations": 60,
+  "max_dates": 3,
+  "order_watch_enabled": true,
+  "order_watch_interval_seconds": 60,
+  "min_watch_interval_seconds": 30,
+  "max_watch_interval_seconds": 600
+}

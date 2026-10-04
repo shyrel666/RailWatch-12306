@@ -1,0 +1,71 @@
+<!doctype html><meta charset="utf-8"><title>Offline multi-choice waitlist fixture</title>
+<!-- Synthetic data; visible structure follows public lineUp_toPay templates.
+     No network, account data, private page functions, or payment operations. -->
+<style>.hidden{display:none}label,button,a{display:inline-block;padding:4px}.modal{border:1px solid} .ticket-item-info{display:flex;gap:10px}</style>
+<button id="candidate">候补</button>
+<div id="form" class="hidden">
+  <div id="ticket_card_list"></div>
+  <div id="init_add">去添加</div><div id="planList"></div><div id="continue_add" class="hidden">继续添加更多候补需求</div>
+  <div id="passenge_list"><label title="张三"><input class="chose-pass-dom" type="checkbox">张三（成人）</label></div>
+  <div id="selected-people"></div>
+  <div id="dafaultTime">2026年10月10日 18:00</div><ul id="date_box" class="hidden"><li>2026年10月10日 18:00</li></ul>
+  <div id="is_open">已关闭</div><label id="addTrainInput"><input id="contact_train" type="checkbox">接受新增列车</label>
+  <a id="toPayBtn" href="#">提交订单</a>
+</div>
+<div id="popup" class="modal hidden"><div class="date-list"></div><label><input id="oneTouch" type="checkbox">符合条件的一键候补</label>
+  <div id="alternate"></div><a class="submitTicket" href="#">完成</a></div>
+<div id="records"></div>
+<div id="order-details" class="modal hidden"><div class="modal-tit">候补明细</div><a class="modal-close" title="关闭">关闭</a><div id="detail-body"></div></div>
+<script>
+const primary={train:'G101',date:'2026-10-10',from:'北京',to:'上海',seat:'二等座'};
+const key=c=>[c.date,c.train,c.from,c.to,c.seat].join('|');
+const dates=['2026-10-10','2026-10-09','2026-10-11'];
+const fixture={selected:[primary],draft:[primary],date:primary.date,submitClicks:0,adds:[],dates:[],onAdd:null,collapsed:false,detailClicks:0};
+const el=id=>document.getElementById(id);
+const card=c=>`<div class="ticket-card"><div class="ticket-date">${c.date}</div><div class="ticket-number">${c.train}</div><div class="ticket-station-start"><div class="ticket-station-name" title="${c.from}">${c.from}</div></div><div class="ticket-station-end"><div class="ticket-station-name" title="${c.to}">${c.to}</div></div><div class="ticket-info-txt"><span>${c.seat}</span></div></div>`;
+el('ticket_card_list').innerHTML=card(primary);
+fixture.card=card;
+fixture.record=(state='待支付',choices=fixture.selected,order='E123456')=>{
+  el('form').classList.add('hidden');el('popup').classList.add('hidden');
+  const preview=fixture.collapsed?[choices[0]]:choices;
+  el('records').innerHTML=`<div class="order-item"><div class="order-item-hd">候补单号：${order}<span class="order-status">${state}</span></div><div class="ticket-card-list">${preview.map(card).join('').replaceAll('class="ticket-card"',fixture.collapsed?'class="ticket-card-queue"':'class="ticket-card"')}</div><div class="passenger-name"><strong title="张三">张三</strong></div>${fixture.collapsed?'<div class="hb-selected-infos">候补明细：<a class="hb-detail" href="#">详情</a></div>':''}</div>`;
+  if(fixture.collapsed)document.querySelector('.hb-detail').onclick=e=>{
+    e.preventDefault();fixture.detailClicks++;
+    const values=fixture.detailTransform?fixture.detailTransform(choices):choices;
+    el('detail-body').innerHTML='<div class="hb-selected-group"><div class="selected-main">'+[...new Set(values.map(c=>c.date))].map(date=>{
+      const rows=values.filter(c=>c.date===date);
+      return `<div class="group-item"><div class="group-tit">${date}（已选${rows.length}）</div>${rows.map(c=>`<div class="group-ticket"><div class="ticket-station"><div class="ticket-station-name">${c.from}</div></div><div class="ticket-number">${c.train}</div><div class="ticket-station"><div class="ticket-station-name">${c.to}</div></div><div class="ticket-seat">${c.seat}</div></div>`).join('')}</div>`;
+    }).join('')+'</div></div>';
+    el('order-details').classList.remove('hidden');
+  };
+};
+el('order-details').querySelector('.modal-close').onclick=()=>{el('order-details').classList.add('hidden');if(fixture.onDetailsClose)fixture.onDetailsClose();};
+function render(){
+  el('popup').classList.remove('hidden');
+  document.querySelector('.date-list').innerHTML=dates.map(date=>`<div class="date-item ${date===fixture.date?'is-active':''}" data-val="${date}"><div class="date-name">${date}</div><div class="date-info">${fixture.draft.filter(c=>c.date===date).length?'已选('+fixture.draft.filter(c=>c.date===date).length+')':''}</div></div>`).join('');
+  document.querySelectorAll('.date-item').forEach(node=>node.onclick=()=>{fixture.date=node.dataset.val;fixture.dates.push(fixture.date);render();});
+  el('alternate').innerHTML='<div class="ticket-result-bd">'+['G101','G102','G999'].map(train=>`<div class="ticket-result-item"><div class="ticket-item-info"><div class="ticket-number-num">${train}</div><div class="ticket-time-info"><span class="label-shi">始</span>北京</div><div class="ticket-time-info"><span class="label-zhong">终</span>上海</div></div><div class="ticket-item-buy">${['二等座','一等座'].map(seat=>{
+    const c={train,date:fixture.date,from:'北京',to:'上海',seat},selected=fixture.draft.some(item=>key(item)===key(c)),fixed=key(c)===key(primary);
+    const info=['SHH','BJP',train,'fixture-secret',seat==='二等座'?'O':'M','fixture-train','09:00','12:00','北京','上海','fixture-flags'].join('#');
+    return `<div class="ticket-item-buy-item"><div class="ticket-price-seat">${seat}</div><div class="ticket-btn"><a href="#" ${fixed?'':`data-info="${info}"`} class="btn ${selected?'is-active ':''}${fixed?'btn-disabled':'hbbtn'}">候补</a></div></div>`;
+  }).join('')}</div></div>`).join('')+'</div>';
+  document.querySelectorAll('.hbbtn').forEach(node=>node.onclick=e=>{
+    e.preventDefault();const parts=node.dataset.info.split('#'),c={train:parts[2],date:fixture.date,from:parts[8],to:parts[9],seat:parts[4]==='O'?'二等座':'一等座'};
+    if(fixture.draft.some(item=>key(item)===key(c)))fixture.draft=fixture.draft.filter(item=>key(item)!==key(c));
+    else{fixture.draft.push(c);fixture.adds.push(c);if(fixture.onAdd)fixture.onAdd(c);}
+    render();
+  });
+}
+fixture.render=render;
+for(const id of ['init_add','continue_add'])el(id).onclick=()=>{fixture.draft=fixture.selected.map(c=>({...c}));fixture.date=primary.date;render();};
+document.querySelector('.submitTicket').onclick=e=>{e.preventDefault();fixture.selected=fixture.draft.map(c=>({...c}));el('popup').classList.add('hidden');
+  el('planList').innerHTML=fixture.selected.length>1?[...new Set(fixture.selected.map(c=>c.date))].map(date=>`<div class="list-item"><a class="editPlan" data-date="${date.replaceAll('-','')}">编辑</a><div class="item-time">${date}</div><div class="item-info">${fixture.selected.filter(c=>c.date===date).map(c=>c.train+' '+c.seat).join('、')}</div></div>`).join(''):'';
+  el('init_add').classList.toggle('hidden',fixture.selected.length>1);el('continue_add').classList.toggle('hidden',fixture.selected.length<=1||new Set(fixture.selected.map(c=>c.date)).size===3);
+  document.querySelectorAll('.editPlan').forEach(node=>node.onclick=()=>el('continue_add').onclick());
+};
+el('candidate').onclick=()=>el('form').classList.remove('hidden');
+el('passenge_list').querySelector('input').onchange=e=>el('selected-people').innerHTML=e.target.checked?'<input class="name-input" readonly value="张三">':'';
+el('dafaultTime').onclick=()=>el('date_box').classList.remove('hidden');
+el('date_box').querySelector('li').onclick=()=>el('date_box').classList.add('hidden');
+el('toPayBtn').onclick=e=>{e.preventDefault();fixture.submitClicks++;fixture.record();};
+</script>

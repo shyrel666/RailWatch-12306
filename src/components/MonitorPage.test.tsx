@@ -36,6 +36,15 @@ describe("MonitorPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
 
+  test("running date strategy comes from the launch snapshot", () => {
+    railwatchStore.setState({ config: { ...defaultConfig, date_strategy: "inventory_first" },
+      status: { ...defaultStatus, monitoring: true,
+        current_config: { ...defaultConfig, date_strategy: "preferred_date" } } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByLabelText("本次日期策略").textContent).toContain("先查首选日期");
+    expect(screen.getByLabelText("本次日期策略").textContent).not.toContain("限时扫描多日期现票");
+  });
+
   test("rehearsal is hidden until enabled and disappears when disabled", () => {
     render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
     expect(screen.queryByRole("region", { name: "起售彩排" })).toBeNull();

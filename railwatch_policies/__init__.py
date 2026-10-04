@@ -3,6 +3,8 @@ import json
 from importlib.resources import files
 
 QUERY_STRATEGIES = json.loads(files(__package__).joinpath("query_strategies.json").read_text(encoding="utf-8"))
+DATE_STRATEGIES = json.loads(files(__package__).joinpath("date_strategies.json").read_text(encoding="utf-8"))
+ORDER_POLICIES = json.loads(files(__package__).joinpath("order_policies.json").read_text(encoding="utf-8"))
 
 
 def priority_defaults(priority=None):

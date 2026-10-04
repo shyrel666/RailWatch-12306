@@ -12,6 +12,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from railwatch_alternate_plan import AlternateChoice, AlternatePlan
 
 
 STAGES = {
@@ -23,9 +24,11 @@ STAGES = {
     "dismissed": "已结束本地核对",
 }
 TERMINAL = {"sold_out", "not_submitted", "fulfilled", "cancelled", "expired", "failed", "dismissed"}
-QUERY_TELEMETRY_STAGES = frozenset({"query_click", "query_result"})
+QUERY_TELEMETRY_STAGES = frozenset({"query_click", "query_result", "query_timing"})
+BUFFERED_TELEMETRY_STAGES = QUERY_TELEMETRY_STAGES | {"scheduler_wake"}
 OFFICIAL_STATUSES = frozenset({"pending_payment", "active", "fulfilled", "cancelled", "expired", "failed"})
 EVENT_LABELS = {"submitting": "订单意图已在本地保存", "regular_submit": "已点击普通订单提交",
+                "alternate_choices": "完整候补组合已在本地保存",
                 "alternate_submit": "已点击候补订单提交", "resume_claimed": "开始恢复原订单",
                 "resume_released": "原订单恢复已结束", "dismissed": "用户结束本地核对；官方订单未取消",
                 "order_result": "订单页面核对结果", "pending_payment": "官方订单待支付",
@@ -44,6 +47,18 @@ class OrderIntent:
     passengers: tuple
     deadline: str = ""
     intent_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    choices: tuple[AlternateChoice, ...] = ()
+
+    def __post_init__(self):
+        if self.choices and (self.kind != "alternate" or len(self.choices) > 60 or
+                             len({choice.date for choice in self.choices}) > 3 or
+                             self.choices[0] != AlternateChoice.from_intent(self) or
+                             len(set(self.choices)) != len(self.choices)):
+            raise ValueError("候补组合清单无效")
+
+    @property
+    def combinations(self):
+        return self.choices or (AlternateChoice.from_intent(self),)
 
     @classmethod
     def from_config(cls, config, train, seat, kind):
@@ -54,7 +69,8 @@ class OrderIntent:
 
     @classmethod
     def from_dict(cls, value):
-        return cls(**{**value, "passengers": tuple(value["passengers"])})
+        return cls(**{**value, "passengers": tuple(value["passengers"]),
+                      "choices": tuple(AlternateChoice(**choice) for choice in value.get("choices", []))})
 
 
 @dataclass(frozen=True)
@@ -178,7 +194,9 @@ class OrderJournal:
         self.flush_telemetry()
         with self.connection() as db:
             db.row_factory = sqlite3.Row
-            rows = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage NOT IN ('query_click','query_result') ORDER BY sequence", (run_id,)))
+            rows = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage NOT IN ('query_click','query_result') AND stage!='query_timing' ORDER BY sequence", (run_id,)))
+            # A bounded recent window keeps review reads small even on long runs.
+            timings = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_timing' ORDER BY sequence DESC LIMIT 200", (run_id,)))
             wake = next((row["sequence"] for row in rows if row["stage"] == "scheduler_wake"), 0)
             hit = next((row["sequence"] for row in rows if row["stage"] in ("inventory_found", "no_inventory")), 2**63-1)
             clicks = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_click' AND sequence>? ORDER BY sequence LIMIT 5", (run_id, wake)))
@@ -196,7 +214,7 @@ class OrderJournal:
             first_known = first_click is not None and db.execute(
                 "SELECT count(*) FROM order_events WHERE sequence>? AND sequence<?", (wake, first_click)
             ).fetchone()[0] == first_click - wake - 1
-        events = [{**dict(row), "detail": json.loads(row["detail"])} for row in sorted(rows, key=lambda row: row["sequence"])]
+        events = [{**dict(row), "detail": json.loads(row["detail"])} for row in sorted(rows + timings, key=lambda row: row["sequence"])]
         for event in events:
             if event["stage"] == "scheduler_wake":
                 event["detail"]["first_query_known"] = first_known
@@ -255,15 +273,40 @@ class OrderJournal:
                 json.dumps(config, ensure_ascii=False), json.dumps(OrderResult("submitting").payload()), 1, time.time()))
         self.mark(run_id, "submitting", intent.intent_id)
 
+    def bind_alternatives(self, intent):
+        """Commit the exact selected set before any final submission is allowed."""
+        with self._ordered_events(), self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT intent,config,result,run_id FROM orders WHERE intent_id=? AND unresolved=1",
+                             (intent.intent_id,)).fetchone()
+            if not row:
+                raise RuntimeError("候补意图已失效")
+            saved, config, result = OrderIntent.from_dict(json.loads(row[0])), json.loads(row[1]), json.loads(row[2])
+            if (saved.kind != "alternate" or replace(intent, choices=saved.choices) != saved
+                    or config.get("alternate_mode") != "multiple" or result.get("order_id")
+                    or result.get("status") != "submitting" or not AlternatePlan(saved, config).validate(intent.combinations)):
+                raise ValueError("候补组合超出已保存的授权范围")
+            if db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN "
+                          "('regular_submit','alternate_submit','resume_claimed') LIMIT 1", (intent.intent_id,)).fetchone():
+                raise RuntimeError("订单已开始提交或恢复，不能更换候补组合")
+            db.execute("UPDATE orders SET intent=?,updated_at=? WHERE intent_id=?",
+                       (json.dumps(asdict(intent), ensure_ascii=False), time.time(), intent.intent_id))
+            db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
+                       (row[3], intent.intent_id, "alternate_choices", time.time(), time.monotonic(),
+                        json.dumps({"count": len(intent.combinations)})))
+
     def record(self, intent, result):
         if result.status not in STAGES:
             raise ValueError("未知订单状态")
         with self._ordered_events(), self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT result FROM orders WHERE intent_id=?", (intent.intent_id,)).fetchone()
+            row = db.execute("SELECT result,intent FROM orders WHERE intent_id=?", (intent.intent_id,)).fetchone()
             if not row:
                 raise RuntimeError("订单意图尚未持久化，不能确认结果")
             previous = json.loads(row[0])
+            saved = OrderIntent.from_dict(json.loads(row[1]))
+            if saved.choices and saved != intent:
+                raise ValueError("订单核对必须使用已保存的完整候补组合")
             if result.status in ("pending_payment", "active", "fulfilled", "cancelled", "expired", "failed") and not (result.order_id and result.evidence.get("matched") is True):
                 result = OrderResult("unknown", "订单状态缺少匹配的订单号和页面证据")
             if result.status in OFFICIAL_STATUSES:
@@ -392,6 +435,8 @@ class OrderJournal:
                 "kind": intent.get("kind", "regular"), "train_code": intent.get("train_code", ""),
                 "date": intent.get("date", ""), "from_station": intent.get("from_station", ""),
                 "to_station": intent.get("to_station", ""), "seat": intent.get("seat", ""),
+                "choices": intent.get("choices") or ([{key: intent.get(key, "") for key in
+                    ("train_code", "date", "from_station", "to_station", "seat")}] if intent.get("kind") == "alternate" else []),
                 "status": result.get("status", "unknown"), "official_status": official_status,
                 "official_verified_at": official_verified_at, "updated_at": updated_at,
                 "last_checked_at": checked, "last_check_status": check_status, "observing": False,
@@ -544,16 +589,16 @@ class OrderJournal:
             return cursor.lastrowid
 
     def record_telemetry(self, run_id, stage, intent_id="", detail=None):
-        """Buffer non-critical query timing events and persist them in batches."""
-        if stage not in QUERY_TELEMETRY_STAGES:
-            raise ValueError("仅查询遥测事件可以批量写入")
+        """Buffer non-critical timing; submission ownership is always synchronous."""
+        if stage not in BUFFERED_TELEMETRY_STAGES:
+            raise ValueError("仅查询及定时唤醒遥测事件可以批量写入")
         with self._telemetry_guard:
             event = (run_id, intent_id, stage, time.time(), time.monotonic(),
                      json.dumps(detail or {}, ensure_ascii=False))
             self._telemetry_batch.append(event)
             if len(self._telemetry_batch) > self._telemetry_limit:
                 self._telemetry_batch = self._telemetry_batch[-self._telemetry_limit:]
-            if len(self._telemetry_batch) >= self._telemetry_batch_size:
+            if stage not in ("scheduler_wake", "query_timing") and len(self._telemetry_batch) >= self._telemetry_batch_size:
                 try:
                     self.flush_telemetry()
                 except sqlite3.Error:
@@ -580,10 +625,10 @@ class OrderJournal:
     def _prune_telemetry(self, db):
         db.execute(
             """DELETE FROM order_events
-               WHERE stage IN ('query_click','query_result')
+               WHERE stage IN ('query_click','query_result','query_timing')
                  AND sequence <= COALESCE((
                    SELECT sequence FROM order_events
-                   WHERE stage IN ('query_click','query_result')
+                   WHERE stage IN ('query_click','query_result','query_timing')
                    ORDER BY sequence DESC LIMIT 1 OFFSET ?
                  ), -1)""",
             (self._telemetry_limit,),

@@ -6,7 +6,7 @@ import datetime as dt
 import math
 import re
 from railwatch_dates import validate_travel_date, beijing_now
-from railwatch_policies import normalize_strategy, priority_defaults
+from railwatch_policies import DATE_STRATEGIES, ORDER_POLICIES, normalize_strategy, priority_defaults
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -37,7 +37,13 @@ TRIP_FIELD_KEYS = (
     "passenger_selections",
     "auto_alternate",
     "alternate_deadline",
+    "alternate_mode",
+    "alternate_max_combinations",
+    "order_watch_enabled",
+    "order_watch_interval_seconds",
     "date_range",
+    "date_strategy",
+    "date_scan_budget_seconds",
     "smart_rate",
     "timer_enabled",
     "target_time",
@@ -77,7 +83,11 @@ def default_config(
         "passenger_selections": [],
         "auto_alternate": False,
         "alternate_deadline": "开车前60分钟",
+        **{key: ORDER_POLICIES[key] for key in ("alternate_mode", "alternate_max_combinations",
+                                               "order_watch_enabled", "order_watch_interval_seconds")},
         "date_range": "±1天",
+        "date_strategy": DATE_STRATEGIES["default"],
+        "date_scan_budget_seconds": DATE_STRATEGIES["scan_budget_seconds"],
         "smart_rate": True,
         "timer_enabled": False,
         "target_time": target_time,
@@ -169,6 +179,27 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
         from railwatch_time import resolve_sale_timestamp
         resolve_sale_timestamp(trip)
     trip["date_range"] = str(trip.get("date_range", "±1天")).strip() or "±1天"
+    trip["date_strategy"] = str(trip.get("date_strategy", DATE_STRATEGIES["default"]))
+    if trip["date_strategy"] not in DATE_STRATEGIES["strategies"]:
+        raise ValueError("不支持的多日期策略")
+    try:
+        budget = float(trip.get("date_scan_budget_seconds", DATE_STRATEGIES["scan_budget_seconds"]))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("跨日期扫描预算须为10至120秒") from None
+    if not math.isfinite(budget) or not DATE_STRATEGIES["min_budget_seconds"] <= budget <= DATE_STRATEGIES["max_budget_seconds"]:
+        raise ValueError("跨日期扫描预算须为10至120秒")
+    trip["date_scan_budget_seconds"] = budget
+    trip["alternate_mode"] = str(trip.get("alternate_mode", ORDER_POLICIES["alternate_mode"]))
+    if trip["alternate_mode"] not in ("single", "multiple"):
+        raise ValueError("候补组合模式无效")
+    for key, low, high in (("alternate_max_combinations", 1, ORDER_POLICIES["max_combinations"]),
+                           ("order_watch_interval_seconds", ORDER_POLICIES["min_watch_interval_seconds"],
+                            ORDER_POLICIES["max_watch_interval_seconds"])):
+        value = trip.get(key, ORDER_POLICIES[key])
+        if type(value) not in (int, float) or not math.isfinite(value) or int(value) != value or not low <= value <= high:
+            raise ValueError(f"{'候补组合上限' if key == 'alternate_max_combinations' else '订单核对间隔'}须为{low}至{high}的整数")
+        trip[key] = int(value)
+    trip["order_watch_enabled"] = _to_bool(trip.get("order_watch_enabled", ORDER_POLICIES["order_watch_enabled"]))
     trip["interval"] = _to_float(trip.get("interval"), 5.0, minimum=1.0, maximum=60.0)
     trip["query_timeout"] = _to_int(trip.get("query_timeout"), 40, minimum=5, maximum=120)
     trip["passenger_count"] = _to_int(trip.get("passenger_count"), 1, minimum=1, maximum=20)

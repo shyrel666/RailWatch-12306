@@ -58,9 +58,9 @@ class MonitorRiskReviewTests(unittest.TestCase):
 
     def test_exception_sleeps_using_updated_backoff(self):
         monitor = self.make_monitor()
-        monitor.should_stop = Mock(side_effect=[False, True])
         monitor._run_single_loop = Mock(side_effect=RuntimeError("connection interrupted"))
         monitor._sleep = Mock()
+        monitor.should_stop = lambda: monitor._sleep.called
         with patch("gui_12306_0.WebDriverWait"), patch("anti_detect.random.uniform", return_value=0):
             monitor.run()
         monitor._sleep.assert_called_once_with(7.5)

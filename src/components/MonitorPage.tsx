@@ -4,6 +4,8 @@ import { Alert, Button, Switch } from "antd";
 import { useClock } from "../lib/useClock";
 import { hasUnresolvedOrder } from "../lib/dashboardState";
 import { automationConfigIssue } from "../lib/automationReadiness";
+import { DATE_STRATEGIES, dateStrategy, dateStrategySummary } from "../lib/dateStrategy";
+import { orderPolicySummary } from "../lib/orderPolicy";
 import {
   Activity,
   Bell,
@@ -285,6 +287,8 @@ export function MonitorPage({
         />
       ) : null}
       <p>购票辅助：核验与支付需人工完成，发现现票不代表订单已创建，订单状态以官方页面为准。</p>
+      <p aria-label="本次日期策略">日期策略：{config.date_range === "单日" ? "单日查询" : DATE_STRATEGIES[dateStrategy(config)].label}。{dateStrategySummary(config)}</p>
+      <p aria-label="本次候补与核对策略">{orderPolicySummary(config)}</p>
 
       {status.monitoring ? (
         <p role="status">

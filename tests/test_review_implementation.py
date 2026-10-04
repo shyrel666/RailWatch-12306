@@ -111,7 +111,7 @@ class RecoveryStateTests(unittest.TestCase):
             bridge = RailWatchBridge(tmp)
             bridge._notify_async = Mock()
             target = intent()
-            task = bridge._task = MonitorTask({})
+            task = bridge._task = MonitorTask({"order_watch_enabled": False})
             result = OrderResult("pending_payment", order_id="E123456", evidence={"matched": True})
             bridge.order_journal.begin(task.run_id, target, {})
             bridge.order_journal.record(target, result)

@@ -31,7 +31,7 @@ export type UpdaterLike = EventEmitter & {
   autoDownload: boolean;
   autoInstallOnAppQuit: boolean;
   checkForUpdates(): Promise<unknown>;
-  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+  launchInstaller?(): Promise<void>;
 };
 
 type UpdateManagerOptions = {
@@ -91,6 +91,7 @@ function formatUpdateError(error: unknown): string {
 export function createUpdateManager(options: UpdateManagerOptions) {
   const { currentVersion, updater, enabled, onStateChange, onUpdateDownloaded } = options;
   let state: UpdateRuntimeState = { phase: "idle", currentVersion };
+  let installation: Promise<boolean> | null = null;
 
   const publish = (next: UpdateRuntimeState) => {
     state = next;
@@ -224,11 +225,26 @@ export function createUpdateManager(options: UpdateManagerOptions) {
         source: "updater",
       };
     },
-    installUpdate(): void {
+    installUpdate(): Promise<boolean> {
+      if (installation) return installation;
       if (state.phase !== "downloaded") {
-        return;
+        return Promise.resolve(false);
       }
-      updater.quitAndInstall(false, true);
+      // Only the shipped NSIS installer currently has an acknowledged launch
+      // path. Never fall back to quitAndInstall, which may quit before failure.
+      installation = Promise.resolve().then(async () => {
+        try {
+          if (!updater.launchInstaller) throw new Error("当前平台不支持自动安装，请手动安装更新。");
+          await updater.launchInstaller();
+          return true;
+        } catch (error) {
+          const message = formatUpdateError(error);
+          publish({ ...state, phase: "error", error: message, result: buildFailure(currentVersion, message) });
+          installation = null;
+          return false;
+        }
+      });
+      return installation;
     },
   };
 }

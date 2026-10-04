@@ -128,6 +128,9 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
         `乘客：${config.passengers || "未指定"}`,
         `起售时刻：${config.timer_enabled ? config.sale_at || "未设置" : "未启用定时"}`,
         `自动提交：${config.auto_submit ? "开" : "关"}；自动候补：${config.auto_alternate ? "开" : "关"}`,
+        config.alternate_mode === "multiple" ? `候补清单：最多${config.alternate_max_combinations ?? 5}个已配置组合、3个日期，合并为一个订单`
+          : "候补清单：首个可用组合",
+        config.order_watch_enabled === false ? "持续订单核对：关闭" : `持续订单核对：开启，生效后每${config.order_watch_interval_seconds ?? 60}秒核对；可停止`,
         "确认后按上述配置启动。核验和支付仍需在官方页面完成。",
       ].join("\n"),
     };

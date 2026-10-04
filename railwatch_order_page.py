@@ -71,12 +71,12 @@ function passengers(root) {
   }
   return names;
 }
-const cards=all('#ticket_card_list .ticket-card');
-const details=cards.map(c=>({train:txt(c.querySelector('.ticket-number')),
+const cardDetail=c=>({train:txt(c.querySelector('.ticket-number')),
  date:txt(c.querySelector('.ticket-date')),
  from:c.querySelector('.ticket-station-start .ticket-station-name')?.getAttribute('title')||'',
  to:c.querySelector('.ticket-station-end .ticket-station-name')?.getAttribute('title')||'',
- seat:txt(c.querySelector('.ticket-info-txt span'))}));
+ seat:txt(c.querySelector('.ticket-info-txt span'))});
+const details=all('#ticket_card_list .ticket-card').map(cardDetail);
 const orders=all('.order-item').map(root=>{
  const header=txt(root.querySelector('.order-item-hd'));
  const ids=[...header.matchAll(/(?:候补单号|订单号码?)\s*[：:]\s*([A-Za-z0-9]+)/g)].map(m=>m[1]);
@@ -108,7 +108,8 @@ const orders=all('.order-item').map(root=>{
  }
  return {order_id:orderId,kind:header.includes('候补单号')?'alternate':'regular',
    text:body.join(' ').replace(/\s+/g,' ').trim(),state,state_conflict:new Set(ticketStates).size>1,payment,passengers:passengers(root),
-   train_codes:trainCodes(root)};
+   train_codes:trainCodes(root), choices:all('.ticket-card-list .ticket-card,.ticket-card-list .ticket-card-queue',root).map(cardDetail),
+   detail_button:all('a.hb-detail,a.hb-detail2,a.hb-detail3',root).filter(e=>txt(e)==='详情')[0]||null};
 });
 // The immediate payment page uses a legacy ticket table, not .order-item cards.
 const paymentTitle = document.querySelector('#show_title_ticket');
@@ -136,8 +137,9 @@ return {url:location.href, orders, dialogs, details,
  seats:all('select[id^="seatType_"]').map(e=>e.selectedOptions[0]?.textContent.trim()||''),
  ticketTypes:all('select[id^="ticketType_"]').filter(visible).map(e=>e.selectedOptions[0]?.textContent.trim()||''),
  deadline:val('#dafaultTime')||val('#deadline_time')||val('input.deadline-time'),
- extra:all('#planList .group-ticket').length,
- addedTrain:!!document.querySelector('#addTrainInput:checked'),
+ extra:all('#planList .group-ticket,#planList .list-item').length,
+ alternatePopup:visible(document.querySelector('#popup')),
+ addedTrain:!!document.querySelector('#addTrainInput:checked,#addTrainInput input:checked,#contact_train:checked'),
  standing:txt(document.querySelector('#is_open')),
  pendingEmpty:all('#J-order-payment,#not_complete').some(e=>/您没有待支付|没有未完成|暂无待支付/.test(txt(e))) && orders.length===0 && !all('.loading,.loading-box,#J-loading').length,
  formReady:visible(document.querySelector('#normal_passenger_id')) || visible(document.querySelector('#passenge_list')),
@@ -346,7 +348,26 @@ def form_token(text, token, suffix):
                                    + r"(?:\s*" + suffix + r")?(?![0-9A-Za-z\u4e00-\u9fff])", str(text)))
 
 
-def record_matches(record, intent):
+def record_matches(record, intent, *, known_id=""):
+    if record.get("detail_button") and not record.get("details_verified"):
+        # A collapsed official card is only a preview, not the full choice set.
+        return False
+    if intent.kind == "alternate" and len(intent.combinations) > 1:
+        from railwatch_alternate_plan import AlternateChoice
+        try:
+            actual = tuple(AlternateChoice.from_detail(item) for item in record.get("choices", []))
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (record.get("kind") != "alternate" or not actual or len(set(actual)) != len(actual)
+                or sorted(record.get("passengers", [])) != sorted(intent.passengers)):
+            return False
+        expected = set(intent.combinations)
+        if set(actual) == expected:
+            return True
+        # A fulfilled card may retain just the winning choice. Only the bound
+        # waitlist ID and an explicit fulfilled state can authorize that subset.
+        return bool(known_id and record.get("order_id") == known_id and len(actual) == 1
+                    and set(actual) <= expected and re.search("兑现成功|已兑现", record.get("state", "")))
     text = record.get("text", "")
     dates = {normalized_date(m[0]) for m in re.finditer(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}", text)}
     clean_text = re.sub(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}(?:日)?|\d{1,2}:\d{2}", "", text)
@@ -381,13 +402,16 @@ class OrderPage:
     RESULT_UNKNOWN_TIMEOUT = 60.0
     RESULT_POLL_INTERVAL = 0.5
 
-    def __init__(self, driver, stop=lambda: False, wait=None, mark=None, *, allow_fixture=False, log=None):
+    def __init__(self, driver, stop=lambda: False, wait=None, mark=None, *, allow_fixture=False, log=None, poll_interval=0.1):
         self.driver, self.stop = driver, stop
         self.allow_fixture = allow_fixture
         self.wait = wait or time.sleep
         self.mark = mark or (lambda stage, detail=None: None)
         self.log = log or (lambda message: None)
+        self.poll_interval = poll_interval
         self._people_error = ""
+        self.bind_intent = None
+        self.alternate_editor = None
 
     def _save_timing(self, intent, timing):
         timing.step()
@@ -417,12 +441,21 @@ class OrderPage:
         return self._result_from_snapshot(self.snapshot(), intent, submitted=submitted,
                                           known_id=known_id, allow_empty=allow_empty)
 
+    def _result_with_alternate_details(self, snap, intent, *, submitted=True, known_id="", allow_empty=False):
+        if intent.kind == "alternate" and len(intent.combinations) > 1:
+            from railwatch_alternate_records import read_details
+            try:
+                snap = read_details(self, snap, intent, known_id)
+            except ValueError as exc:
+                return OrderResult("verification", str(exc), order_id=known_id)
+        return self._result_from_snapshot(snap, intent, submitted=submitted, known_id=known_id, allow_empty=allow_empty)
+
     def _result_from_snapshot(self, snap, intent, *, submitted=False, known_id="", allow_empty=False):
         if not snap:
             return OrderResult("unknown", "无法读取订单页面")
         # Only an identified, matching order can establish payment or fulfillment.
         matching = [r for r in snap.get("orders", []) if r.get("order_id")
-                    and record_matches(r, intent) and (not known_id or r["order_id"] == known_id)]
+                    and record_matches(r, intent, known_id=known_id) and (not known_id or r["order_id"] == known_id)]
         if len(matching) == 1 and not matching[0].get("state_conflict"):
             record = matching[0]
             state = record.get("state", "")
@@ -442,7 +475,8 @@ class OrderPage:
                     return OrderResult("unknown", "尚未取得本次提交的订单号，历史订单不能证明本次结果，请人工核对")
                 return OrderResult(stage, order_id=record["order_id"], evidence={
                     "matched": True, "url": snap.get("url", "").split("?")[0],
-                    "observed_at": time.time(), "state": state[:100]})
+                    "observed_at": time.time(), "state": state[:100],
+                    **({"fulfilled_choices": record.get("choices", [])} if stage == "fulfilled" and intent.kind == "alternate" else {})})
         if len(matching) == 1 and matching[0].get("state_conflict"):
             return OrderResult("unknown", "已匹配到订单，但订单内车票状态不一致（如部分退票或改签），请在官方订单详情人工核对",
                                order_id=known_id)
@@ -470,26 +504,26 @@ class OrderPage:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            self.wait(min(0.1, remaining))
+            self.wait(min(self.poll_interval, remaining))
         return None
 
     def button(self, selectors):
-        for selector in selectors:
-            try:
-                for element in self.driver.find_elements(By.CSS_SELECTOR, selector):
-                    if element.is_displayed() and element.is_enabled() and element.get_attribute("aria-disabled") != "true":
-                        if selector == "#qr_submit_id":
-                            # The official control is an anchor: WebDriver calls
-                            # it enabled even while 12306 has unbound its handler.
-                            # passengerInfo_js.js binds the handler before switching
-                            # from the waiting class btn92 to the ready class btn92s.
-                            classes = (element.get_attribute("class") or "").split()
-                            if "btn92s" not in classes or "btn92" in classes:
-                                continue
-                        return element
-            except Exception:
-                continue
-        return None
+        from railwatch_selectors import ACTION_READY_JS
+        try:
+            return self.driver.execute_script(ACTION_READY_JS + r"""
+              for (const selector of arguments[0]) {
+                for (const el of document.querySelectorAll(selector)) {
+                  if (!rwActionReady(el)) continue;
+                  // Official anchors are ready only after their handler is bound.
+                  if (selector === '#qr_submit_id' &&
+                      (!el.classList.contains('btn92s') || el.classList.contains('btn92'))) continue;
+                  return el;
+                }
+              }
+              return null;
+            """, list(selectors))
+        except Exception:
+            return None
 
     def form_mismatch_report(self, intent):
         """Expected/actual diff for the pre-submit readback, safe for the event log."""
@@ -526,12 +560,18 @@ class OrderPage:
         return (failed or "各字段均已读到") + summary
 
     def verify_form(self, intent):
+        if intent.kind == "alternate" and len(intent.combinations) > 1:
+            from railwatch_alternate_editor import AlternateEditor
+            editor = self.alternate_editor or AlternateEditor(self)
+            if not editor.verify(intent):
+                return False
         snap = self.snapshot()
         if not intent.passengers or sorted(snap.get("passengers", [])) != sorted(intent.passengers):
             return False
         if intent.kind == "alternate":
             details = snap.get("details", [])
-            if len(details) != 1 or snap.get("extra") or snap.get("addedTrain"):
+            if (len(details) != 1 or snap.get("addedTrain") or snap.get("alternatePopup")
+                    or len(intent.combinations) == 1 and snap.get("extra")):
                 return False
             card = details[0]
             return (card.get("train") == intent.train_code and normalized_date(card.get("date")) == intent.date
@@ -549,18 +589,24 @@ class OrderPage:
                 and [seat_label(value) for value in snap.get("seats", [])] == [intent.seat] * len(intent.passengers))
 
     def select_regular_seats(self, intent):
-        from selenium.webdriver.support.ui import Select
-        selects = [Select(element) for element in self.driver.find_elements(By.CSS_SELECTOR, 'select[id^="seatType_"]')
-                   if element.is_displayed()]
-        if len(selects) != len(intent.passengers):
-            return False
-        choices = [[option for option in select.options
-                    if option.is_enabled() and seat_label(option.text) == intent.seat] for select in selects]
-        if any(len(options) != 1 for options in choices):
-            return False
-        for select, options in zip(selects, choices):
-            select.select_by_index(options[0].get_attribute("index"))
-        return True
+        from railwatch_selectors import ACTION_READY_JS
+        return self.driver.execute_script(ACTION_READY_JS + r"""
+          const selects = [...document.querySelectorAll('select[id^="seatType_"]')].filter(rwActionReady);
+          if (selects.length !== arguments[1]) return false;
+          const label = value => value.replace(/\s*[（(]\s*[¥￥]?\s*\d+(?:\.\d+)?\s*元\s*[）)]\s*$/, '').trim();
+          const choices = selects.map(select => [...select.options].filter(option =>
+            !option.matches(':disabled') && label(option.text) === arguments[0]));
+          if (choices.some(options => options.length !== 1)) return false;
+          // Validate every passenger before changing any selection. The caller
+          // still verifies the complete form before the native submit click.
+          selects.forEach((select, i) => {
+            if (select.selectedIndex !== choices[i][0].index) {
+              select.selectedIndex = choices[i][0].index;
+              select.dispatchEvent(new Event('change', {bubbles:true}));
+            }
+          });
+          return true;
+        """, intent.seat, len(intent.passengers)) is True
 
     def prepare_people(self, intent):
         result = self.driver.execute_script(SELECT_PASSENGERS_JS, list(intent.passengers), intent.kind == "regular")
@@ -621,7 +667,7 @@ class OrderPage:
         next_progress_log = started
         while True:
             snap = self.snapshot()
-            result = self._result_from_snapshot(snap, intent, submitted=submitted, known_id=known_id)
+            result = self._result_with_alternate_details(snap, intent, submitted=submitted, known_id=known_id)
             if result.status != "unknown" or self.stop():
                 return result
             now = time.monotonic()
@@ -714,7 +760,7 @@ class OrderPage:
 
     def reconcile(self, intent, known_id="", navigate=False, allow_empty=False):
         snap = self.snapshot()
-        result = self._result_from_snapshot(snap, intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
+        result = self._result_with_alternate_details(snap, intent, known_id=known_id, allow_empty=allow_empty)
         if result.status not in ("unknown", "verification") or not navigate:
             return result
         if snap.get("processing") or snap.get("confirmation"):
@@ -752,6 +798,32 @@ class OrderPage:
         except Exception:
             return OrderResult("unknown", "订单核对失败，请保留当前订单并在官方页面核查", order_id=known_id)
 
+    def probe_known_order(self, intent, known_id):
+        """Read only the bound order in a disposable tab; preserve payment tabs."""
+        from railwatch_task import browser_tab_lifecycle
+        if not known_id:
+            return OrderResult("unknown", "缺少已绑定订单号，无法自动核对")
+        if self.stop():
+            raise TaskCancelled()
+        original = self.driver.current_window_handle
+        temporary = None
+        try:
+            # Capture our handle before cancellation can unwind the operation.
+            with browser_tab_lifecycle(self.driver):
+                self.driver.switch_to.new_window("tab")
+                temporary = self.driver.current_window_handle
+            if self.stop():
+                raise TaskCancelled()
+            return self.reconcile(intent, known_id=known_id, navigate=True)
+        finally:
+            with browser_tab_lifecycle(self.driver):
+                handles = self.driver.window_handles
+                if temporary and temporary != original and temporary in handles:
+                    self.driver.switch_to.window(temporary)
+                    self.driver.close()
+                if original in self.driver.window_handles:
+                    self.driver.switch_to.window(original)
+
     RECOVERY_TAB_TIMEOUT = 5.0
 
     def _recovery_tab(self, label, url):
@@ -766,7 +838,9 @@ class OrderPage:
         return tabs[0] if len(tabs) == 1 else None
 
     def _resolved(self, intent, known_id, allow_empty=False):
-        result = self.result(intent, submitted=True, known_id=known_id, allow_empty=allow_empty)
+        result = (self._result_with_alternate_details(self.snapshot(), intent, known_id=known_id, allow_empty=allow_empty)
+                  if intent.kind == "alternate" and len(intent.combinations) > 1 else
+                  self.result(intent, submitted=True, known_id=known_id, allow_empty=allow_empty))
         return result if result.status != "unknown" else None
 
     def regular(self, button, intent, *, seat_preference="无偏好", preference_handler=None):
@@ -780,8 +854,9 @@ class OrderPage:
             if button is not None:
                 button.click()
             def ready():
-                result = self.result(intent)
-                return result if result.status in ("sold_out", "verification", "pending_payment", "fulfilled") else self.snapshot().get("formReady")
+                snap = self.snapshot()
+                result = self._result_from_snapshot(snap, intent)
+                return result if result.status in ("sold_out", "verification", "pending_payment", "fulfilled") else snap.get("formReady")
             ready_result = self.poll(ready)
             if isinstance(ready_result, OrderResult): return ready_result
             stage = "选择乘车人"
@@ -856,7 +931,7 @@ class OrderPage:
         finally:
             self._save_timing(intent, timing)
 
-    def alternate(self, button, intent):
+    def alternate(self, button, intent, *, plan_config=None):
         submitted = False
         timing = _OrderTiming()
         timing.step("page_load")
@@ -868,9 +943,10 @@ class OrderPage:
                 self.mark("alternate_first_action")
                 button.click()
             def order_page():
-                result = self.result(intent)
+                snap = self.snapshot()
+                result = self._result_from_snapshot(snap, intent)
                 if result.status == "verification": return result
-                if self.snapshot().get("details"): return True
+                if snap.get("details"): return True
                 return self.button(("#hbSubmit",))
             next_step = self.poll(order_page)
             if isinstance(next_step, OrderResult): return next_step
@@ -878,6 +954,14 @@ class OrderPage:
                 next_step.click()
             if not self.poll(lambda: self.snapshot().get("details")):
                 return OrderResult("verification", "请检查候补需求清单并进入候补订单页")
+            if plan_config is not None and plan_config.get("alternate_mode") == "multiple" and not intent.choices:
+                from railwatch_alternate_editor import AlternateEditor
+                if self.bind_intent is None:
+                    return OrderResult("verification", "多组合候补缺少持久化通道")
+                timing.step("alternatives")
+                self.alternate_editor = AlternateEditor(self, plan_config)
+                intent = self.alternate_editor.populate(intent)
+                self.bind_intent(intent)
             timing.step("passengers")
             if not self.prepare_people(intent):
                 return OrderResult("verification", self._people_error)
@@ -898,6 +982,10 @@ class OrderPage:
             return self.wait_result(intent)
         except TaskCancelled:
             return self._stopped_result(submitted)
+        except ValueError as exc:
+            if self.stop():
+                return self._stopped_result(submitted)
+            return OrderResult("verification", str(exc))
         except Exception:
             return self.result(intent, submitted=submitted)
         finally:

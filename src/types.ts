@@ -30,7 +30,13 @@ export type RailWatchConfig = {
   passenger_selections?: { name: string; ticket_type: "adult" | "student" | "child" | "unknown"; identity_hint: string }[];
   auto_alternate: boolean;
   alternate_deadline: string;
+  alternate_mode?: "single" | "multiple";
+  alternate_max_combinations?: number;
+  order_watch_enabled?: boolean;
+  order_watch_interval_seconds?: number;
   date_range: string;
+  date_strategy?: "round_robin" | "preferred_date" | "inventory_first";
+  date_scan_budget_seconds?: number;
   smart_rate: boolean;
   timer_enabled: boolean;
   target_time: string;
@@ -178,13 +184,20 @@ export type OrderStage = {
   observing?: boolean;
   recovery_required?: boolean;
   no_order?: boolean;
-  intent?: { intent_id: string; kind: string; train_code: string; date: string; seat: string };
+  next_check_at?: number | null;
+  check_failures?: number;
+  intent?: { intent_id: string; kind: string; train_code: string; date: string; seat: string; choices?: AlternateChoice[] };
 };
+
+export type AlternateChoice = { train_code: string; date: string; from_station: string; to_station: string; seat: string };
 
 /** M5 read models. A missing official ID/time is null, not guessed from history. */
 export type OfficialOrderStatus = "pending_payment" | "active" | "fulfilled" | "cancelled" | "expired" | "failed";
 
 export type OrderHistorySummary = {
+  choices?: AlternateChoice[];
+  next_check_at?: number | null;
+  check_failures?: number;
   intent_id: string;
   order_id: string | null;
   kind: "regular" | "alternate";

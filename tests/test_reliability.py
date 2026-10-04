@@ -70,6 +70,7 @@ class ReliabilityTests(unittest.TestCase):
                 captured = []
                 class Monitor:
                     def __init__(self, driver, config, **kwargs): captured.append(config["_target_timestamp"])
+                    def prepare(self): return True
                     def run(self): pass
                 with patch("railwatch_bridge.time.time", lambda: clock[0]), patch("railwatch_bridge.TicketMonitor", Monitor), patch("railwatch_bridge.CORE_AVAILABLE", True):
                     bridge.start_monitor({"from_station_cn":"北京", "to_station_cn":"上海", "date":"2026-09-10", "timer_enabled":True, "target_time":"08:30:00", "sale_at":"2026-09-06T08:30:00+08:00"})

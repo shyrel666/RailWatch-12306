@@ -50,3 +50,18 @@ QUERY_TABLE_ID = "queryLeftTable"
 QUERY_ROW_SELECTOR = "tr[id^='ticket_']"
 SUBMIT_ORDER_ID = "submitOrder_id"
 CONFIRM_PURCHASE_ID = "qr_submit_id"
+
+# Read-only readiness shared by batch scans and final control lookup. A later
+# native click and the order form readback remain authoritative.
+ACTION_READY_JS = r"""
+const rwActionReady = el => {
+  if (!el || !el.isConnected || !el.getClientRects().length || el.matches(':disabled') ||
+      el.getAttribute('aria-disabled') === 'true') return false;
+  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
+        Number(style.opacity) === 0) return false;
+  }
+  return true;
+};
+"""

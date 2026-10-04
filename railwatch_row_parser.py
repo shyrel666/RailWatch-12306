@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
 
-from railwatch_selectors import QUERY_ROW_SELECTOR, QUERY_TABLE_ID, TABLE_HEADER_SELECTORS
+from railwatch_selectors import ACTION_READY_JS, QUERY_ROW_SELECTOR, QUERY_TABLE_ID, TABLE_HEADER_SELECTORS
 from railwatch_seats import SEAT_CAPABILITIES
 from railwatch_config_contract import TRAIN_CODE_BODY
 
 TRAIN_CODE_PATTERN = re.compile(r"^\s*(" + TRAIN_CODE_BODY + r")(?=\s|$)", re.IGNORECASE)
 DISPLAY_SEATS = tuple(seat.name for seat in SEAT_CAPABILITIES if seat.query)
 
-BATCH_ROWS_JS = r"""
+BATCH_ROWS_JS = ACTION_READY_JS + r"""
 const table = document.getElementById('queryLeftTable');
 if (!table) return [];
 const seatPrefixes = arguments[0];
@@ -26,11 +26,16 @@ return [...table.querySelectorAll('tr[id^="ticket_"]')].filter(row => row.getCli
   const train = (field?.innerText || '').trim().split(/\s+/)[0];
   const seats = {};
   const seat_indices = {};
+  const alternate_available = {};
   for (const [name,prefix] of Object.entries(seatPrefixes)) {
     const index = headers.indexOf(name);
     if (index >= 0) seat_indices[name] = index;
     const cell = (prefix && row.querySelector('td[id^="'+prefix+'_"]')) || (index >= 0 ? row.cells[index] : null);
     seats[name] = cell ? cell.innerText.trim().replace(/\n/g,'') : null;
+    // Waitlist actions must belong to the exact seat's prefixed cell.
+    const alternateCell = prefix && row.querySelector('td[id^="'+prefix+'_"]');
+    alternate_available[name] = !!alternateCell && [...alternateCell.querySelectorAll('a,button,div')]
+      .some(el => el.innerText.trim() === '候补' && rwActionReady(el));
   }
   const texts = selector => [...row.querySelectorAll(selector)].filter(el => el.getClientRects().length)
     .map(el => el.innerText.trim());
@@ -39,7 +44,7 @@ return [...table.querySelectorAll('tr[id^="ticket_"]')].filter(row => row.getCli
   const arrival = texts('.ls span');
   const dayLabels = {'当日到达':0, '次日到达':1, '第三日到达':2, '第四日到达':3};
   const days = arrival.filter(value => Object.hasOwn(dayLabels, value));
-  return {element:row, train, raw:row.innerText.trim(), seats, seat_indices,
+  return {element:row, train, raw:row.innerText.trim(), seats, seat_indices, alternate_available,
     from_station:stations.length === 2 ? stations[0] : null,
     to_station:stations.length === 2 ? stations[1] : null,
     departure_time:times.length === 2 ? times[0] : null,

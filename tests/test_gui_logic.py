@@ -294,12 +294,8 @@ class TicketMonitorLogicTests(unittest.TestCase):
             pass
 
         observed_intervals = []
-        stop_calls = 0
-
         def should_stop():
-            nonlocal stop_calls
-            stop_calls += 1
-            return stop_calls > 1
+            return bool(observed_intervals)
 
         monitor = TicketMonitor(
             Driver(),

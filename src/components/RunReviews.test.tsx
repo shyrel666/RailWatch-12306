@@ -8,6 +8,23 @@ import { RunReviews } from "./RunReviews";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 beforeEach(() => railwatchStore.setState({ pageSection: null }));
+
+test("query statistics show sample counts and revisit intervals separately from order time", async () => {
+  railwatchStore.setState({ pageSection: "order-run-reviews" });
+  vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "runReviews" ?
+    { items: [{ run_id: "run-1", started_at: 1, target_at: null, conclusion: "已停止" }], next_cursor: null } :
+    { run_id: "run-1", conclusion: "已停止", segments: [], prediction: [], preparation_margin_ms: null,
+      query_timings: { recorded_queries: 4, valid_queries: 3, window_limit: 200,
+        phases: [{ id: "decision", label: "筛选车次与席别", samples: 3, median_ms: 24, p95_ms: 30 }],
+        date_revisits: [{ date: "2026-10-10", samples: 2, median_ms: 12000, p95_ms: 14000 }] } }) as never);
+  render(<RunReviews />);
+  await userEvent.click(await screen.findByRole("button", { name: "查看复盘" }));
+  const region = await screen.findByRole("region", { name: "查询分阶段统计" });
+  expect(within(region).getByText("24.0 ms")).toBeTruthy();
+  expect(within(region).getByText("30.0 ms")).toBeTruthy();
+  expect(within(region).getByText("12.00 秒")).toBeTruthy();
+  expect(within(region).getByText(/少量样本仅供参考/)).toBeTruthy();
+});
 test("shows the run and incomplete timeline without browser actions", async () => {
   const command = vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "runReviews" ?
     { items: [{ run_id: "run-1", started_at: 1, target_at: null, conclusion: "未命中", trip: { from_station: "北京", to_station: "上海" } }], next_cursor: null } :

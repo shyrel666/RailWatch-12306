@@ -44,6 +44,10 @@ from railwatch_order_page import OrderPage
 from railwatch_time import ServerTimeSync, get_server_time_sync
 from railwatch_preferences import atomic_write_json
 from railwatch_seats import seat_prefix
+from railwatch_task import is_session_lost
+from railwatch_date_plan import DatePlan
+from railwatch_policies import DATE_STRATEGIES
+from railwatch_timing import PhaseTiming
 
 
 def _safe_print(title: str, msg: str) -> None:
@@ -163,7 +167,13 @@ class QueryConfig:
     # 候补订单功能
     auto_alternate: bool = False  # 是否启用无票时自动候补
     alternate_deadline: str = ""  # 候补截止时间，如 "18:00"
+    alternate_mode: str = "single"
+    alternate_max_combinations: int = 5
+    order_watch_enabled: bool = True
+    order_watch_interval_seconds: int = 60
     date_range: str = "单日"
+    date_strategy: str = "round_robin"
+    date_scan_budget_seconds: float = 30.0
     smart_rate: bool = True
     timer_enabled: bool = False
     target_time: str = "00:00:00"
@@ -197,7 +207,13 @@ class QueryConfig:
             "passenger_selections": self.passenger_selections,
             "auto_alternate": self.auto_alternate,
             "alternate_deadline": self.alternate_deadline,
+            "alternate_mode": self.alternate_mode,
+            "alternate_max_combinations": self.alternate_max_combinations,
+            "order_watch_enabled": self.order_watch_enabled,
+            "order_watch_interval_seconds": self.order_watch_interval_seconds,
             "date_range": self.date_range,
+            "date_strategy": self.date_strategy,
+            "date_scan_budget_seconds": self.date_scan_budget_seconds,
             "smart_rate": self.smart_rate,
             "timer_enabled": self.timer_enabled,
             "target_time": self.target_time,
@@ -230,7 +246,13 @@ class QueryConfig:
             passenger_selections=data.get("passenger_selections", []),
             auto_alternate=data.get("auto_alternate", False),
             alternate_deadline=data.get("alternate_deadline", ""),
+            alternate_mode=data.get("alternate_mode", "single"),
+            alternate_max_combinations=data.get("alternate_max_combinations", 5),
+            order_watch_enabled=data.get("order_watch_enabled", True),
+            order_watch_interval_seconds=data.get("order_watch_interval_seconds", 60),
             date_range=data.get("date_range", "单日"),
+            date_strategy=data.get("date_strategy", "round_robin"),
+            date_scan_budget_seconds=data.get("date_scan_budget_seconds", 30.0),
             smart_rate=data.get("smart_rate", True),
             timer_enabled=data.get("timer_enabled", False),
             target_time=data.get("target_time", "00:00:00"),
@@ -384,6 +406,7 @@ class StationCodeResolver:
         self.log = log or (lambda x: None)
         self.cache_path = os.path.join(base_dir, CACHE_FILE)
         self._name2code: Optional[Dict[str, str]] = None
+        self._search_index: Optional[Tuple[List[dict], bool]] = None
 
     def load(self) -> Dict[str, str]:
         """加载站点编码映射"""
@@ -462,19 +485,13 @@ class StationCodeResolver:
         except OSError as e:
             self.log(f"⚠️ 站名联想缓存保存失败：{e}")
 
+        self._search_index = (searchable, False)
         return name2code
 
-    def search(self, query: str, limit: int = 12) -> dict:
-        """Search known stations without broadening the submitted station name."""
-        if not isinstance(query, str) or len(query) > 80 or type(limit) is not int or not 1 <= limit <= 30:
-            raise ValueError("站名搜索参数无效。")
-        needle = query.strip().lower()
-        if not needle:
-            return {"items": [], "warning": None}
-        try:
-            names = self.load()
-        except Exception as exc:
-            return {"items": [], "warning": f"站码缓存不可用，请检查网络后重试；仍可手动输入完整站名。原因：{exc}"}
+    def _load_search_index(self, names: Dict[str, str]) -> Tuple[List[dict], bool]:
+        """Return (records, from_legacy_cache), reading the disk cache only once per resolver."""
+        if self._search_index is not None:
+            return self._search_index
         records = None
         try:
             with open(os.path.join(self.base_dir, STATION_SEARCH_FILE), encoding="utf-8") as handle:
@@ -488,6 +505,21 @@ class StationCodeResolver:
         if records is None:
             records = [{"name": name, "code": code, "pinyin": "", "initials": ""}
                        for name, code in names.items()]
+        self._search_index = (records, old_cache)
+        return self._search_index
+
+    def search(self, query: str, limit: int = 12) -> dict:
+        """Search known stations without broadening the submitted station name."""
+        if not isinstance(query, str) or len(query) > 80 or type(limit) is not int or not 1 <= limit <= 30:
+            raise ValueError("站名搜索参数无效。")
+        needle = query.strip().lower()
+        if not needle:
+            return {"items": [], "warning": None}
+        try:
+            names = self.load()
+        except Exception as exc:
+            return {"items": [], "warning": f"站码缓存不可用，请检查网络后重试；仍可手动输入完整站名。原因：{exc}"}
+        records, old_cache = self._load_search_index(names)
         matches = [entry for entry in records if any(needle in str(entry.get(key, "")).lower()
                    for key in ("name", "pinyin", "initials"))]
         matches.sort(key=lambda entry: (0 if entry["name"].lower() == needle else
@@ -510,6 +542,8 @@ class StationCodeResolver:
         # 精确匹配
         if cn_name in data:
             return data[cn_name]
+        if cn_name.endswith("站") and cn_name[:-1] in data:
+            return data[cn_name[:-1]]
         
         matches = [(key, value) for key, value in data.items() if cn_name in key or key in cn_name]
         if len(matches) == 1:
@@ -610,6 +644,8 @@ class TicketMonitor(BaseHandler):
     - [优化] 可选自动提交订单
     """
 
+    CANDIDATE_RETRY_SECONDS = 30.0
+
     def __init__(
         self, 
         driver, 
@@ -644,6 +680,9 @@ class TicketMonitor(BaseHandler):
         self.order_journal, self.on_order, self.run_id = order_journal, on_order, run_id
         self._prefer_alternate = False
         self._fallback_date = ""
+        self._candidate_cooldowns = {}
+        self._prepared = False
+        self._last_query_started = None
         self.query_executor = QueryExecutor(driver, self.should_stop, self._poll_wait, lambda: self.tick()) if param_filler else None
         self.notify = notify_callback or (lambda title, msg: print(title, msg, flush=True) if title.isascii() and msg.isascii() else _safe_print(title, msg))
         self.progress = progress_callback
@@ -669,6 +708,13 @@ class TicketMonitor(BaseHandler):
                 log_callback=self.log,
             )
         travel_date = str(cfg.get("date", "")).strip()
+        self.preferred_date = travel_date
+        self.date_plan = DatePlan(travel_date, cfg.get("date_strategy", "round_robin"),
+                                  cfg.get("date_scan_budget_seconds", 30))
+        self._date_last_query = {}
+        self._query_timing = None
+        self._query_invalidated = False
+        self._date_revisit_ms = None
         self.travel_dates = expand_travel_dates(travel_date, str(cfg.get("date_range", "单日"))) if travel_date else []
         self.current_loop_date = ""
         # 参数同步：定时/爆发路径不依赖浏览器残留的上次查询条件
@@ -690,7 +736,8 @@ class TicketMonitor(BaseHandler):
             human_action_callback=self.human_action,
             find_alternate_button=self._find_alternate_button,
         )
-        self.order_page = OrderPage(driver, self.should_stop, self._poll_wait, self._mark, log=self.log)
+        self.order_page = OrderPage(driver, self.should_stop, self._poll_wait, self._mark, log=self.log,
+                                    poll_interval=0.05 if cfg.get("timer_enabled") else 0.1)
         self.submit_flow.order_page = self.order_page
         self.alternate_flow.order_page = self.order_page
 
@@ -700,6 +747,7 @@ class TicketMonitor(BaseHandler):
             marker(self.run_id, stage, getattr(self, "_intent_id", ""), detail)
 
     def _execute_order(self, hit):
+        self._timing_step("pre_submit")
         train, seat, _, row, button, action = hit
         if not self.order_journal:
             self._signal_human_action(train, "订单持久化不可用，已停止自动提交")
@@ -709,14 +757,30 @@ class TicketMonitor(BaseHandler):
         if route:
             intent = replace(intent, from_station=route[0], to_station=route[1])
         self._intent_id = intent.intent_id
+        saved_config = dict(self.cfg)
+        if action == "alternate" and self.cfg.get("alternate_mode") == "multiple":
+            # Freeze the eligible date set from the task, not a range expanded
+            # again around the most recently queried date.
+            self.date_plan.sync(self.travel_dates)
+            saved_config["_alternate_dates"] = ([intent.date] if self._sale_focus_active() or self._prefer_alternate
+                                                else list(self.date_plan.dates))
+            self.alternate_flow.cfg = saved_config
+            def bind_intent(updated):
+                nonlocal intent
+                self.order_journal.bind_alternatives(updated)
+                intent = updated
+                if self.on_order:
+                    self.on_order(intent, OrderResult("submitting"))
+            self.order_page.bind_intent = bind_intent
         try:
-            self.order_journal.begin(self.run_id, intent, self.cfg)
+            self.order_journal.begin(self.run_id, intent, saved_config)
         except Exception:
             self._signal_human_action(train, "无法取得订单提交权限，请先核对未完成订单和本地存储")
             return True
         if self.on_order:
             self.on_order(intent, OrderResult("submitting"))
         self._mark("no_inventory" if action == "alternate" else "inventory_found")
+        self._finish_query_timing()
         result = (self.alternate_flow.try_alternate_order(row, train, seat, intent=intent)
                   if action == "alternate" else self.submit_flow.try_auto_submit(button, seat, intent=intent))
         if not isinstance(result, OrderResult):
@@ -733,11 +797,24 @@ class TicketMonitor(BaseHandler):
             return True
         if self.on_order:
             self.on_order(intent, result)
-        if result.can_fallback and self.auto_alternate:
-            self._prefer_alternate = True
-            self._fallback_date = intent.date
+        if self.should_stop():
+            return True
+        # Only journal-verified failures before submission permit another action.
+        # A missing *entry* button is retryable; a missing final submit button or
+        # a human verification requirement still needs inspection of the page.
+        retry_candidate = (action == "book" and result.can_fallback) or (
+            action == "alternate" and result.status == "not_submitted" and result.no_order
+            and result.evidence.get("candidate_unavailable") is True)
+        if retry_candidate:
+            self._cool_down_candidate(train, seat, action)
+            self._prefer_alternate = action == "book" and self.auto_alternate
+            self._fallback_date = intent.date if self._prefer_alternate else ""
             self._needs_navigation = True
-            return False  # Immediate next query, no normal backoff or burst-window delay.
+            if not self._prefer_alternate:
+                interval = (self.rate_limiter.get_interval() if self.rate_limiter else
+                            get_random_interval(max(1.0, _read_float(self.cfg.get("interval", 3), 3.0))))
+                self._sleep(interval)
+            return False  # Sold-out to waitlist stays immediate; other retries use normal cadence.
         if result.status in ("unknown", "verification", "not_submitted", "sold_out"):
             self._signal_human_action(train, result.reason or "请检查官方订单状态")
         return True
@@ -759,7 +836,7 @@ class TicketMonitor(BaseHandler):
             return
         if self._prefer_alternate and self._fallback_date not in self.travel_dates:
             raise ValueError("原预订日期已失效，已停止候补回退，请核对行程")
-        travel_date = self._fallback_date if self._prefer_alternate else self.travel_dates[(loop_count - 1) % len(self.travel_dates)]
+        travel_date = self._loop_date(loop_count)
         if travel_date == self.current_loop_date and not force:
             return
         self.driver.execute_script(
@@ -790,6 +867,7 @@ class TicketMonitor(BaseHandler):
             time.sleep(seconds)
 
     def _sleep(self, seconds):
+        self._finish_query_timing()
         self.tick(status="backoff", next_query_at=time.time() + seconds)
         self._poll_wait(seconds)
 
@@ -828,10 +906,11 @@ class TicketMonitor(BaseHandler):
             self._signal_human_action("", dialog["text"] or "需要检查浏览器弹窗")
         return ""
 
-    def run(self):
-        """主监控循环（风控优化增强版）"""
+    def prepare(self):
+        """Finish local setup and first-date filling before the scheduled deadline."""
+        if self.should_stop():
+            return False
         base_interval = max(1.0, _read_float(self.cfg.get("interval", 3), 3.0))
-        
         if self.rate_limiter:
             self.log(f"⏱ 智能限速：基础 {self.rate_limiter.base_interval}s，±20% 浮动，范围 {self.rate_limiter.min_interval}–{self.rate_limiter.max_interval}s")
         else:
@@ -840,6 +919,10 @@ class TicketMonitor(BaseHandler):
         self.log(f"💺 目标席别：{', '.join(self.target_seats) if self.target_seats else '不限定'}")
         self.log(f"📝 自动提交：{'开启' if self.auto_submit else '关闭'}")
         self.log(f"🔄 自动候补：{'开启' if self.auto_alternate else '关闭'}")
+        policy = DATE_STRATEGIES["strategies"][self.date_plan.strategy]
+        self.log(f"多日期策略：{policy['label']}。{policy['description']}")
+        if self.date_plan.strategy == "inventory_first":
+            self.log(f"跨日期扫描预算：{self.date_plan.budget:g}秒；查询、限频等待与候补重查仍按正常节奏执行。")
         self.log("监控流程：查询 → 校验结果 → 预订或首选候补 → 核对订单证据")
         self.log("受控查询；遇到核验或未知订单结果时暂停处理。")
 
@@ -850,7 +933,37 @@ class TicketMonitor(BaseHandler):
             )
         except TimeoutException:
             self.log("⚠️ 未检测到查询按钮：请确认当前页面是余票查询页。")
+            return False
+
+        if self.cfg.get("timer_enabled"):
+            self._apply_loop_date(1)
+            if not self._fill_query_params():
+                raise ValueError("定时首轮查询参数未就绪，请检查官方页面后重新启动。")
+            self.log(f"定时首轮已准备：{self.current_loop_date or self.preferred_date}；起售窗口优先查询所选日期。")
+        self._prepared = True
+        return True
+
+    def _candidate_key(self, train, seat, action):
+        return (self.cfg.get("from_station_cn", ""), self.cfg.get("to_station_cn", ""),
+                self.cfg.get("date", ""), train, seat, action)
+
+    def _cool_down_candidate(self, train, seat, action):
+        self._candidate_cooldowns[self._candidate_key(train, seat, action)] = (
+            time.monotonic() + self.CANDIDATE_RETRY_SECONDS)
+        self.log(f"{train} {seat} {'候补入口不可用' if action == 'alternate' else '已确认售罄'}，"
+                 f"该组合暂避 {self.CANDIDATE_RETRY_SECONDS:g} 秒，继续检查其他目标。")
+        self._mark("candidate_cooldown", {"train": train, "seat": seat, "action": action,
+                                          "date": self.cfg.get("date", ""),
+                                          "seconds": self.CANDIDATE_RETRY_SECONDS})
+
+    def _candidate_ready(self, train, seat, action):
+        return self._candidate_key(train, seat, action) not in self._candidate_cooldowns
+
+    def run(self):
+        """Run a prepared monitor without repeating startup work at the deadline."""
+        if not self._prepared and not self.prepare():
             return
+        base_interval = max(1.0, _read_float(self.cfg.get("interval", 3), 3.0))
 
         loop_count = 0
         while not self.should_stop():
@@ -865,6 +978,9 @@ class TicketMonitor(BaseHandler):
             except ValueError:
                 raise
             except Exception as e:
+                if is_session_lost(e):
+                    self._signal_human_action("", "受控浏览器已关闭或失联，监控已停止，请重新打开登录页后再启动。")
+                    break
                 self.log(f"⚠️ 监控异常：{e}")
                 if self.rate_limiter:
                     self.rate_limiter.on_error(str(e))
@@ -902,21 +1018,73 @@ class TicketMonitor(BaseHandler):
             return False
         return loop_count <= 5
 
+    def _sale_focus_active(self):
+        target = self.cfg.get("_target_timestamp")
+        return bool(self.cfg.get("timer_enabled") and target is not None
+                    and self.server_time_sync.server_timestamp() <= target + float(self.cfg.get("burst_window_seconds", 45)))
+
+    def _loop_date(self, loop_count):
+        if self._prefer_alternate:
+            self.date_plan.reset()
+            return self._fallback_date
+        if self._sale_focus_active():
+            self.date_plan.reset()
+            if self.preferred_date not in self.travel_dates:
+                raise ValueError("定时目标乘车日期当前不可查询，请核对日期；不会改抢其他日期。")
+            return self.preferred_date
+        self.date_plan.sync(self.travel_dates)
+        return self.date_plan.select(loop_count, time.monotonic())
+
+    def _wait_next_query(self, interval):
+        # During the scheduled sale window, response/DOM work counts toward the
+        # start-to-start interval. Failures and server cooldowns use _sleep instead.
+        delay = interval
+        if self._sale_focus_active() and self._last_query_started is not None:
+            delay = max(0.0, interval - (time.monotonic() - self._last_query_started))
+        self._sleep(delay)
+
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:
+        self._query_timing = PhaseTiming()
+        self._query_timing.step("prepare")
+        self._date_revisit_ms = None
         self._snapshot_query_id = uuid.uuid4().hex
+        self._query_invalidated = False
         self._snapshot_sequence = loop_count
         self._snapshot_published = False
         self.last_query = {}
+        self._last_query_started = None
         self._snapshot_config = dict(self.cfg)
         if self.travel_dates:
-            self._snapshot_config["date"] = self._fallback_date if self._prefer_alternate else self.travel_dates[(loop_count - 1) % len(self.travel_dates)]
+            self._snapshot_config["date"] = self._loop_date(loop_count)
         try:
             return self._query_loop(loop_count, interval)
         except Exception as exc:
             self._publish_query(error=f"查询失败：{exc}")
             raise
+        finally:
+            self._finish_query_timing()
+
+    def _timing_step(self, name):
+        if self._query_timing is not None:
+            self._query_timing.step(name)
+
+    def _finish_query_timing(self):
+        timing = self._query_timing
+        if timing is None or timing.finished:
+            return
+        steps = timing.finish()
+        if self.order_journal:
+            try:
+                self.order_journal.record_telemetry(self.run_id, "query_timing", detail={
+                    "query_id": self._snapshot_query_id, "date": self._snapshot_config.get("date", ""),
+                    "status": ("invalid" if self._query_invalidated else self.last_query.get("status", "unconfirmed")),
+                    "revisit_ms": self._date_revisit_ms, "steps": steps})
+            except Exception:
+                pass  # Optional diagnostics cannot change query or order decisions.
 
     def _publish_query(self, error=None):
+        if error is not None and self.last_query.get("status") in ("ok", "empty"):
+            self._query_invalidated = True
         if self._snapshot_published or self.should_stop():
             return
         if not self.progress:
@@ -965,6 +1133,7 @@ class TicketMonitor(BaseHandler):
         if self.should_stop():
             return True
 
+        self._timing_step("query")
         if self.query_executor:
             self.tick(status="querying", next_query_at=None)
             result = self.query_executor.execute(self._timed_query_click, int(self.cfg.get("query_timeout", 40)))
@@ -1002,7 +1171,10 @@ class TicketMonitor(BaseHandler):
                 if not self._dismiss_query_blockers():
                     self._signal_human_action("", "未起售提示无法关闭，请检查浏览器")
                     return True
-                self._sleep(min(interval, BURST_RETRY_SLEEP_SECONDS) if is_burst_mode and not self.rate_limiter else interval)
+                if self._sale_focus_active():
+                    self._wait_next_query(interval)
+                else:
+                    self._sleep(min(interval, BURST_RETRY_SLEEP_SECONDS) if is_burst_mode and not self.rate_limiter else interval)
                 return False
             if status not in ("ok", "empty"):
                 self.log(f"本轮查询未完成：{result.get('reason', status)}")
@@ -1027,6 +1199,7 @@ class TicketMonitor(BaseHandler):
         if self.rate_limiter:
             self.rate_limiter.on_success()
 
+        self._timing_step("snapshot")
         self._row_snapshot = [] if self.last_query.get("status") == "empty" else self.row_parser.snapshot_rows(list(dict.fromkeys([*DISPLAY_SEATS, *self.target_seats])))
 
         if self.last_query.get("status") == "empty" and self.query_executor and not self.query_executor.current():
@@ -1034,6 +1207,7 @@ class TicketMonitor(BaseHandler):
             self._needs_navigation = True
             self._sleep(interval)
             return False
+        self._timing_step("decision")
         try:
             hit = None if self.last_query.get("status") == "empty" else self._scan_current_rows()
         except StaleElementReferenceException:
@@ -1042,6 +1216,13 @@ class TicketMonitor(BaseHandler):
             self.log("结果页面持续变化，本轮快照无效，未作无票或候补判断。")
             self._sleep(interval)
             return False
+        if (not hit or hit[-1] == "alternate") and not self._sale_focus_active() and not self._prefer_alternate:
+            self.date_plan.sync(self.travel_dates)
+            allowed = self.date_plan.allow_alternate(self.cfg.get("date", ""), bool(hit), time.monotonic())
+            if hit and not allowed:
+                self.log("本日可候补，按多日期策略继续查现票；候补提交前会重新确认对应日期。")
+                hit = None
+        self._timing_step("publish")
         self._publish_query()
         if hit:
             train_code, seat_name, seat_value, row_el, action_btn, action_type = hit
@@ -1050,11 +1231,13 @@ class TicketMonitor(BaseHandler):
             if self.should_stop():
                 return True
             if self.query_executor and not self.query_executor.current():
+                self._query_invalidated = True
                 self._needs_navigation = True
                 self._sleep(interval)
                 return False
             if action_type == "alternate" or (self.auto_submit and action_btn):
                 return self._execute_order(hit)
+            self._finish_query_timing()
             self._focus_and_highlight(row_el, action_btn)
             title = "🎉 发现目标车次/席别可用"
             message = (
@@ -1078,13 +1261,27 @@ class TicketMonitor(BaseHandler):
             self.log("⏸ 已命中，暂停自动刷新。如需继续监控，请点击【停止】再重新【开始监控余票】。")
             return True
 
+        if self._prefer_alternate:
+            self._prefer_alternate = False
+            self._fallback_date = ""
+            self.log("原订单日期暂无可用现票或候补入口，恢复正常日期轮询。")
         self.log("❌ 未命中目标票，继续监控...")
-        self._sleep(interval)
+        self._wait_next_query(interval)
         return False
 
     def _timed_query_click(self):
         self._mark("query_click")
-        return self.click_query_button()
+        clicked = self.click_query_button()
+        # Anchor after acknowledgement: time waiting for a disabled button must
+        # not consume the interval between two actual query requests.
+        if clicked:
+            self._last_query_started = time.monotonic()
+            travel_date = self.cfg.get("date", "")
+            previous = self._date_last_query.get(travel_date)
+            self._date_revisit_ms = (round((self._last_query_started - previous) * 1000, 3)
+                                     if previous is not None else None)
+            self._date_last_query[travel_date] = self._last_query_started
+        return clicked
 
     def _scan_current_rows(self):
         """Retry a stale DOM snapshot once without sending another ticket query."""
@@ -1110,6 +1307,9 @@ class TicketMonitor(BaseHandler):
     def _find_hit_row(self, seat_col_indices=None):
         """Inspect every target for cash inventory before considering one waitlist seat."""
         seat_col_indices = seat_col_indices or {}
+        now = time.monotonic()
+        self._candidate_cooldowns = {key: deadline for key, deadline in self._candidate_cooldowns.items()
+                                     if deadline > now}
         try:
             rows = self._row_snapshot if self._row_snapshot is not None else self.row_parser.snapshot_rows(self.target_seats)
             ranked = []
@@ -1121,27 +1321,34 @@ class TicketMonitor(BaseHandler):
                     continue
                 ranked.append((priorities.get(train, len(ranked)), train, snapshot))
             ranked.sort(key=lambda item: item[0])
-            if not self._prefer_alternate:
-                for _, train, snapshot in ranked:
-                    row = snapshot["element"]
-                    candidates = [seat for seat in self.target_seats if self.is_seat_available(snapshot["seats"].get(seat))
-                                  and (not str(snapshot["seats"][seat]).isdigit() or int(snapshot["seats"][seat]) >= count)]
-                    if self.target_seats and not candidates:
-                        continue
-                    book = self._find_book_button(row)
-                    if book is None:
-                        continue
-                    for seat in candidates:
-                        # Re-read only the selected candidate before taking action.
-                        value = self._get_seat_value(row, seat, snapshot.get("seat_indices", {}).get(seat, seat_col_indices.get(seat)))
-                        if self.is_seat_available(value) and (not str(value).isdigit() or int(value) >= count):
-                            return train, seat, value, row, book, "book"
-                    if not self.target_seats and not self.auto_submit:
-                        return train, "未指定席别", "有票", row, book, "book"
+            for _, train, snapshot in ranked:
+                row = snapshot["element"]
+                candidates = [seat for seat in self.target_seats
+                              if self._candidate_ready(train, seat, "book")
+                              and self.is_seat_available(snapshot["seats"].get(seat))
+                              and (not str(snapshot["seats"][seat]).isdigit() or int(snapshot["seats"][seat]) >= count)]
+                if self.target_seats and not candidates:
+                    continue
+                book = self._find_book_button(row)
+                if book is None:
+                    continue
+                for seat in candidates:
+                    # Re-read only the selected candidate before taking action.
+                    value = self._get_seat_value(row, seat, snapshot.get("seat_indices", {}).get(seat, seat_col_indices.get(seat)))
+                    if self.is_seat_available(value) and (not str(value).isdigit() or int(value) >= count):
+                        return train, seat, value, row, book, "book"
+                if not self.target_seats and not self.auto_submit:
+                    return train, "未指定席别", "有票", row, book, "book"
             if self.auto_alternate:
                 for _, train, snapshot in ranked:
                     row = snapshot["element"]
                     for seat in self.target_seats:
+                        if not self._candidate_ready(train, seat, "alternate"):
+                            continue
+                        # Batch evidence eliminates remote lookups for every
+                        # unavailable seat. Re-read only plausible candidates.
+                        if snapshot.get("alternate_available", {}).get(seat) is False:
+                            continue
                         button = self._find_alternate_button(row, seat)
                         if button is not None:
                             return train, seat, "候补", row, button, "alternate"

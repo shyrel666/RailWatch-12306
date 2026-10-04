@@ -35,7 +35,7 @@ class OrderBrowserTests(unittest.TestCase):
 
     def setUp(self):
         self.driver.get((Path(__file__).parent / "fixtures/orders.html").resolve().as_uri())
-        self.page = OrderPage(self.driver, allow_fixture=True)
+        self.page = OrderPage(self.driver, allow_fixture=True, poll_interval=0.05)
         self.intent = OrderIntent("regular", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",), "18:00")
 
     def load_unpaid_card(self):
@@ -824,6 +824,26 @@ class OrderBrowserTests(unittest.TestCase):
                 if expected_confirm or alternate:
                     reconciled = OrderPage(self.driver, allow_fixture=True).result(self.intent, submitted=True)
                     self.assertEqual(reconciled.status, 'pending_payment')
+
+    def test_batch_seat_selection_validates_every_passenger_before_changes(self):
+        self.driver.find_element('id', 'book').click()
+        self.assertTrue(self.page.prepare_people(replace(self.intent, passengers=('张三', '李四'))))
+        self.js("el('seatType_1').innerHTML='<option>一等座</option><option disabled>二等座</option>'")
+        self.assertFalse(self.page.select_regular_seats(replace(self.intent, passengers=('张三', '李四'))))
+        self.assertEqual(self.js("return el('seatType_0').selectedOptions[0].text"), '一等座')
+        self.js("el('seatType_1').innerHTML='<option>二等座</option><option>二等座</option>'")
+        self.assertFalse(self.page.select_regular_seats(replace(self.intent, passengers=('张三', '李四'))))
+        self.assertEqual(self.js('return fixture.regularClicks'), 0)
+
+    def test_batch_controls_still_require_visible_enabled_bound_confirm(self):
+        self.js("el('dialog').innerHTML='<a id=qr_submit_id class=btn92>确认</a>';show('dialog')")
+        self.assertIsNone(self.page.button(('#qr_submit_id',)))
+        self.js("el('qr_submit_id').className='btn92s';el('dialog').style.visibility='hidden'")
+        self.assertIsNone(self.page.button(('#qr_submit_id',)))
+        self.js("el('dialog').style.visibility='visible';el('qr_submit_id').setAttribute('aria-disabled','true')")
+        self.assertIsNone(self.page.button(('#qr_submit_id',)))
+        self.js("el('qr_submit_id').removeAttribute('aria-disabled')")
+        self.assertIsNotNone(self.page.button(('#qr_submit_id',)))
 
     def test_stop_before_submission_does_not_open_booking_form(self):
         self.page.stop = lambda: True

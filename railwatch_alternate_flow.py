@@ -49,5 +49,8 @@ class AlternateFlow:
     page = getattr(self, "order_page", None) or OrderPage(self.driver)
     button = self.find_alternate_button(row, seat_name) if self.find_alternate_button else None
     if button is None:
-      return OrderResult("not_submitted", "目标席别候补按钮不可用", no_order=True)
+      return OrderResult("not_submitted", "目标席别候补按钮不可用", no_order=True,
+                         evidence={"candidate_unavailable": True})
+    if self.cfg.get("alternate_mode") == "multiple":
+      return page.alternate(button, intent, plan_config=self.cfg)
     return page.alternate(button, intent)

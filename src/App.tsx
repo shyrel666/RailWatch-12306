@@ -91,6 +91,8 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   const draftRevisionBase = useRef(0);
   const draftWriteChain = useRef<Promise<void>>(Promise.resolve());
   const clearingDataRef = useRef(false);
+  const tripLoadRef = useRef<Promise<void> | null>(null);
+  const loadTripRef = useRef<() => Promise<void>>(async () => undefined);
 
   useEffect(() => {
     let alive = true;
@@ -203,6 +205,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         case "runtimeRestarted":
           state.resetRehearsalProgress();
           notification.destroy("runtime-state");
+          void loadTripRef.current();
           void railwatchApi
             .command<RuntimeInfo>("getRuntimeInfo")
             .then((info) => railwatchStore.getState().applyRuntimeInfo(info))
@@ -394,6 +397,30 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     }
   }, [message, runCommand, runtime.data_dir, choosePath]);
 
+  const loadTrip = useCallback((): Promise<void> => {
+    if (railwatchStore.getState().tripInitialized) return Promise.resolve();
+    tripLoadRef.current ??= (async () => {
+      try {
+        const trip = await runCommand<TripState>("loadTripState");
+        if (!trip || railwatchStore.getState().tripInitialized) return;
+        const draft = trip.draft.status === "available" &&
+          (trip.draft.draft.saved_at <= (trip.saved_at ?? 0) ||
+           tripFingerprint({ ...trip.saved_config, ...trip.draft.draft.config }) === tripFingerprint(trip.saved_config))
+          ? { status: "missing" as const, draft: null, warning: null } : trip.draft;
+        railwatchStore.getState().initializeTrip(trip.saved_config, trip.saved_at, draft);
+        draftRevisionBase.current = trip.draft.status === "available" ? trip.draft.draft.revision : 0;
+      } finally {
+        tripLoadRef.current = null;
+      }
+    })();
+    return tripLoadRef.current;
+  }, [runCommand]);
+  loadTripRef.current = loadTrip;
+
+  useEffect(() => {
+    if (activePage === "行程设置" && !tripInitialized) void loadTrip();
+  }, [activePage, tripInitialized, loadTrip]);
+
   useEffect(() => {
     const unsubscribe = railwatchApi.onEvent(applyEvent);
     void (async () => {
@@ -401,15 +428,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       if (runtimeInfo) {
         railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
       }
-      const trip = await runCommand<TripState>("loadTripState");
-      if (trip) {
-        const draft = trip.draft.status === "available" &&
-          (trip.draft.draft.saved_at <= (trip.saved_at ?? 0) ||
-           tripFingerprint({ ...trip.saved_config, ...trip.draft.draft.config }) === tripFingerprint(trip.saved_config))
-          ? { status: "missing" as const, draft: null, warning: null } : trip.draft;
-        railwatchStore.getState().initializeTrip(trip.saved_config, trip.saved_at, draft);
-        draftRevisionBase.current = trip.draft.status === "available" ? trip.draft.draft.revision : 0;
-      }
+      await loadTrip();
     })();
 
     const refreshRuntime = window.setInterval(() => {
@@ -428,7 +447,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       window.clearInterval(refreshRuntime);
       unsubscribe();
     };
-  }, [applyEvent, runCommand]);
+  }, [applyEvent, loadTrip, runCommand]);
 
   useEffect(() => {
     if (!tripInitialized || editRevision === 0 || clearingDataRef.current) return;

@@ -45,6 +45,27 @@ export function RunReviews() {
       <p className={detail.preparation_margin_ms !== null && detail.preparation_margin_ms < 10_000 ? "rehearsal-warning" : ""}>准备余量：{detail.preparation_margin_ms === null ? "未记录" : `${(detail.preparation_margin_ms / 1000).toFixed(2)} 秒`}</p>
       <p>唤醒后前五轮查询中位数：{detail.query_median_ms == null ? "未记录" : `${(detail.query_median_ms / 1000).toFixed(2)} 秒`}</p>
       <TimelineWaterfall segments={detail.segments} prediction={detail.prediction} /><p>{detail.note}</p>
+      {detail.query_timings?.recorded_queries ? <section aria-label="查询分阶段统计">
+        <h4>查询分阶段统计</h4>
+        <p>最近最多{detail.query_timings.window_limit}轮记录中，{detail.query_timings.valid_queries}轮取得有效结果，共{detail.query_timings.recorded_queries}轮有记录。
+          耗时包含本机操作与页面等待；未记录的阶段不补算，中断步骤可能只记录部分。P95表示95%的样本不超过此值，少量样本仅供参考。</p>
+        <div className="query-timing-table-wrap"><table className="query-timing-table">
+          <caption>有效查询各阶段耗时</caption>
+          <thead><tr><th>阶段</th><th>样本</th><th>中位数</th><th>P95</th></tr></thead>
+          <tbody>{detail.query_timings.phases.map(phase => <tr key={phase.id}>
+            <th scope="row">{phase.label}</th><td>{phase.samples}</td>
+            <td>{phase.median_ms.toFixed(1)} ms</td><td>{phase.p95_ms.toFixed(1)} ms</td>
+          </tr>)}</tbody>
+        </table></div>
+        {detail.query_timings.date_revisits.length ? <div className="query-timing-table-wrap"><table className="query-timing-table">
+          <caption>同一日期两次查询的实际间隔（含失败查询）</caption>
+          <thead><tr><th>日期</th><th>样本</th><th>中位数</th><th>P95</th></tr></thead>
+          <tbody>{detail.query_timings.date_revisits.map(item => <tr key={item.date}>
+            <th scope="row">{item.date}</th><td>{item.samples}</td>
+            <td>{(item.median_ms / 1000).toFixed(2)} 秒</td><td>{(item.p95_ms / 1000).toFixed(2)} 秒</td>
+          </tr>)}</tbody>
+        </table></div> : <p>尚无同一日期的重复查询记录。</p>}
+      </section> : <p>本次未记录查询分阶段耗时。</p>}
       {detail.order_timings?.length ? <section aria-label="下单分步耗时">
         <h4>下单分步耗时</h4>
         <p>每组从进入下单流程计时，细分上方已有阶段，不重复计入总耗时。中断时仅显示已观察的部分；包含页面和本机操作的等待。</p>

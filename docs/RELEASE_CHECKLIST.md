@@ -24,10 +24,10 @@ python -X utf8 tests/rehearsal_ui_smoke.py
 python -X utf8 tests/query_ui_smoke.py
 python -X utf8 tests/notification_ui_smoke.py
 python -X utf8 tests/trip_order_ui_smoke.py
-.\package-windows.cmd 0.5.3
+.\package-windows.cmd 0.5.5
 ```
 
-Use `.\package-windows.cmd 0.5.3 --install-deps` only when Node or Python packaging dependencies need to be reinstalled. Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
+Use `.\package-windows.cmd 0.5.5 --install-deps` only when Node or Python packaging dependencies need to be reinstalled. Before publishing from GitHub, confirm the `CI` workflow is green on the target commit. For Windows packages, also run the manual `Package Windows` workflow.
 
 Upload only matching assets from the same build to the GitHub Release:
 

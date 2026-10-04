@@ -73,6 +73,50 @@ class BrowserQueryTests(unittest.TestCase):
         self.driver.find_element("id", "query_ticket").click()
         return True
 
+    def test_timed_monitor_prepares_without_query_then_uses_selected_date(self):
+        from unittest.mock import Mock
+        clock = Mock()
+        clock.server_timestamp.return_value = 1000
+        fills, snapshots = [], []
+        def fill(from_name, to_name, date):
+            fills.append(date)
+            return self.driver.execute_script(FILL_QUERY_FORM_JS, from_name, "BJP", to_name, "SHH", date)
+        monitor = TicketMonitor(self.driver, {
+            "timer_enabled": True, "_target_timestamp": 1000, "date": "2026-09-10",
+            "date_range": "±1天", "from_station_cn": "北京", "to_station_cn": "上海",
+        }, param_filler=fill, server_time_sync=clock, log_callback=lambda _: None,
+           progress_callback=snapshots.append)
+        monitor._sleep = Mock()
+        self.driver.execute_script("fixture.mode='empty';")
+        self.assertTrue(monitor.prepare())
+        self.assertEqual(self.driver.execute_script("return fixture.clicks"), 0)
+        self.assertFalse(monitor._run_single_loop(1, 3))
+        self.assertFalse(monitor._run_single_loop(2, 3))
+        self.assertEqual(self.driver.execute_script("return fixture.clicks"), 2)
+        self.assertEqual(fills, ["2026-09-10"])
+        self.assertEqual([event["snapshot"]["conditions"]["date"] for event in snapshots],
+                         ["2026-09-10", "2026-09-10"])
+        self.assertTrue(all(event["snapshot"]["status"] == "success" for event in snapshots))
+
+    def test_timed_preparation_does_not_hide_later_form_edits_or_verification(self):
+        from unittest.mock import Mock
+        fills = []
+        def fill(from_name, to_name, date):
+            fills.append(date)
+            return self.driver.execute_script(FILL_QUERY_FORM_JS, from_name, "BJP", to_name, "SHH", date)
+        clock = Mock()
+        clock.server_timestamp.return_value = 1000
+        monitor = TicketMonitor(self.driver, {
+            "timer_enabled": True, "_target_timestamp": 1000, "date": "2026-09-10",
+            "from_station_cn": "北京", "to_station_cn": "上海",
+        }, param_filler=fill, server_time_sync=clock, log_callback=lambda _: None,
+           human_action_callback=lambda _: None)
+        self.assertTrue(monitor.prepare())
+        self.driver.execute_script("document.querySelector('#train_date').value='2026-09-11'; fixture.show('请完成核验');")
+        self.assertTrue(monitor._run_single_loop(1, 3))
+        self.assertEqual(self.driver.execute_script("return fixture.clicks"), 0)
+        self.assertEqual(fills, ["2026-09-10", "2026-09-10"])
+
     def test_unchanged_old_rows_are_never_success(self):
         self.driver.execute_script("fixture.mode='unchanged'")
         self.assertEqual(self.query.execute(self.click, 0.5)["status"], "timeout")
@@ -225,6 +269,39 @@ class BrowserQueryTests(unittest.TestCase):
         parser = RowParser(self.driver, SeatType.get_prefix)
         self.assertEqual([row['train'] for row in parser.parse_rows()], ["1461", "Y701"])
 
+    def test_failed_candidate_yields_to_other_real_inventory_during_fallback(self):
+        from unittest.mock import patch
+        self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td>G101</td><td id="ZE_a">有</td><td><a class="btn72">预订</a></td></tr>'+
+          '<tr id="ticket_b"><td>G102</td><td id="ZE_b">有</td><td><a class="btn72">预订</a></td></tr>';""")
+        monitor = TicketMonitor(self.driver, {"train_code": "G101,G102", "seat_keyword": "二等座",
+                                             "auto_alternate": True}, log_callback=lambda _: None)
+        monitor._prefer_alternate = True
+        monitor._row_snapshot = monitor.row_parser.snapshot_rows(monitor.target_seats)
+        with patch("gui_12306_0.time.monotonic", return_value=100):
+            monitor._cool_down_candidate("G101", "二等座", "book")
+            hit = monitor._find_hit_row()
+            self.assertEqual((hit[0], hit[-1]), ("G102", "book"))
+        with patch("gui_12306_0.time.monotonic", return_value=130):
+            self.assertEqual(monitor._find_hit_row()[0], "G101")
+        self.assertEqual(self.driver.execute_script("return fixture.clicks"), 0)
+
+    def test_waitlist_cooldown_keeps_other_seat_and_preserves_fresh_button_check(self):
+        self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td>G101</td><td id="ZE_a"><a>候补</a></td>'+
+          '<td id="ZY_a"><a>候补</a></td></tr>';""")
+        monitor = TicketMonitor(self.driver, {"train_code": "G101", "seat_keyword": "二等座,一等座",
+            "date": "2026-10-10", "from_station_cn": "北京", "to_station_cn": "上海",
+            "auto_alternate": True}, log_callback=lambda _: None)
+        monitor._cool_down_candidate("G101", "二等座", "alternate")
+        hit = monitor._find_hit_row()
+        self.assertEqual((hit[1], hit[-1]), ("一等座", "alternate"))
+        self.driver.execute_script("document.querySelector('#ZY_a a').remove()")
+        result = monitor.alternate_flow.try_alternate_order(hit[3], hit[0], hit[1])
+        self.assertEqual(result.status, "not_submitted")
+        self.assertTrue(result.no_order)
+        self.assertTrue(result.evidence["candidate_unavailable"])
+
     def test_batch_snapshot_reused_for_display_and_matching(self):
         self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
           Array.from({length:100},(_,i)=>'<tr id="ticket_'+i+'"><td>G'+(i+1)+'</td>'+
@@ -294,7 +371,7 @@ class BrowserQueryTests(unittest.TestCase):
         polls = sum(script == QUERY_OBSERVATION_JS for script in calls)
         self.assertGreater(polls, 0)
         self.assertLessEqual(polls / elapsed, 10.5)
-        self.assertEqual(len(calls) - polls, 3)  # Initial form, dialog and query observer.
+        self.assertEqual(len(calls) - polls, 1)  # Form, dialog and observer are armed atomically.
 
     def test_structured_rows_use_real_cells_and_explicit_arrival_day(self):
         self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
@@ -316,6 +393,36 @@ class BrowserQueryTests(unittest.TestCase):
         ambiguous = RowParser(self.driver, SeatType.get_prefix).parse_rows()[0]
         self.assertIsNone(ambiguous["from_station"])
         self.assertIsNone(ambiguous["arrival_day_offset"])
+
+    def test_waitlist_batch_skips_unavailable_seats_with_bounded_commands(self):
+        for count in (1, 20, 100):
+            with self.subTest(trains=count):
+                self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+                  Array.from({length:arguments[0]},(_,i)=>'<tr id="ticket_'+i+'"><td>G'+(i+1)+'</td>'+
+                    '<td id="ZE_'+i+'">'+(i===arguments[0]-1?'<a>候补</a>':'无')+'</td><td id="ZY_'+i+'">无</td></tr>').join('');""", count)
+                monitor = TicketMonitor(self.driver, {"seat_keyword":"二等座,一等座", "auto_alternate":True}, log_callback=lambda _:None)
+                original, calls = self.driver.execute, []
+                def counted(command, params=None):
+                    calls.append(command)
+                    return original(command, params)
+                self.driver.execute = counted
+                try:
+                    monitor._row_snapshot = monitor.row_parser.snapshot_rows(monitor.target_seats)
+                    hit = monitor._find_hit_row()
+                finally:
+                    self.driver.execute = original
+                self.assertEqual((hit[0], hit[-1]), (f"G{count}", "alternate"))
+                self.assertLessEqual(len(calls), 8)
+                # Final candidate must be re-read after a cached available flag.
+                self.driver.execute_script("document.querySelector('#ZE_'+arguments[0]+' a').setAttribute('aria-disabled','true')", count-1)
+                self.assertIsNone(monitor._find_hit_row())
+
+    def test_batch_waitlist_ignores_hidden_disabled_and_other_seat_controls(self):
+        self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td>G101</td><td id="ZE_a"><a style="visibility:hidden">候补</a>'+
+          '<button disabled>候补</button><a aria-disabled="true">候补</a></td><td id="ZY_a"><a>候补</a></td></tr>';""")
+        monitor = TicketMonitor(self.driver, {"seat_keyword":"二等座", "auto_alternate":True}, log_callback=lambda _:None)
+        self.assertIsNone(monitor._find_hit_row())
 
     def test_advanced_sleeper_uses_its_own_inventory(self):
         self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=

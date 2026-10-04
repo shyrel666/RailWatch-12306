@@ -488,6 +488,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 created_kwargs.append(kwargs)
 
+            def prepare(self):
+                return True
+
             def run(self):
                 return None
 
@@ -531,7 +534,11 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
         class FakeMonitor:
             def __init__(self, *args, **kwargs):
-                pass
+                order.append("create_monitor")
+
+            def prepare(self):
+                order.append("prepare_monitor")
+                return True
 
             def run(self):
                 order.append("monitor")
@@ -562,7 +569,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         ), patch("railwatch_bridge.PageAnalyzer", FakeAnalyzer):
             bridge._monitor_worker({"timer_enabled": True, "target_time":"08:30:00", "sale_at":"2026-06-10T08:30:00+08:00"})
 
-        self.assertEqual(order, ["driver", "wait", "monitor"])
+        self.assertEqual(order, ["driver", "create_monitor", "prepare_monitor", "wait", "monitor"])
 
     def test_prewarm_query_page_navigates_and_syncs_params(self):
         from railwatch_bridge import QUERY_URL, RailWatchBridge

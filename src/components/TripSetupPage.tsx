@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, AutoComplete, Button, Input, Select, Switch } from "antd";
+import { Alert, AutoComplete, Button, Input, InputNumber, Select, Switch } from "antd";
+import { DATE_STRATEGIES, DATE_SCAN_BUDGET, dateStrategy, dateStrategySummary } from "../lib/dateStrategy";
+import { ORDER_POLICY } from "../lib/orderPolicy";
 import { automationConfigIssue } from "../lib/automationReadiness";
 import {
   ArrowLeftRight,
@@ -187,6 +189,7 @@ export function TripSetupPage({
   const config = useRailWatchStore((state) => state.config);
   const setConfig = useRailWatchStore((state) => state.setConfig);
   const savedConfig = useRailWatchStore(state => state.savedConfig);
+  const tripInitialized = useRailWatchStore(state => state.tripInitialized);
   const savedAt = useRailWatchStore(state => state.savedAt);
   const configSaveError = useRailWatchStore(state => state.configSaveError);
   const draftRead = useRailWatchStore(state => state.draftRead);
@@ -386,6 +389,7 @@ export function TripSetupPage({
   };
 
   const saveConfig = async () => {
+    if (!tripInitialized) return;
     if (tripDateStatus.expired) {
       const accepted = await confirm(
         "出发日期已过期",
@@ -429,6 +433,7 @@ export function TripSetupPage({
           <span>草稿：{draftSaveState === "editing" ? "编辑中" : draftSaveState === "saving" ? "保存中" :
             draftSaveState === "saved" ? `已保存 ${formatSavedAt(draftSavedAt)}` : draftSaveState === "error" ? "保存失败" :
             draftRead.status === "available" ? `发现可恢复草稿 ${formatSavedAt(draftRead.draft.saved_at)}` : "尚未保存"}</span>
+          {!tripInitialized ? <span role="alert">已保存的行程尚未加载，暂不能保存配置，以免覆盖原配置。</span> : null}
           {configSaveError ? <span role="alert">正式保存失败：{configSaveError}</span> : null}
           {draftError ? <span role="alert">草稿：{draftError}</span> : null}
         </div>
@@ -511,6 +516,25 @@ export function TripSetupPage({
                   }}
                 />
               </div>
+            </div>
+
+            <div className="trip-form-row trip-form-row--split">
+              <div className="trip-field">
+                <span>多日期策略</span>
+                <Select aria-label="多日期策略" className="trip-select" value={dateStrategy(config)}
+                  disabled={dateRange === "单日"}
+                  options={Object.entries(DATE_STRATEGIES).map(([value, policy]) => ({ value, label: policy.label }))}
+                  onChange={value => update({ date_strategy: value })} />
+                <small className="field-help">{dateStrategySummary(config)}</small>
+              </div>
+              {dateStrategy(config) === "inventory_first" && dateRange !== "单日" ? <label className="trip-field">
+                <span>跨日期扫描预算（秒）</span>
+                <InputNumber aria-label="跨日期扫描预算（秒）" className="trip-select"
+                  min={DATE_SCAN_BUDGET.min_budget_seconds} max={DATE_SCAN_BUDGET.max_budget_seconds} precision={0}
+                  value={config.date_scan_budget_seconds ?? DATE_SCAN_BUDGET.scan_budget_seconds}
+                  onChange={value => { if (value !== null) update({ date_scan_budget_seconds: value }); }} />
+                <small className="field-help">扫描结束后仍会重新确认候补；{config.alternate_mode === "multiple" ? "按自动化设置添加并核对备选组合。" : "仅提交一个已核对的组合。"}</small>
+              </label> : null}
             </div>
 
             <div className="trip-form-row trip-form-row--split">
@@ -769,6 +793,32 @@ export function TripSetupPage({
               }
             >
               <label className="trip-field">
+                <span>候补组合</span>
+                <Select aria-label="候补组合" className="trip-select" value={config.alternate_mode ?? "single"}
+                  options={[{ value: "single", label: "首个可用组合" }, { value: "multiple", label: "多个已配置组合" }]}
+                  onChange={value => update({ alternate_mode: value })} />
+              </label>
+              {config.alternate_mode === "multiple" ? <label className="trip-field">
+                <span>候补组合上限</span>
+                <InputNumber aria-label="候补组合上限" min={1} max={ORDER_POLICY.max_combinations} precision={0}
+                  value={config.alternate_max_combinations ?? ORDER_POLICY.alternate_max_combinations}
+                  onChange={value => { if (value !== null) update({ alternate_max_combinations: value }); }} />
+                <small className="field-help">最多{ORDER_POLICY.max_dates}个日期。按配置的日期、车次和席别选择页面可用组合；统一核对并提交一个候补订单，实际清单可在订单中心查看。</small>
+              </label> : null}
+              <label className="switch-row">
+                <Switch aria-label="持续订单核对" checked={config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled}
+                  onChange={value => update({ order_watch_enabled: value })} />
+                <span>持续订单核对</span>
+              </label>
+              {(config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled) ? <label className="trip-field">
+                <span>订单核对间隔（秒）</span>
+                <InputNumber aria-label="订单核对间隔（秒）" precision={0}
+                  min={ORDER_POLICY.min_watch_interval_seconds} max={ORDER_POLICY.max_watch_interval_seconds}
+                  value={config.order_watch_interval_seconds ?? ORDER_POLICY.order_watch_interval_seconds}
+                  onChange={value => { if (value !== null) update({ order_watch_interval_seconds: value }); }} />
+                <small className="field-help">取得订单号后在独立标签页核对，保留付款页面。候补生效后持续等待兑现；异常时放慢，可在订单中心停止。退出或重启后需点击继续核对。</small>
+              </label> : null}
+              <label className="trip-field">
                 <span>候补截止</span>
                 <AutoComplete
                   aria-label="候补截止"
@@ -799,7 +849,7 @@ export function TripSetupPage({
                   title={
                     config.auto_alternate ? "候补排队已启用" : "候补排队关闭"
                   }
-                  description="按已配置的乘车人和席别提交首选候补；人工支付预付款后才生效。实验性功能，需核对官方订单。"
+                  description="按配置提交已核对的候补组合；人工支付预付款后才生效。实验性功能，需核对官方订单。"
                   onChange={(checked) =>
                     void guardedAutomation("auto_alternate", checked)
                   }
@@ -812,6 +862,7 @@ export function TripSetupPage({
           <Button
             icon={<Save size={15} />}
             loading={busy === "saveConfig"}
+            disabled={!tripInitialized}
             onClick={() => void saveConfig()}
           >
             保存配置

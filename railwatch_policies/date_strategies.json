@@ -1,0 +1,20 @@
+{
+  "default": "round_robin",
+  "scan_budget_seconds": 30,
+  "min_budget_seconds": 10,
+  "max_budget_seconds": 120,
+  "strategies": {
+    "round_robin": {
+      "label": "按日期顺序尽快候补",
+      "description": "从最早日期依次轮询，每个日期先检查现票，再检查候补；发现可用候补即可提交，后续日期可能尚未查询。"
+    },
+    "preferred_date": {
+      "label": "先查首选日期",
+      "description": "每轮先查所选日期，再按距离由近到远轮询其他日期；每个日期先检查现票，再检查候补。"
+    },
+    "inventory_first": {
+      "label": "限时扫描多日期现票",
+      "description": "先从所选日期扫描各日期的现票；一轮有效查询均无现票或达到扫描预算后，重新确认已发现的候补。"
+    }
+  }
+}

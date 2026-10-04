@@ -31,6 +31,7 @@ def main():
             if not bridge._wait_for_target_timestamp(target, {}):
                 raise RuntimeError("Scheduler cancelled; sample run invalid")
             returned.append(max(0, (time.time() - target) * 1000))
+            bridge.order_journal.flush_telemetry()
             task.done.set()
         with bridge.order_journal.connection() as db:
             wakes = [json.loads(row[0])["late_ms"] for row in db.execute("SELECT detail FROM order_events WHERE stage='scheduler_wake' ORDER BY sequence")]
@@ -40,8 +41,8 @@ def main():
                 "p99_ms": round(ordered[math.ceil(len(values) * .99) - 1], 3), "max_ms": round(max(values), 3)}
     result = {"samples": args.samples, "started_at": started, "duration_seconds": round(time.time() - started, 3),
               "platform": platform.platform(), "python": platform.python_version(),
-              "conditions": "Local awake machine; 15ms deadlines; no browser or network; real bridge scheduler and SQLite writes.",
-              "scheduler_wake": stats(wakes), "return_after_journal_commit": stats(returned)}
+              "conditions": "Local awake machine; 15ms deadlines; no browser or network; real bridge scheduler; telemetry flushed after timing each return.",
+              "scheduler_wake": stats(wakes), "return_after_telemetry_buffer": stats(returned)}
     result["target_met"] = result["scheduler_wake"]["p95_ms"] <= 100 and result["scheduler_wake"]["p99_ms"] <= 250
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

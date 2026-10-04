@@ -1,6 +1,8 @@
 import type { RehearsalCheck, RehearsalReport, RehearsalStarted } from "../lib/rehearsal";
 import { createStore } from "zustand/vanilla";
 import { DEFAULT_QUERY_STRATEGY } from "../lib/queryStrategy";
+import { DEFAULT_DATE_STRATEGY } from "../lib/dateStrategy";
+import { DEFAULT_ORDER_POLICY } from "../lib/orderPolicy";
 import { conditionsMatch, mergeQuerySnapshots, queryFamily, queryRows, type QueryViews } from "../lib/queryResults";
 import type {
   HumanActionPayload,
@@ -67,6 +69,7 @@ export const defaultRuntimeInfo: RuntimeInfo = {
 };
 
 export const defaultConfig: RailWatchConfig = {
+  ...DEFAULT_ORDER_POLICY,
   from_station_cn: "北京",
   to_station_cn: "上海",
   date: "",
@@ -94,6 +97,7 @@ export const defaultConfig: RailWatchConfig = {
   config_version: 2,
   automation_route: "compliance_alerts",
   ...DEFAULT_QUERY_STRATEGY,
+  ...DEFAULT_DATE_STRATEGY,
 };
 
 export type RailWatchStore = {

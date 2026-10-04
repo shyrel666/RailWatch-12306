@@ -209,6 +209,17 @@ window.__railwatchQuery = state;
 return true;
 """
 
+# Read the form and blockers and install the response observer in one browser
+# command. This still runs at query time, so prewarming cannot hide later edits.
+QUERY_ARM_JS = (
+    "const form=(function(){" + FORM_SNAPSHOT_JS + "}).call(null,arguments[1]);"
+    "const dialog=(function(){" + DIALOG_INSPECT_JS + "})();"
+    "if(form.values.length!==5 || form.values.some(v=>v===null || v==='')) return {form,dialog,armed:false};"
+    "if(dialog.kind!=='none') return {form,dialog,armed:false};"
+    "const armed=(function(){" + QUERY_BEGIN_JS + "}).call(null,arguments[0]);"
+    "return {form,dialog,armed};"
+)
+
 QUERY_STATUS_JS = r"""
 const state = window.__railwatchQuery;
 if (!state || state.token !== arguments[0]) return {status:'invalid'};
@@ -270,17 +281,23 @@ class QueryExecutor:
         return value if isinstance(value, dict) else {}
 
     def execute(self, click, timeout):
+        if self.stop_check():
+            return {"status": "cancelled"}
         self.token = uuid.uuid4().hex
-        self.snapshot = self.snapshot_form()
+        armed = self.driver.execute_script(QUERY_ARM_JS, self.token, uuid.uuid4().hex)
+        if not isinstance(armed, dict):
+            return {"status": "invalid", "reason": "无法准备本轮查询"}
+        self.snapshot = armed.get("form")
         self.revision = None
         if not isinstance(self.snapshot, dict) or len(self.snapshot.get("values", [])) != 5 or any(v in (None, "") for v in self.snapshot.get("values", [])):
             return {"status": "invalid", "reason": "查询字段不完整"}
-        dialog = self.inspect_dialog()
+        dialog = armed.get("dialog") or {"kind": "unknown", "text": "无法确认页面状态"}
         if dialog["kind"] != "none":
             return {"status": dialog["kind"], "reason": dialog["text"]}
         if self.stop_check():
             return {"status": "cancelled"}
-        self.driver.execute_script(QUERY_BEGIN_JS, self.token)
+        if armed.get("armed") is not True:
+            return {"status": "invalid", "reason": "无法准备本轮查询"}
         clicked_at = time.monotonic()
         deadline = clicked_at + timeout
         if not click():

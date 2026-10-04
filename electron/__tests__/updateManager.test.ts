@@ -13,7 +13,7 @@ function createMockUpdater(): UpdaterLike & EventEmitter {
     autoDownload: false,
     autoInstallOnAppQuit: false,
     checkForUpdates: vi.fn(async () => null),
-    quitAndInstall: vi.fn(),
+    launchInstaller: vi.fn(async () => undefined),
   });
 }
 
@@ -134,5 +134,52 @@ describe("updateManager", () => {
       expect(result.error).not.toContain("releases.atom");
     }
     expect(manager.getState().error).toBe("无法访问更新源，请确认 GitHub Release 仓库地址和发布资产是否正确。");
+  });
+
+  test("installUpdate waits for launch acknowledgement and coalesces duplicate requests", async () => {
+    const updater = createMockUpdater();
+    const manager = createUpdateManager({ currentVersion: "0.1.0", updater, enabled: true });
+
+    expect(await manager.installUpdate()).toBe(false);
+    expect(updater.launchInstaller).not.toHaveBeenCalled();
+
+    let launched!: () => void;
+    updater.launchInstaller = vi.fn(() => new Promise<void>(resolve => { launched = resolve; }));
+    updater.emit("update-downloaded", { version: "1.2.0" });
+    const pending = manager.installUpdate();
+    expect(manager.installUpdate()).toBe(pending);
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(settled).toBe(false);
+    expect(updater.launchInstaller).toHaveBeenCalledOnce();
+    launched();
+    expect(await pending).toBe(true);
+  });
+
+  test.each([false, true])("installUpdate reports synchronous/asynchronous launch failure (async=%s)", async delayed => {
+    const updater = createMockUpdater();
+    updater.launchInstaller = vi.fn(() => {
+      if (!delayed) throw new Error("installer missing");
+      return new Promise((_, reject) => setImmediate(() => reject(new Error("installer missing"))));
+    });
+    const manager = createUpdateManager({ currentVersion: "0.1.0", updater, enabled: true });
+    updater.emit("update-downloaded", { version: "1.2.0" });
+
+    expect(await manager.installUpdate()).toBe(false);
+    expect(manager.getState().error).toBe("installer missing");
+    expect(updater.listenerCount("error")).toBe(1);
+    updater.launchInstaller = vi.fn(async () => undefined);
+    updater.emit("update-downloaded", { version: "1.2.0" });
+    expect(await manager.installUpdate()).toBe(true);
+  });
+
+  test("an updater without acknowledged installation never invokes quitAndInstall", async () => {
+    const updater = Object.assign(createMockUpdater(), { launchInstaller: undefined, quitAndInstall: vi.fn() });
+    const manager = createUpdateManager({ currentVersion: "0.1.0", updater, enabled: true });
+    updater.emit("update-downloaded", { version: "1.2.0" });
+    expect(await manager.installUpdate()).toBe(false);
+    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(manager.getState().error).toContain("手动安装");
   });
 });

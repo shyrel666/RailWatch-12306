@@ -13,7 +13,8 @@ hiddenimports = collect_submodules("selenium") + ["win32crypt"]
 
 # The CLI evaluates this spec before adding its directory to the module search
 # path. Resolve local policy data explicitly so console-script builds include it.
-datas = [(os.path.join(SPECPATH, "railwatch_policies", "query_strategies.json"), "railwatch_policies")]
+datas = [(os.path.join(SPECPATH, "railwatch_policies", name), "railwatch_policies")
+         for name in ("query_strategies.json", "date_strategies.json", "order_policies.json")]
 for optional_file in (
     "chromedriver.exe",
     "LICENSE.chromedriver",

@@ -200,6 +200,7 @@ class ObservationTimeTests(unittest.TestCase):
                     if observed == "error":
                         raise RuntimeError("page unavailable")
                     return result if observed == "pending_payment" else OrderResult("unknown")
+                task.config["order_watch_enabled"] = False  # Legacy short payment observation.
                 with patch("railwatch_bridge.OrderPage") as page, patch.object(bridge, "_task_wait"), \
                      patch("railwatch_bridge.time.time", return_value=200):
                     page.return_value.result.side_effect = read

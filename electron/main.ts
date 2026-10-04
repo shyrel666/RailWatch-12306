@@ -1,5 +1,6 @@
 import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, powerMonitor, powerSaveBlocker, shell } from "electron";
 import { autoUpdater } from "electron-updater";
+import { RailWatchNsisUpdater } from "./nsisUpdater";
 import path from "node:path";
 import { listExportDirectory, validateLogExport } from "./exportDialog";
 import { pathToFileURL } from "node:url";
@@ -27,6 +28,7 @@ let updateManager: UpdateManager | null = null;
 let tray: Tray | null = null;
 let quitAllowed = false;
 let exitPending = false;
+let installPending = false;
 let trayExplained = false;
 let closePending = false;
 let confirmationReady = false;
@@ -174,7 +176,7 @@ async function finishExit(force = false): Promise<void> {
 }
 
 async function requestExit(): Promise<void> {
-  if (quitAllowed || exitPending) return;
+  if (quitAllowed || exitPending || installPending) return;
   exitPending = true;
   try {
     const activity = await pythonRuntime.request<{ state: string; operation: string | null; unresolved_order: boolean }>("taskActivity", {}, { timeoutMs: 5000 });
@@ -209,7 +211,7 @@ async function requestExit(): Promise<void> {
 async function handleWindowClose(event: Electron.Event): Promise<void> {
   if (quitAllowed) return;
   event.preventDefault();
-  if (exitPending || closePending) return;
+  if (exitPending || closePending || installPending) return;
   closePending = true;
   try {
     try {
@@ -238,12 +240,13 @@ function initializeAutoUpdater(): void {
     devServerUrl: process.env.VITE_DEV_SERVER_URL,
   });
 
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = false;
+  const updater = process.platform === "win32" ? new RailWatchNsisUpdater() : autoUpdater;
+  updater.autoDownload = true;
+  updater.autoInstallOnAppQuit = false;
 
   updateManager = createUpdateManager({
     currentVersion: app.getVersion(),
-    updater: autoUpdater,
+    updater,
     enabled,
     onStateChange: () => broadcastUpdateState(),
   });
@@ -430,6 +433,7 @@ ipcMain.on("railwatch:confirm-response", (event, payload: unknown) => {
 ipcMain.handle("railwatch:command", async (event, command: string, payload: Record<string, unknown> = {}) => {
   assertTrustedSender(event.senderFrame?.url);
   if (quitAllowed) throw new Error("应用正在退出。");
+  if (installPending) throw new Error("正在启动更新安装程序，请稍候。");
   if (!isRailWatchCommand(command)) {
     throw new Error(`Unsupported RailWatch command: ${command}`);
   }
@@ -490,6 +494,9 @@ ipcMain.handle("railwatch:get-update-state", async (event) => {
 
 ipcMain.handle("railwatch:install-update", async (event) => {
   assertTrustedSender(event.senderFrame?.url);
+  if (installPending || exitPending || quitAllowed) {
+    return { ok: false, error: "正在安装更新或退出，请勿重复操作。" };
+  }
   if (!updateManager) {
     return { ok: false, error: "更新服务尚未初始化。" };
   }
@@ -499,18 +506,27 @@ ipcMain.handle("railwatch:install-update", async (event) => {
   if (runtimeContinuityUnknown) {
     return { ok: false, error: "运行时曾中断，无法确认任务已安全结束；请退出并重新启动后再安装更新。" };
   }
+  installPending = true;
   try {
     await flushStagedDraft();
     const result = await pythonRuntime.request<{ ready: boolean; reason?: string }>("prepareShutdown", { purpose: "install" }, { timeoutMs: 10000 });
     if (!result.ready) return { ok: false, error: result.reason || "活动任务或未完成订单，更新已推迟。" };
-    quitAllowed = true;
-    pythonRuntime.stop();
-    updateManager.installUpdate();
+    if (!await updateManager.installUpdate()) {
+      throw new Error(updateManager.getState().error || "安装程序未能启动，请稍后重试。");
+    }
+    await finishExit();
     return { ok: true };
   } catch (error) {
     quitAllowed = false;
-    void pythonRuntime.request("cancelShutdown").catch(() => undefined);
-    return { ok: false, error: `无法确认更新安全状态：${error instanceof Error ? error.message : String(error)}` };
+    let recoveryError = "";
+    try {
+      await pythonRuntime.request("cancelShutdown", {}, { timeoutMs: 5000 });
+    } catch {
+      recoveryError = " 后台未能恢复可用状态，请重启应用后再试。";
+    }
+    return { ok: false, error: `更新安装失败：${error instanceof Error ? error.message : String(error)}${recoveryError}` };
+  } finally {
+    installPending = false;
   }
 });
 

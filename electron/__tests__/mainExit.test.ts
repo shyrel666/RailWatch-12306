@@ -13,6 +13,7 @@ const harness = vi.hoisted(() => ({
   sendRequest: undefined as undefined | ((request: any) => void),
   send: vi.fn(), reload: vi.fn(), rendererUrl: "",
   loadFailure: undefined as Error | undefined, loadErrorDialog: vi.fn(), closeWindow: vi.fn(),
+  installUpdate: vi.fn(), updateState: vi.fn(),
 }));
 vi.mock("electron", () => ({
   app: { requestSingleInstanceLock: () => true, quit: harness.quit,
@@ -36,10 +37,13 @@ vi.mock("electron", () => ({
   powerMonitor: { on: vi.fn() }, powerSaveBlocker: {}, shell: {},
 }));
 vi.mock("electron-updater", () => ({ autoUpdater: {} }));
+vi.mock("../nsisUpdater", () => ({ RailWatchNsisUpdater: class {} }));
 vi.mock("../pythonRuntime", () => ({
   RailWatchPythonRuntimeClient: class { request = harness.request; stop = harness.stop; forceStop = harness.forceStop; on = vi.fn(); },
 }));
-vi.mock("../updateManager", () => ({ createUpdateManager: vi.fn(), shouldEnableAutoUpdate: vi.fn() }));
+vi.mock("../updateManager", () => ({ createUpdateManager: () => ({
+  installUpdate: harness.installUpdate, getState: harness.updateState,
+}), shouldEnableAutoUpdate: vi.fn() }));
 vi.mock("../alertManager", () => ({ cleanupUrgentAlert: harness.cleanupAlert,
   registerAlertIpcHandlers: vi.fn(), showUrgentAlert: vi.fn(), stopUrgentAlertLoop: vi.fn() }));
 vi.mock("../confirmationBridge", () => ({
@@ -71,7 +75,71 @@ beforeEach(async () => {
   harness.forceStop.mockResolvedValue(undefined);
   harness.loadFailure = undefined;
   harness.loadErrorDialog.mockResolvedValue({ response: 1 });
+  harness.updateState.mockReturnValue({ phase: "downloaded" });
+  harness.installUpdate.mockResolvedValue(true);
   await import("../main");
+});
+
+test("update installation keeps the runtime alive until launch acknowledgement", async () => {
+  harness.ready!();
+  let launched!: (value: boolean) => void;
+  harness.installUpdate.mockImplementation(() => new Promise<boolean>(resolve => { launched = resolve; }));
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const install = harness.ipcHandlers.get("railwatch:install-update")!;
+  const pending = install(event);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(harness.request).toHaveBeenCalledWith("prepareShutdown", { purpose: "install" }, { timeoutMs: 10000 });
+  expect(harness.stop).not.toHaveBeenCalled();
+  expect(harness.quit).not.toHaveBeenCalled();
+  expect((await install(event)).ok).toBe(false);
+  const quitting = await exitAttempt();
+  expect(quitting.preventDefault).toHaveBeenCalled();
+  expect(harness.request).not.toHaveBeenCalledWith("prepareShutdown", { purpose: "quit" }, expect.anything());
+  launched(true);
+  expect(await pending).toEqual({ ok: true });
+  expect(harness.installUpdate).toHaveBeenCalledOnce();
+  expect(harness.stop).toHaveBeenCalledOnce();
+  expect(harness.quit).toHaveBeenCalledOnce();
+});
+
+test("asynchronous install failure restores admission without stopping or quitting", async () => {
+  harness.ready!();
+  harness.installUpdate.mockImplementation(() => new Promise(resolve => setImmediate(() => {
+    harness.updateState.mockReturnValue({ phase: "error", error: "installer spawn failed" });
+    resolve(false);
+  })));
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const result = await harness.ipcHandlers.get("railwatch:install-update")!(event);
+  expect(result).toEqual({ ok: false, error: expect.stringContaining("installer spawn failed") });
+  expect(harness.request).toHaveBeenCalledWith("cancelShutdown", {}, { timeoutMs: 5000 });
+  expect(harness.stop).not.toHaveBeenCalled();
+  expect(harness.quit).not.toHaveBeenCalled();
+  await expect(harness.ipcHandlers.get("railwatch:command")!(event, "getRuntimeInfo")).resolves.toBeTruthy();
+});
+
+test("an active task or unresolved order prevents installer launch", async () => {
+  harness.ready!();
+  harness.request.mockResolvedValue({ ready: false, reason: "未完成订单" });
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  expect(await harness.ipcHandlers.get("railwatch:install-update")!(event)).toEqual({ ok: false, error: "未完成订单" });
+  expect(harness.installUpdate).not.toHaveBeenCalled();
+  expect(harness.stop).not.toHaveBeenCalled();
+  expect(harness.quit).not.toHaveBeenCalled();
+});
+
+test("failed shutdown recovery is reported instead of claiming the app is ready", async () => {
+  harness.ready!();
+  harness.installUpdate.mockResolvedValue(false);
+  harness.request.mockImplementation(async command => {
+    if (command === "cancelShutdown") throw new Error("runtime unavailable");
+    return { ready: true };
+  });
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const result = await harness.ipcHandlers.get("railwatch:install-update")!(event);
+  expect(result.ok).toBe(false);
+  expect(result.error).toContain("后台未能恢复");
+  expect(harness.stop).not.toHaveBeenCalled();
+  expect(harness.quit).not.toHaveBeenCalled();
 });
 
 test("idle exit completes normal shutdown without force or confirmation", async () => {
