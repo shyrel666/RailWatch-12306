@@ -7,10 +7,11 @@
 - `npm run test`
 - `python -m unittest discover -s tests -p "test_*.py"`
 - `npm run build`
-- `.\package-windows.cmd 0.5.5`
-- 仅在依赖缺失或需要重装时使用 `.\package-windows.cmd 0.5.5 --install-deps`
+- `.\package-windows.cmd 0.6.0`
+- 仅在依赖缺失或需要重装时使用 `.\package-windows.cmd 0.6.0 --install-deps`
+- macOS：`./package-macos.sh 0.6.0`（按本机芯片生成 ad-hoc 签名的 DMG 与 ZIP）
 - 启动 `release/win-unpacked/RailWatch 12306.exe`，确认窗口、React renderer、preload API 和 Python runtime 都能启动。
-- 发布时只上传同一次构建生成的 `release/*.exe`、`release/*.blockmap` 和 `release/latest.yml`。
+- 正式发布由 `Package Release` 工作流统一上传同一次运行生成的 Windows 与 macOS 资产，见 [发布检查清单](RELEASE_CHECKLIST.md)。
 
 ## 手工功能验证
 
@@ -28,6 +29,21 @@
 - 切换暗色模式并重启应用，确认偏好保存。
 - 退出应用后检查没有残留的 `RailWatch 12306.exe` 或 Python runtime 进程。
 
+## macOS 真机验证
+
+Apple Silicon 与 Intel 各一台，macOS 12 与最新版各覆盖一次。直接运行构建目录中的 `.app` 不计入本节。
+
+- 从 GitHub Release 用浏览器下载 DMG（保留下载隔离属性），在非构建机上拖入「应用程序」，按 README 在「隐私与安全性」中放行后启动。
+- 运行时进入就绪状态，「关于」页显示正确版本，日志中平台为 `darwin`。
+- 「检查环境」检测到 Chrome，并把匹配的 ChromeDriver 下载到 `~/Library/Application Support/railwatch-12306/chromedriver`；重启后不再重复下载。
+- 登录、查询、彩排可走通，受控 Chrome 正常弹出。
+- 输入框中 Cmd+C / Cmd+V 可用；Cmd+Q 走安全退出流程，取消退出后应用仍可用。
+- 开启「关闭到托盘」后菜单栏有图标，可以重新打开窗口。
+- 保存通知凭据后，`notification_settings.json` 只有 `keychain:` 标记、不含明文，钥匙串中存在单个 `notification-secrets` 条目；「清除本地数据」后该条目被删除。
+- ad-hoc 跨版本升级（每种芯片各一次）：在版本 A 保存全部三类通知凭据，手动安装版本 B 后启动。授权框出现时运行时照常就绪、不超时重启，授权框最多一次；「始终允许」后通知可用，「拒绝」后外部通知停用并有提示，其余功能不受影响。另记录授权完成前保存或清除通知设置时的提示，以及新版本覆盖、删除旧版本条目时是否额外弹框。
+- 退出（包括强制退出）后没有 `railwatch_runtime`、`chromedriver` 或受控 Chrome 残留。
+- 检查更新时显示「前往下载」，并打开正确的 Release 页。
+
 ## 安全回归
 
 - 自动提交和自动候补默认必须关闭。
@@ -38,7 +54,7 @@
 ## 任务可靠性回归
 
 - 运行 `python -X utf8 tests/browser_smoke.py`：真实 Chrome 仅加载本地页面夹具，验证结果更新、空结果、迟到响应、改参及弹窗白名单。
-- 打包后运行 `python -X utf8 tests/packaged_smoke.py`：隔离 APPDATA/LOCALAPPDATA，检查五个功能页面及关于页、preload、旧配置加载与保存、runtime 新字段和无历史查询时的启动条件。
+- 打包后运行 `python -X utf8 tests/packaged_smoke.py`：隔离 APPDATA/LOCALAPPDATA（macOS 隔离 HOME，并用 `--exe` 指定 `.app` 内可执行文件），检查五个功能页面及关于页、preload、旧配置加载与保存、runtime 新字段和无历史查询时的启动条件。
 - 验证初始化跨过目标秒仍在当日执行；超过冲刺窗口转普通监控。
 - 验证停止中不能重启、关闭浏览器或清理数据；停止前发出的浏览器请求可以完成，但不再发出后续操作。
 - 验证登录明确失效及连续三次未知结果会停止；重新登录后需手动启动。

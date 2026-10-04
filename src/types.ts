@@ -427,6 +427,8 @@ export type UpdatePhase =
 export type UpdateRuntimeState = {
   phase: UpdatePhase;
   currentVersion: string;
+  /** manual: macOS builds only check, then open the release page to download. */
+  installMode?: "auto" | "manual";
   latestVersion?: string;
   releaseNotes?: string;
   downloadPercent?: number;

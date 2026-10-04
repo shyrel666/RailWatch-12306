@@ -519,9 +519,18 @@ export function resetLastSuccessfulCheck(): void {
   lastSuccessfulCheck = null;
 }
 
+export const RELEASE_OWNER = "shyrel666";
+export const RELEASE_REPO = "RailWatch-12306";
+
+/** The release page users open to download an installer by hand. */
+export function releaseTagUrl(version: string): string {
+  const tag = version.startsWith("v") ? version : `v${version}`;
+  return `https://github.com/${RELEASE_OWNER}/${RELEASE_REPO}/releases/tag/${encodeURIComponent(tag)}`;
+}
+
 export function createDefaultUpdateConfig(currentVersion: string, userDataPath: string): UpdateCheckerConfig {
-  const owner = "shyrel666";
-  const repo = "RailWatch-12306";
+  const owner = RELEASE_OWNER;
+  const repo = RELEASE_REPO;
   const githubToken = process.env.RAILWATCH_GITHUB_TOKEN || process.env.GITHUB_TOKEN || undefined;
 
   return {

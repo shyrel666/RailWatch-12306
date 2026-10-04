@@ -1,0 +1,334 @@
+name: Package Release
+
+# Build jobs only build, verify and upload Actions artifacts. The publish job is
+# the only one that touches the GitHub Release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms to build and publish from the selected version tag"
+        type: choice
+        options:
+          - all
+          - windows
+          - macos
+        default: all
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build Windows installer
+    if: ${{ github.event_name == 'push' || inputs.platforms != 'macos' }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Check release tag
+        run: node scripts/check-release-tag.mjs
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build Electron installer
+        run: npm run package
+
+      - name: Verify packaged runtime starts and restores orders
+        run: python -X utf8 tests/runtime_order_smoke.py
+
+      - name: Verify updater metadata
+        shell: bash
+        run: node scripts/verify-update-metadata.mjs --version "$PACKAGE_VERSION" release/latest.yml
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+
+      - name: Upload unpacked app for QA
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-windows-unpacked
+          path: release/win-unpacked
+
+  macos:
+    name: Build macOS ${{ matrix.arch }} app
+    if: ${{ github.event_name == 'push' || inputs.platforms != 'windows' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      # Developer ID signing and notarization are not enabled yet; every macOS
+      # build is ad-hoc signed and updates by downloading from the release page.
+      SIGN_MODE: adhoc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Check release tag
+        run: node scripts/check-release-tag.mjs
+
+      - name: Check build architecture
+        run: |
+          python_arch="$(python -c 'import platform; print(platform.machine())')"
+          node_arch="$(node -p process.arch)"
+          expected_python="$([ "$ARCH" = arm64 ] && echo arm64 || echo x86_64)"
+          echo "Python: $python_arch, Node: $node_arch, target: $ARCH"
+          if [ "$python_arch" != "$expected_python" ] || [ "$node_arch" != "$ARCH" ]; then
+            echo "::error::The runner does not build native $ARCH binaries."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller websocket-client
+          npm ci
+
+      - name: Build ad-hoc signed app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: >-
+          npm run package:mac -- --${{ matrix.arch }}
+          -c.mac.identity=-
+          -c.mac.notarize=false
+          -c.extraMetadata.railwatchMacUpdateMode=manual
+
+      - name: Verify app signature
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            arm64) APP_PATH="$PWD/release/mac-arm64/RailWatch 12306.app" ;;
+            x64) APP_PATH="$PWD/release/mac/RailWatch 12306.app" ;;
+            *) exit 1 ;;
+          esac
+          RUNTIME_PATH="$APP_PATH/Contents/Resources/railwatch-runtime/railwatch_runtime/railwatch_runtime"
+          test -d "$APP_PATH"
+          test -x "$RUNTIME_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign --verify --strict --verbose=2 "$RUNTIME_PATH"
+          if [ "$SIGN_MODE" = signed ]; then
+            spctl --assess --verbose=2 --type exec "$APP_PATH"
+            xcrun stapler validate "$APP_PATH"
+          fi
+          lipo -archs "$RUNTIME_PATH" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "RUNTIME_PATH=$RUNTIME_PATH" >> "$GITHUB_ENV"
+
+      - name: Smoke the final app with a temporary keychain
+        run: |
+          set -eo pipefail
+          KEYCHAIN="$RUNNER_TEMP/railwatch-ci.keychain-db"
+          ORIGINAL_DEFAULT="$(security default-keychain -d user | sed -e 's/^ *"//' -e 's/" *$//')"
+          ORIGINAL_KEYCHAINS=()
+          while IFS= read -r line; do
+            ORIGINAL_KEYCHAINS+=("$(echo "$line" | sed -e 's/^ *"//' -e 's/" *$//')")
+          done < <(security list-keychains -d user)
+          restore_keychains() {
+            security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" || true
+            security default-keychain -d user -s "$ORIGINAL_DEFAULT" || true
+            security delete-keychain "$KEYCHAIN" || true
+          }
+          trap restore_keychains EXIT
+          security create-keychain -p railwatch-ci "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p railwatch-ci "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
+          security default-keychain -d user -s "$KEYCHAIN"
+
+          PROBE_HOME="$(python -c 'import os, tempfile; print(os.path.realpath(tempfile.mkdtemp(prefix="railwatch-probe-home-")))')"
+          if ! HOME="$PROBE_HOME" python scripts/keychain_probe.py --keychain "$KEYCHAIN"; then
+            echo "::error::测试钥匙串不可用（钥匙串环境问题，不是运行时缺陷）"
+            exit 1
+          fi
+          python -X utf8 tests/runtime_order_smoke.py --exe "$RUNTIME_PATH"
+          python -X utf8 tests/packaged_smoke.py --exe "$APP_PATH/Contents/MacOS/RailWatch 12306"
+
+      - name: Re-verify the app and update metadata after smoke tests
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          node scripts/verify-update-metadata.mjs --version "$PACKAGE_VERSION" --arch "$ARCH" release/latest-mac.yml
+          for ext in dmg zip; do
+            test -f "release/RailWatch-12306-${PACKAGE_VERSION}-${ARCH}.${ext}"
+          done
+          mv release/latest-mac.yml "release/latest-mac-${ARCH}.yml"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac-${{ matrix.arch }}.yml
+
+      - name: Upload QA evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-macos-${{ matrix.arch }}
+          if-no-files-found: ignore
+          path: build/qa
+
+  publish:
+    name: Publish GitHub Release
+    needs: [windows, macos]
+    # Skipped jobs must be handled explicitly: a selected platform has to succeed,
+    # and only the platform left out of a manual run may be skipped.
+    if: >-
+      ${{
+        !cancelled() &&
+        (needs.windows.result == 'success' ||
+          (github.event_name == 'workflow_dispatch' && inputs.platforms == 'macos' && needs.windows.result == 'skipped')) &&
+        (needs.macos.result == 'success' ||
+          (github.event_name == 'workflow_dispatch' && inputs.platforms == 'windows' && needs.macos.result == 'skipped'))
+      }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WINDOWS_RESULT: ${{ needs.windows.result }}
+      MACOS_RESULT: ${{ needs.macos.result }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install release tooling
+        run: npm ci --ignore-scripts
+
+      - name: Check release tag
+        run: node scripts/check-release-tag.mjs
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Merge macOS update metadata
+        if: ${{ needs.macos.result == 'success' }}
+        run: node scripts/merge-latest-mac.mjs release/latest-mac-arm64.yml release/latest-mac-x64.yml > release/latest-mac.yml
+
+      - name: Verify assets and build the upload list
+        run: |
+          set -euo pipefail
+          : > upload-list.txt
+          if [ "$WINDOWS_RESULT" = success ]; then
+            node scripts/verify-update-metadata.mjs --version "$PACKAGE_VERSION" release/latest.yml
+            exe="RailWatch-12306-${PACKAGE_VERSION}-x64.exe"
+            for name in "$exe" "$exe.blockmap" latest.yml; do
+              test -f "release/$name"
+              echo "release/$name" >> upload-list.txt
+            done
+          fi
+          if [ "$MACOS_RESULT" = success ]; then
+            node scripts/verify-update-metadata.mjs --version "$PACKAGE_VERSION" release/latest-mac.yml
+            for arch in arm64 x64; do
+              for ext in dmg zip; do
+                name="RailWatch-12306-${PACKAGE_VERSION}-${arch}.${ext}"
+                test -f "release/$name"
+                echo "release/$name" >> upload-list.txt
+                if [ -f "release/$name.blockmap" ]; then echo "release/$name.blockmap" >> upload-list.txt; fi
+              done
+            done
+            echo "release/latest-mac.yml" >> upload-list.txt
+          fi
+          test -s upload-list.txt
+          echo "Assets to upload:"
+          cat upload-list.txt
+
+      - name: Create or update the GitHub Release
+        run: |
+          set -euo pipefail
+          mapfile -t assets < upload-list.txt
+          tag="$RELEASE_TAG"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # Keep the other platform's assets and the existing "latest" marker.
+            gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            exit 0
+          fi
+          if [[ "$tag" == *-* ]]; then
+            latest=(--prerelease --latest=false)
+          else
+            current="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2> /dev/null || true)"
+            if [ -z "$current" ] || node -e '
+              const [a, b] = process.argv.slice(1).map((v) => v.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number));
+              for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) process.exit(a[i] > b[i] ? 0 : 1);
+            ' "$tag" "$current"; then
+              latest=(--latest)
+            else
+              latest=(--latest=false)
+            fi
+          fi
+          notes_file="docs/releases/$tag.md"
+          if [ -f "$notes_file" ]; then notes=(--notes-file "$notes_file"); else notes=(--notes "RailWatch 12306 $tag"); fi
+          gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "RailWatch 12306 $tag" "${notes[@]}" "${latest[@]}"
+          if [ "${latest[0]}" = --latest ] && { [ "$WINDOWS_RESULT" != success ] || [ "$MACOS_RESULT" != success ]; }; then
+            {
+              echo "### Single-platform release"
+              echo "$tag is the latest release but only carries one platform. Clients on the other platform"
+              echo "will show \"最新版本暂未提供本平台安装包\" until its assets are published from the same tag."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

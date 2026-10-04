@@ -123,12 +123,39 @@ export type RuntimeCommand = {
   executable: string;
   args: string[];
   cwd: string;
+  /** Set when a packaged runtime file is absent; starting reports it instead of spawning. */
+  missing?: string;
 };
 
-export function createPythonRuntimeCommand(projectRoot: string = path.resolve(__dirname, "..")): RuntimeCommand {
-  const packagedExe = path.join(process.resourcesPath || "", "railwatch-runtime", "railwatch_runtime.exe");
-  if (app.isPackaged && existsSync(packagedExe)) {
-    return { executable: packagedExe, args: [], cwd: path.dirname(packagedExe) };
+export const RUNTIME_MISSING_MESSAGE = "运行时文件缺失，请重新安装 RailWatch 12306。";
+
+/** Windows ships a onefile exe; macOS ships a PyInstaller onedir folder. */
+export function packagedRuntimeExecutable(resourcesPath: string, platform: NodeJS.Platform = process.platform): string {
+  const root = path.join(resourcesPath, "railwatch-runtime");
+  return platform === "win32"
+    ? path.join(root, "railwatch_runtime.exe")
+    : path.join(root, "railwatch_runtime", "railwatch_runtime");
+}
+
+type RuntimeCommandEnvironment = {
+  isPackaged: boolean;
+  resourcesPath: string;
+  platform: NodeJS.Platform;
+  fileExists: (file: string) => boolean;
+};
+
+export function createPythonRuntimeCommand(
+  projectRoot: string = path.resolve(__dirname, ".."),
+  environment: Partial<RuntimeCommandEnvironment> = {},
+): RuntimeCommand {
+  const { isPackaged = Boolean(app?.isPackaged), resourcesPath = process.resourcesPath || "",
+    platform = process.platform, fileExists = existsSync } = environment;
+  if (isPackaged) {
+    // A packaged app has no railwatch_runtime.py, so falling back to a system
+    // Python would only replace a clear error with a confusing one.
+    const executable = packagedRuntimeExecutable(resourcesPath, platform);
+    const command = { executable, args: [], cwd: path.dirname(executable) };
+    return fileExists(executable) ? command : { ...command, missing: RUNTIME_MISSING_MESSAGE };
   }
 
   const python = process.env.RAILWATCH_PYTHON || "python";
@@ -190,12 +217,20 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
     if (this.restartTimer) {
       throw new Error("运行时正在等待恢复，请稍后重试。");
     }
+    if (this.command.missing) {
+      this.unavailable = true;
+      const error = new Error(this.command.missing);
+      this.emit("unavailable", error);
+      throw error;
+    }
     this.intentionalStop = false;
     this.decoder.reset();
     const child = spawn(this.command.executable, this.command.args, {
       cwd: this.command.cwd,
       stdio: "pipe",
       windowsHide: true,
+      // Own process group on POSIX, so a forced exit also ends chromedriver/Chrome.
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         RAILWATCH_APP_VERSION: this.appVersion,
@@ -309,7 +344,12 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
           });
       });
     } else {
-      child.kill("SIGKILL");
+      try {
+        if (!child.pid) throw new Error("Runtime has no PID");
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
     }
   }
 

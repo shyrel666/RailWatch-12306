@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -95,8 +94,8 @@ def main():
     args = parser.parse_args()
     port = args.port
     if port is None:
-        directory = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
-        port = int((directory / "railwatch-12306/chrome_profile_12306/DevToolsActivePort").read_text().splitlines()[0])
+        from railwatch_bridge import get_data_path
+        port = int((Path(get_data_path()) / "chrome_profile_12306/DevToolsActivePort").read_text().splitlines()[0])
     if not 1 <= port <= 65535:
         raise ValueError("Invalid debugging port")
     result = validate(port)

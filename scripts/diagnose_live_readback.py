@@ -16,7 +16,9 @@ from railwatch_config_contract import parse_passenger_names
 from railwatch_selectors import BOOK_BUTTON_SELECTORS
 import railwatch_order_page as op
 
-DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "railwatch-12306")
+from railwatch_bridge import get_data_path
+
+DATA_DIR = get_data_path()
 
 EXPECTED = {
     "train_code": "G1307",

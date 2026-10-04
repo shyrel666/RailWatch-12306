@@ -73,8 +73,8 @@ class RailWatchBridgeContractTests(unittest.TestCase):
     def test_notification_secrets_are_protected_on_disk_and_redacted_from_renderer(self):
         from railwatch_bridge import RailWatchBridge
 
-        protect = lambda value: f"protected:{str(value)[::-1]}" if value else ""
-        unprotect = lambda value: str(value).removeprefix("protected:")[::-1]
+        protect = lambda value, slot="": f"protected:{str(value)[::-1]}" if value else ""
+        unprotect = lambda value, slot="": str(value).removeprefix("protected:")[::-1]
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("railwatch_bridge.protect_local_secret", side_effect=protect), \
             patch("railwatch_bridge.unprotect_local_secret", side_effect=unprotect):

@@ -110,3 +110,41 @@ describe("ShellLayout update control", () => {
     expect(railwatchApi.installUpdate).toHaveBeenCalledOnce();
   });
 });
+
+describe("ShellLayout manual update control", () => {
+  test("opens the release page when macOS reports a new version", async () => {
+    vi.restoreAllMocks();
+    const user = userEvent.setup();
+    const releaseUrl = "https://github.com/shyrel666/RailWatch-12306/releases/tag/v1.2.0";
+    vi.spyOn(railwatchApi, "onUpdateState").mockReturnValue(() => undefined);
+    vi.spyOn(railwatchApi, "getUpdateState").mockResolvedValue({
+      phase: "available", currentVersion: "0.1.0", latestVersion: "1.2.0", installMode: "manual",
+      result: { ok: true, currentVersion: "0.1.0", latestVersion: "1.2.0", hasUpdate: true, releaseName: "1.2.0",
+        releaseNotes: "", publishedAt: "", releaseUrl, assets: [], source: "updater" },
+    });
+    const openExternal = vi.spyOn(railwatchApi, "openExternal").mockResolvedValue({ ok: true });
+    const installUpdate = vi.spyOn(railwatchApi, "installUpdate");
+    const checkUpdate = vi.spyOn(railwatchApi, "checkUpdate");
+
+    render(
+      <ShellLayout
+        activePage="购票监控"
+        darkMode
+        eventPanel={null}
+        eventPanelVisible
+        runtime={{ ...defaultRuntimeInfo, app_version: "0.1.0" }}
+        status={{ ...defaultStatus, summary: "就绪" }}
+        onPageChange={vi.fn()}
+        onExportLog={vi.fn()}
+        onToggleEventPanel={vi.fn()}
+      >
+        <div>内容</div>
+      </ShellLayout>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "前往下载" }));
+    expect(openExternal).toHaveBeenCalledWith(releaseUrl);
+    expect(installUpdate).not.toHaveBeenCalled();
+    expect(checkUpdate).not.toHaveBeenCalled();
+  });
+});

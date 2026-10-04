@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "railwatch-12306"
-version = "0.5.5"
+version = "0.6.0"
 description = "Python runtime and Selenium core for the RailWatch 12306 Electron desktop app."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,8 +28,9 @@ classifiers = [
 dependencies = [
   "requests==2.33.1",
   "selenium==4.44.0",
-  "pyttsx3>=2.90",
+  "pyttsx3>=2.90; sys_platform == 'win32'",
   "pywin32>=300; sys_platform == 'win32'",
+  "keyring>=25; sys_platform == 'darwin'",
 ]
 
 [project.urls]

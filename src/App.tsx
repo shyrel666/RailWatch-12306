@@ -293,7 +293,8 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         const result = value as { cleanup_pending?: boolean; warning?: string; remaining_paths?: string[] };
         await showThemedDialog({ kind: "info", title: result.cleanup_pending ? "部分旧文件尚未清除" : "本地数据已清除",
           content: result.cleanup_pending ? `${result.warning}\n旧文件位置：\n${(result.remaining_paths ?? []).join("\n")}`
-            : "应用将重新加载，请重新检查运行环境并登录。", okText: "重新加载", cancelText: "关闭" });
+            : `${result.warning ? `${result.warning}
+` : ""}应用将重新加载，请重新检查运行环境并登录。`, okText: "重新加载", cancelText: "关闭" });
         window.location.reload();
       };
       const queryRequestId = command === "analyzeQuery" ? crypto.randomUUID() : null;

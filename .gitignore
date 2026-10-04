@@ -31,6 +31,8 @@ orders.sqlite3-*
 chrome_profile_12306/
 railwatch-12306/
 chromedriver.exe
+# macOS downloads the driver without an extension.
+/chromedriver
 assets/fonts/
 assets/images/icon-imagegen.*
 
@@ -38,3 +40,4 @@ assets/images/icon-imagegen.*
 .windsurf/
 .superpowers/brainstorm/
 .cursor/
+.DS_Store

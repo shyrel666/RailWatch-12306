@@ -23,7 +23,7 @@ export function AboutPage() {
   const runtime = useRailWatchStore((state) => state.runtime);
   const { message } = AntApp.useApp();
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
-  const { statusLabel, hasDownloadedUpdate, isUpdating, handlePrimaryAction } = useAppUpdate(runtime.app_version);
+  const { statusLabel, hasDownloadedUpdate, hasManualDownload, isUpdating, handlePrimaryAction } = useAppUpdate(runtime.app_version);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,7 +77,7 @@ export function AboutPage() {
             onClick={() => void handlePrimaryAction()}
             type="primary"
           >
-            {hasDownloadedUpdate ? "立即重启安装" : "检查更新"}
+            {hasDownloadedUpdate ? "立即重启安装" : hasManualDownload ? "前往下载" : "检查更新"}
           </Button>
           <Button icon={<Github size={16} />} onClick={() => void openLink(REPO_URL)}>
             GitHub 仓库

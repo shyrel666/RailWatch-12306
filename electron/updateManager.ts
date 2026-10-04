@@ -10,9 +10,13 @@ export type UpdatePhase =
   | "not-available"
   | "error";
 
+/** auto: download and install in the app; manual: only check and open the release page. */
+export type UpdateInstallMode = "auto" | "manual";
+
 export type UpdateRuntimeState = {
   phase: UpdatePhase;
   currentVersion: string;
+  installMode: UpdateInstallMode;
   latestVersion?: string;
   releaseNotes?: string;
   downloadPercent?: number;
@@ -38,6 +42,8 @@ type UpdateManagerOptions = {
   currentVersion: string;
   updater: UpdaterLike;
   enabled: boolean;
+  installMode?: UpdateInstallMode;
+  releaseUrlFor?: (version: string) => string;
   onStateChange?: (state: UpdateRuntimeState) => void;
   onUpdateDownloaded?: (info: UpdaterInfo) => void;
 };
@@ -57,7 +63,7 @@ export function shouldEnableAutoUpdate(env: AutoUpdateEnvironment): boolean {
   return true;
 }
 
-export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: UpdaterInfo, hasUpdate: boolean): UpdateCheckSuccess {
+export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: UpdaterInfo, hasUpdate: boolean, releaseUrl = ""): UpdateCheckSuccess {
   const latestVersion = info.version;
   return {
     ok: true,
@@ -67,10 +73,21 @@ export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: Update
     releaseName: info.releaseName || latestVersion,
     releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
     publishedAt: info.releaseDate || "",
-    releaseUrl: "",
+    releaseUrl,
     assets: [],
     source: "updater",
   };
+}
+
+export const CHANNEL_FILE_MISSING_MESSAGE = "最新版本暂未提供本平台安装包，请稍后再检查。";
+
+/** The latest release lacks this platform's metadata (e.g. a single-platform release). */
+function isChannelFileMissing(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND";
+}
+
+function failureCode(error: unknown): UpdateCheckFailure["code"] {
+  return isChannelFileMissing(error) ? "no-assets" : "network";
 }
 
 function buildFailure(currentVersion: string, error: string, code: UpdateCheckFailure["code"] = "unknown"): UpdateCheckFailure {
@@ -78,6 +95,9 @@ function buildFailure(currentVersion: string, error: string, code: UpdateCheckFa
 }
 
 function formatUpdateError(error: unknown): string {
+  if (isChannelFileMissing(error)) {
+    return CHANNEL_FILE_MISSING_MESSAGE;
+  }
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   if (!message) {
     return "检查更新失败。";
@@ -89,12 +109,13 @@ function formatUpdateError(error: unknown): string {
 }
 
 export function createUpdateManager(options: UpdateManagerOptions) {
-  const { currentVersion, updater, enabled, onStateChange, onUpdateDownloaded } = options;
-  let state: UpdateRuntimeState = { phase: "idle", currentVersion };
+  const { currentVersion, updater, enabled, onStateChange, onUpdateDownloaded, installMode = "auto", releaseUrlFor } = options;
+  let state: UpdateRuntimeState = { phase: "idle", currentVersion, installMode };
   let installation: Promise<boolean> | null = null;
+  const releaseUrl = (version: string) => releaseUrlFor?.(version) ?? "";
 
-  const publish = (next: UpdateRuntimeState) => {
-    state = next;
+  const publish = (next: Omit<UpdateRuntimeState, "installMode">) => {
+    state = { ...next, installMode };
     onStateChange?.(state);
   };
 
@@ -108,7 +129,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       currentVersion,
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
-      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true),
+      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true, releaseUrl(info.version)),
     });
   });
 
@@ -147,7 +168,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
       downloadPercent: 100,
-      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true),
+      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true, releaseUrl(info.version)),
     });
     onUpdateDownloaded?.(info);
   });
@@ -158,7 +179,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       ...state,
       phase: "error",
       error: message,
-      result: buildFailure(currentVersion, message, "network"),
+      result: buildFailure(currentVersion, message, failureCode(error)),
     });
   });
 
@@ -180,7 +201,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
         const failure = buildFailure(
           currentVersion,
           formatUpdateError(error),
-          "network",
+          failureCode(error),
         );
         publish({ ...state, phase: "error", error: failure.error, result: failure });
         return failure;
@@ -194,7 +215,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
         return mapUpdateInfoToCheckSuccess(currentVersion, {
           version: state.latestVersion,
           releaseNotes: state.releaseNotes,
-        }, true);
+        }, true, releaseUrl(state.latestVersion));
       }
 
       if (state.phase === "not-available" && state.latestVersion) {

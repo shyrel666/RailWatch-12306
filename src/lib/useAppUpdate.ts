@@ -2,11 +2,21 @@ import { useCallback, useEffect, useState } from "react";
 import { railwatchApi } from "./railwatchApi";
 import type { UpdateRuntimeState } from "../types";
 
+function manualReleaseUrl(state: UpdateRuntimeState): string {
+  if (state.installMode !== "manual" || !state.result?.ok || !state.result.hasUpdate) return "";
+  return state.result.releaseUrl;
+}
+
 export function getUpdateStatusLabel(state: UpdateRuntimeState): string {
   switch (state.phase) {
     case "checking":
       return "正在检查更新...";
     case "available":
+      if (state.installMode === "manual") {
+        return state.latestVersion
+          ? `发现新版本 ${state.latestVersion}，请前往发布页下载 macOS 安装包`
+          : "发现新版本，请前往发布页下载 macOS 安装包";
+      }
       return state.latestVersion ? `发现新版本 ${state.latestVersion}，正在准备下载...` : "发现新版本，正在准备下载...";
     case "downloading":
       return state.downloadPercent != null
@@ -105,19 +115,27 @@ export function useAppUpdate(currentVersion: string) {
   const isUpdating = checking || updateState.phase === "checking" || updateState.phase === "downloading";
   const hasPendingUpdate =
     hasDownloadedUpdate || updateState.phase === "available" || updateState.phase === "downloading";
+  const downloadPageUrl = updateState.phase === "available" ? manualReleaseUrl(updateState) : "";
+  const hasManualDownload = Boolean(downloadPageUrl);
 
   const handlePrimaryAction = useCallback(async () => {
     if (hasDownloadedUpdate) {
       await handleInstallUpdate();
       return;
     }
+    if (downloadPageUrl) {
+      const result = await railwatchApi.openExternal(downloadPageUrl);
+      if (!result.ok) setUpdateState((current) => ({ ...current, error: result.error || "无法打开发布页。" }));
+      return;
+    }
     await handleCheckUpdate();
-  }, [hasDownloadedUpdate, handleCheckUpdate, handleInstallUpdate]);
+  }, [hasDownloadedUpdate, downloadPageUrl, handleCheckUpdate, handleInstallUpdate]);
 
   return {
     updateState,
     statusLabel: getUpdateStatusLabel(updateState),
     hasDownloadedUpdate,
+    hasManualDownload,
     hasPendingUpdate,
     isUpdating,
     handleCheckUpdate,

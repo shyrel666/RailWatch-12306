@@ -1,4 +1,4 @@
-import { BrowserWindow, Notification, ipcMain, shell } from "electron";
+import { BrowserWindow, Notification, app, ipcMain, shell } from "electron";
 
 type UrgentAlertPayload = {
   title: string;
@@ -129,6 +129,8 @@ export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: Urgen
     mainWindow.show();
     mainWindow.focus();
     mainWindow.flashFrame(true);
+    // flashFrame has no effect on macOS; bounce the Dock icon until focused.
+    if (process.platform === "darwin") app.dock?.bounce("critical");
     mainWindow.setAlwaysOnTop(true, "screen-saver");
     if (alwaysOnTopTimer) {
       clearTimeout(alwaysOnTopTimer);

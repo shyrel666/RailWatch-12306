@@ -74,6 +74,25 @@ describe("AboutPage", () => {
     expect(openExternal).toHaveBeenCalledWith(`${REPO_URL}/releases`);
   });
 
+  test("macOS manual updates open the release page from the primary button", async () => {
+    vi.spyOn(railwatchApi, "getAppInfo").mockRejectedValue(new Error("no bridge"));
+    vi.spyOn(railwatchApi, "onUpdateState").mockReturnValue(() => undefined);
+    const releaseUrl = `${REPO_URL}/releases/tag/v0.4.0`;
+    vi.spyOn(railwatchApi, "getUpdateState").mockResolvedValue({
+      phase: "available", currentVersion: "0.3.2", latestVersion: "0.4.0", installMode: "manual",
+      result: { ok: true, currentVersion: "0.3.2", latestVersion: "0.4.0", hasUpdate: true, releaseName: "0.4.0",
+        releaseNotes: "", publishedAt: "", releaseUrl, assets: [], source: "updater" },
+    });
+    const openExternal = vi.spyOn(railwatchApi, "openExternal").mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: /前往下载/ }));
+    expect(openExternal).toHaveBeenCalledWith(releaseUrl);
+    expect(screen.getByText("发现新版本 0.4.0，请前往发布页下载 macOS 安装包")).toBeTruthy();
+  });
+
   test("reports a blocked link instead of failing silently", async () => {
     vi.spyOn(railwatchApi, "getAppInfo").mockRejectedValue(new Error("no bridge"));
     vi.spyOn(railwatchApi, "openExternal").mockResolvedValue({ ok: false, error: "blocked" });

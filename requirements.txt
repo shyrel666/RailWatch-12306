@@ -6,8 +6,11 @@ selenium==4.44.0
 # ChromeDriver auto-download
 requests==2.33.1
 
-# Voice notification (optional, cross-platform)
-pyttsx3>=2.90
+# Voice notification (optional, Windows only: on macOS it pulls in a large pyobjc)
+pyttsx3>=2.90;sys_platform=='win32'
 
 # Windows voice API (optional, Windows only)
 pywin32>=300;sys_platform=='win32'
+
+# macOS keychain storage for notification secrets
+keyring>=25;sys_platform=='darwin'

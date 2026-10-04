@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, powerMonitor, powerSaveBlocker, shell } from "electron";
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, powerMonitor, powerSaveBlocker, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { RailWatchNsisUpdater } from "./nsisUpdater";
 import path from "node:path";
@@ -20,8 +20,10 @@ import { RailWatchPythonRuntimeClient, RuntimeEvent } from "./pythonRuntime";
 import {
   createUpdateManager,
   shouldEnableAutoUpdate,
+  type UpdateInstallMode,
   type UpdateManager,
 } from "./updateManager";
+import { releaseTagUrl } from "./updateChecker";
 
 let mainWindow: BrowserWindow | null = null;
 let updateManager: UpdateManager | null = null;
@@ -144,10 +146,17 @@ function updateTray(): void {
   ]));
 }
 
+/** macOS nativeImage cannot read .ico files. */
+function appIconPath(): string {
+  return path.join(__dirname, "..", "assets", "images", process.platform === "win32" ? "icon.ico" : "icon.png");
+}
+
 function ensureTray(): boolean {
   if (tray) return true;
   try {
-    tray = new Tray(path.join(__dirname, "..", "assets", "images", "icon.ico"));
+    tray = new Tray(process.platform === "darwin"
+      ? nativeImage.createFromPath(appIconPath()).resize({ width: 18, height: 18 })
+      : appIconPath());
     tray.on("double-click", showWindow);
     tray.on("click", showWindow);
     updateTray();
@@ -240,14 +249,20 @@ function initializeAutoUpdater(): void {
     devServerUrl: process.env.VITE_DEV_SERVER_URL,
   });
 
+  // Squirrel.Mac rejects updates for unsigned builds, so macOS only checks and
+  // sends users to the release page. Signed auto-install (railwatchMacUpdateMode
+  // = auto) needs its own staging-aware updater and is not enabled yet.
+  const installMode: UpdateInstallMode = process.platform === "darwin" ? "manual" : "auto";
   const updater = process.platform === "win32" ? new RailWatchNsisUpdater() : autoUpdater;
-  updater.autoDownload = true;
+  updater.autoDownload = installMode === "auto";
   updater.autoInstallOnAppQuit = false;
 
   updateManager = createUpdateManager({
     currentVersion: app.getVersion(),
     updater,
     enabled,
+    installMode,
+    releaseUrlFor: releaseTagUrl,
     onStateChange: () => broadcastUpdateState(),
   });
 
@@ -258,15 +273,21 @@ function initializeAutoUpdater(): void {
 
 function createWindow(): void {
   rendererCrashed = false;
-  app.setAppUserModelId("org.railwatch.railwatch12306");
-  Menu.setApplicationMenu(null);
+  if (process.platform === "win32") app.setAppUserModelId("org.railwatch.railwatch12306");
+  if (process.platform === "darwin") {
+    // Copy, paste, select-all and Cmd+Q only work through the application menu.
+    // No view menu: Cmd+R would reload the renderer away from runtime state.
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }]));
+  } else {
+    Menu.setApplicationMenu(null);
+  }
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1180,
     minHeight: 720,
     title: "RailWatch 12306",
-    icon: path.join(__dirname, "..", "assets", "images", "icon.ico"),
+    icon: appIconPath(),
     backgroundColor: "#0d1117",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),

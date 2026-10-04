@@ -167,6 +167,46 @@ describe("Python runtime lifecycle", () => {
     await expect(client.request("loadConfig")).rejects.toThrow("shutting down");
   });
 
+  test("non-Windows runtimes get their own process group and a forced exit kills the whole group", async () => {
+    const kill = vi.fn();
+    vi.stubGlobal("process", Object.create(process, { platform: { value: "darwin" }, kill: { value: kill } }));
+    const first = Object.assign(child(), { pid: 4321 });
+    spawn.mockReturnValue(first);
+    client.start();
+    expect(spawn.mock.calls[0][2]).toMatchObject({ detached: true });
+    await client.forceStop();
+    expect(kill).toHaveBeenCalledWith(-4321, "SIGKILL");
+    expect(first.kill).not.toHaveBeenCalled();
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  test("a failed process-group kill still terminates the runtime itself", async () => {
+    const kill = vi.fn(() => { throw new Error("ESRCH"); });
+    vi.stubGlobal("process", Object.create(process, { platform: { value: "darwin" }, kill: { value: kill } }));
+    const first = Object.assign(child(), { pid: 4321 });
+    spawn.mockReturnValue(first);
+    client.start();
+    await client.forceStop();
+    expect(first.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  test("Windows keeps the runtime attached to the app process", () => {
+    vi.stubGlobal("process", Object.create(process, { platform: { value: "win32" } }));
+    spawn.mockReturnValue(child());
+    client.start();
+    expect(spawn.mock.calls[0][2]).toMatchObject({ detached: false });
+  });
+
+  test("a missing packaged runtime is reported as unavailable without spawning", async () => {
+    const missing = new RailWatchPythonRuntimeClient({ executable: "/missing/railwatch_runtime", args: [], cwd: "/missing",
+      missing: "运行时文件缺失，请重新安装 RailWatch 12306。" });
+    const unavailable = vi.fn();
+    missing.on("unavailable", unavailable);
+    await expect(missing.request("getRuntimeInfo")).rejects.toThrow("运行时文件缺失");
+    expect(unavailable).toHaveBeenCalledOnce();
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   test("non-Windows force exit kills the owned runtime without a Windows utility", async () => {
     vi.stubGlobal("process", Object.create(process, { platform: { value: "linux" } }));
     const first = child();

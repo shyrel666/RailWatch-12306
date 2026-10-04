@@ -4,10 +4,11 @@ RailWatch 12306 is designed as a local desktop application. It opens official 12
 
 ## Local Data
 
-On Windows, runtime data is stored under:
+Runtime data is stored under:
 
 ```text
-%LOCALAPPDATA%\railwatch-12306
+Windows: %LOCALAPPDATA%\railwatch-12306
+macOS:   ~/Library/Application Support/railwatch-12306
 ```
 
 Typical files include:
@@ -16,7 +17,7 @@ Typical files include:
 - `trip_draft.json`: recoverable trip edits, which can include passenger names
 - `trip_choices.json`: recent station pairs and route-specific train favorites
 - `ui_preferences.json`: Electron UI preferences such as theme
-- `notification_settings.json`: notification channel settings; Windows secrets use the current user's DPAPI protection
+- `notification_settings.json`: notification channel settings; Windows secrets use the current user's DPAPI protection, while macOS keeps them in one login-keychain item (`org.railwatch.railwatch12306` / `notification-secrets`) and the file only records which fields are set. Clearing local data also deletes that keychain item.
 - `orders.sqlite3`: order intents, status evidence and event history, which can include passenger names and trip details
 - `railwatch.log`: application events
 - `chrome_profile_12306/`: Chrome cookies, session storage and cache

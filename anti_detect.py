@@ -389,7 +389,7 @@ class AntiDetect:
         driver = None
         
         # 本地 chromedriver 路径
-        local_chromedriver = self.driver_path if self.driver_path and os.path.exists(self.driver_path) else os.path.join(self.base_dir, 'chromedriver.exe')
+        local_chromedriver = self.driver_path if self.driver_path and os.path.exists(self.driver_path) else os.path.join(self.base_dir, 'chromedriver.exe' if platform.system() == 'Windows' else 'chromedriver')
         
         # 尝试使用 undetected-chromedriver
         try:

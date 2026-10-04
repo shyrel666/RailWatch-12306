@@ -1,11 +1,13 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, test, vi } from "vitest";
 import {
+  CHANNEL_FILE_MISSING_MESSAGE,
   createUpdateManager,
   mapUpdateInfoToCheckSuccess,
   shouldEnableAutoUpdate,
   type UpdaterLike,
 } from "../updateManager";
+import { releaseTagUrl } from "../updateChecker";
 
 function createMockUpdater(): UpdaterLike & EventEmitter {
   const emitter = new EventEmitter();
@@ -172,6 +174,44 @@ describe("updateManager", () => {
     updater.launchInstaller = vi.fn(async () => undefined);
     updater.emit("update-downloaded", { version: "1.2.0" });
     expect(await manager.installUpdate()).toBe(true);
+  });
+
+  test("manual mode keeps its install mode through every transition and links the release page", async () => {
+    const updater = createMockUpdater();
+    const states: string[] = [];
+    const manager = createUpdateManager({
+      currentVersion: "0.6.0", updater, enabled: true, installMode: "manual", releaseUrlFor: releaseTagUrl,
+      onStateChange: (state) => states.push(state.installMode),
+    });
+    expect(manager.getState().installMode).toBe("manual");
+    await manager.checkForUpdates();
+    updater.emit("update-available", { version: "0.6.1" });
+    updater.emit("error", new Error("offline"));
+    updater.emit("update-not-available", { version: "0.6.1" });
+    expect(states.length).toBeGreaterThan(3);
+    expect(new Set(states)).toEqual(new Set(["manual"]));
+    updater.emit("update-available", { version: "0.6.1" });
+    const result = manager.getState().result;
+    expect(result?.ok && result.releaseUrl).toBe("https://github.com/shyrel666/RailWatch-12306/releases/tag/v0.6.1");
+  });
+
+  test("the default install mode is auto", () => {
+    expect(createUpdateManager({ currentVersion: "0.6.0", updater: createMockUpdater(), enabled: true }).getState().installMode).toBe("auto");
+  });
+
+  test("a release without this platform's metadata is not reported as an unreachable source", async () => {
+    const updater = createMockUpdater();
+    const missing = Object.assign(new Error("Cannot find latest-mac.yml in the latest release artifacts (https://github.com/x/y/releases/download/v0.6.1/latest-mac.yml): 404"),
+      { code: "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" });
+    updater.checkForUpdates = vi.fn(async () => {
+      updater.emit("error", missing);
+      throw missing;
+    });
+    const manager = createUpdateManager({ currentVersion: "0.6.0", updater, enabled: true, installMode: "manual" });
+    const result = await manager.checkForUpdates();
+    expect(result).toMatchObject({ ok: false, code: "no-assets", error: CHANNEL_FILE_MISSING_MESSAGE });
+    expect(manager.getState().error).toBe(CHANNEL_FILE_MISSING_MESSAGE);
+    expect(updater.checkForUpdates).toHaveBeenCalledOnce();
   });
 
   test("an updater without acknowledged installation never invokes quitAndInstall", async () => {

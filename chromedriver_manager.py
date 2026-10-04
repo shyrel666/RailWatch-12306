@@ -149,6 +149,8 @@ def _read_exe_version(path: str) -> Optional[str]:
 def _detect_chrome_macos() -> Optional[str]:
     paths = [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        # Users without admin rights install Chrome into their own Applications folder.
+        os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ]
     for p in paths:

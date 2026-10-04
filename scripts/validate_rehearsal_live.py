@@ -6,7 +6,6 @@ The caller must leave the desktop idle for the duration of this diagnostic.
 """
 import argparse
 import json
-import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -17,7 +16,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from railwatch_bridge import RailWatchBridge, CHROMEDRIVER_PATH
+from railwatch_bridge import RailWatchBridge, CHROMEDRIVER_PATH, get_data_path
 from railwatch_config_contract import validate_config, parse_passenger_names
 
 
@@ -25,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int)
     args = parser.parse_args()
-    directory = Path(os.environ["LOCALAPPDATA"]) / "railwatch-12306"
+    directory = Path(get_data_path())
     config = validate_config(json.loads((directory / "user_config.json").read_text(encoding="utf-8")))
     def counts():
         with sqlite3.connect((directory / "orders.sqlite3").as_uri() + "?mode=ro", uri=True) as db:

@@ -35,14 +35,20 @@ from railwatch_config_contract import (
 )
 from railwatch_notify import NotificationService
 from railwatch_preferences import (
+    KEYCHAIN_SECRET_PREFIX,
+    LOCAL_SECRET_PREFIX,
     PREFERENCES_LOCK,
+    MacSecretStore,
     atomic_write_json,
+    keychain_access_denied,
+    keychain_marker,
     load_ui_preferences,
     load_trip_draft,
     protect_local_secret,
     save_ui_preferences,
     save_trip_draft,
     unprotect_local_secret,
+    uses_system_keychain,
 )
 from railwatch_trip_choices import load_trip_choices, remember_route, save_train_favorites
 from railwatch_seats import public_seat_capabilities, validate_automation_seats
@@ -119,13 +125,20 @@ MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
 MONITOR_PREWARM_INTERVAL_SECONDS = 30.0
 NOTIFICATION_SETTINGS_FILE = "notification_settings.json"
 NOTIFICATION_SECRET_FIELDS = ("server_chan_key", "email_password", "wecom_webhook_url")
+NOTIFICATION_CHANNELS = ("server_chan", "email", "wecom_webhook")
+KEYCHAIN_PENDING_HINT = "外部通知凭据尚未授权，命中时无法发送外部提醒；请在系统钥匙串授权弹窗中选择“始终允许”。"
+KEYCHAIN_BUSY_MESSAGE = "macOS 钥匙串授权尚未完成，请先处理系统授权弹窗后重试。"
+CHROMEDRIVER_NAME = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
 
 
-def public_notification_settings(settings: dict) -> dict:
-    """Return editable notification settings without crossing secret boundaries."""
+def public_notification_settings(settings: dict, pending=()) -> dict:
+    """Return editable notification settings without crossing secret boundaries.
+
+    ``pending`` names secrets that are stored but not read from the keychain yet.
+    """
     public = merge_notification_settings(settings)
     for field in NOTIFICATION_SECRET_FIELDS:
-        public[f"{field}_configured"] = bool(public.get(field))
+        public[f"{field}_configured"] = bool(public.get(field)) or field in pending
         public[field] = ""
     return public
 
@@ -169,8 +182,8 @@ def get_data_path(filename: str = "") -> str:
 
 
 DATA_DIR = get_data_path()
-PACKAGED_CHROMEDRIVER_PATH = get_resource_path("chromedriver.exe")
-DEFAULT_CHROMEDRIVER_PATH = get_data_path("chromedriver.exe")
+PACKAGED_CHROMEDRIVER_PATH = get_resource_path(CHROMEDRIVER_NAME)
+DEFAULT_CHROMEDRIVER_PATH = get_data_path(CHROMEDRIVER_NAME)
 CHROMEDRIVER_PATH = DEFAULT_CHROMEDRIVER_PATH if os.path.exists(DEFAULT_CHROMEDRIVER_PATH) else PACKAGED_CHROMEDRIVER_PATH
 
 
@@ -239,7 +252,8 @@ def idle_browser_command(method):
 class RailWatchBridge:
     """Wraps existing RailWatch core behavior behind a frontend-neutral API."""
 
-    def __init__(self, data_dir: str = DATA_DIR, event_callback: Optional[Callable[[dict], None]] = None):
+    def __init__(self, data_dir: str = DATA_DIR, event_callback: Optional[Callable[[dict], None]] = None,
+                 secret_store: Optional[MacSecretStore] = None):
         self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
         self.event_callback = event_callback or (lambda event: None)
@@ -259,6 +273,14 @@ class RailWatchBridge:
         self.log_entries: List[Dict[str, str]] = []
         self._log_lock = threading.RLock()
         self._settings_lock = PREFERENCES_LOCK
+        # macOS keeps notification secrets in one keychain item. Reading it may
+        # wait for the user's authorization, so it never runs during startup.
+        self._secret_store = secret_store if secret_store is not None else (
+            MacSecretStore() if uses_system_keychain() else None)
+        self._keychain_pending: frozenset = frozenset()
+        self._keychain_migration: Dict[str, str] = {}
+        self._keychain_written: Optional[Dict[str, str]] = None
+        self._keychain_generation = 0
         self.query_results: List[dict] = []
         self._station_resolver = None
         self._station_resolver_lock = threading.Lock()
@@ -282,6 +304,7 @@ class RailWatchBridge:
         self._param_filler: Optional[Callable[[str, str, str], bool]] = None
         self._keep_alive_last_state: Optional[str] = None
         self._keep_alive_unknown_count = 0
+        self._start_keychain_preload()
 
     @property
     def is_monitoring(self):
@@ -481,7 +504,7 @@ class RailWatchBridge:
             "automation_route": AUTOMATION_ROUTE,
             "server_time_offset_seconds": round(self.server_time_sync.offset_seconds, 3),
             "server_time_last_error": self.server_time_sync.last_error,
-            "notification_settings": public_notification_settings(self.notification_service.settings),
+            "notification_settings": public_notification_settings(self.notification_service.settings, self._keychain_pending),
             "date_policy": {"presale_window_days": PRESALE_WINDOW_DAYS, "timezone": "Asia/Shanghai"},
             "seat_capabilities": public_seat_capabilities(),
             "state": state_to_payload(self.state),
@@ -970,6 +993,8 @@ class RailWatchBridge:
         confirmation = self._automation_confirmation(config)
         if confirmation and not confirmed:
             return confirmation
+        if self.notification_credentials_pending:
+            self.log(KEYCHAIN_PENDING_HINT, "WARN")
         with self._task_lock:
             if self._admission_closed or self.is_monitoring or self._browser_busy:
                 raise RuntimeError("监控运行中或正在停止，请等待当前任务退出。")
@@ -1324,6 +1349,7 @@ class RailWatchBridge:
             self.order_journal = journal
             self.notification_service = NotificationService(log_callback=self.log)
             self.config_manager = ConfigManager(self.data_dir) if CORE_AVAILABLE and ConfigManager else None
+        keychain_warning = self._clear_keychain_secrets()
         self._task = None
         self._last_rehearsal_at = float("-inf")
         self._param_filler = None
@@ -1332,7 +1358,7 @@ class RailWatchBridge:
         self.behavior_simulator = None
         self.device_id_protector = None
         self._chromedriver_repair_failed = False
-        self.chromedriver_path = PACKAGED_CHROMEDRIVER_PATH if os.path.exists(PACKAGED_CHROMEDRIVER_PATH) else str(target / "chromedriver.exe")
+        self.chromedriver_path = PACKAGED_CHROMEDRIVER_PATH if os.path.exists(PACKAGED_CHROMEDRIVER_PATH) else str(target / CHROMEDRIVER_NAME)
         self._keep_alive_last_state = None
         self._keep_alive_unknown_count = 0
         self.query_results = []
@@ -1340,9 +1366,10 @@ class RailWatchBridge:
         self.clear_log()
         self.emit("results", {"rows": []})
         self.emit_state()
-        warning = ("配置与运行状态已重置，但部分旧文件仍被占用，尚未彻底清除。关闭相关程序后再次点击清除数据可重试。"
-                   if remaining else "")
-        self.log(warning or "本地 RailWatch 数据已清除，请重新检查环境并登录。", "WARN" if remaining else "SUCCESS")
+        warning = " ".join(filter(None, [
+            "配置与运行状态已重置，但部分旧文件仍被占用，尚未彻底清除。关闭相关程序后再次点击清除数据可重试。" if remaining else "",
+            keychain_warning]))
+        self.log(warning or "本地 RailWatch 数据已清除，请重新检查环境并登录。", "WARN" if warning else "SUCCESS")
         return {"cleared": True, "data_dir": str(target), "cleanup_pending": bool(remaining),
                 "remaining_paths": remaining, "warning": warning}
 
@@ -1377,7 +1404,7 @@ class RailWatchBridge:
         with self._settings_lock:
             return {
                 **load_ui_preferences(self.data_dir),
-                "notification_settings": public_notification_settings(self.notification_service.settings),
+                "notification_settings": public_notification_settings(self.notification_service.settings, self._keychain_pending),
             }
 
     def save_preferences(self, theme: Optional[str] = None, notification_settings: Optional[dict] = None,
@@ -1401,6 +1428,8 @@ class RailWatchBridge:
         # section, not just os.replace. Concurrent partial updates then compose.
         with self._settings_lock:
             if notification_settings:
+                if self._keychain_pending or self._keychain_migration:
+                    raise RuntimeError(KEYCHAIN_BUSY_MESSAGE)
                 incoming = validate_notification_patch(notification_settings)
                 current = self.notification_service.settings
                 if "event_channels" in incoming:
@@ -1448,12 +1477,14 @@ class RailWatchBridge:
                 with open(path, "r", encoding="utf-8") as handle:
                     payload = json.load(handle)
                 payload = payload if isinstance(payload, dict) else {}
+                if self._secret_store is not None:
+                    return self._load_keychain_backed_settings(payload)
                 legacy_plaintext = os.name == "nt" and any(
-                    payload.get(field) and not str(payload[field]).startswith("dpapi:")
+                    payload.get(field) and not str(payload[field]).startswith(LOCAL_SECRET_PREFIX)
                     for field in NOTIFICATION_SECRET_FIELDS
                 )
                 for field in NOTIFICATION_SECRET_FIELDS:
-                    payload[field] = unprotect_local_secret(payload.get(field, ""))
+                    payload[field] = unprotect_local_secret(payload.get(field, ""), field)
                 settings = merge_notification_settings(payload)
                 if legacy_plaintext:
                     self._save_notification_settings(settings)
@@ -1463,12 +1494,129 @@ class RailWatchBridge:
             return merge_notification_settings()
 
     def _save_notification_settings(self, settings: dict) -> None:
-        path = self._notification_settings_path()
+        secrets = {field: str(settings.get(field) or "") for field in NOTIFICATION_SECRET_FIELDS}
+        with self._settings_lock:
+            # Commit the keychain first so a refused write leaves the file untouched.
+            if self._secret_store is not None:
+                self._write_keychain_secrets(secrets)
+            self._persist_notification_file(settings)
+
+    def _persist_notification_file(self, settings: dict) -> None:
         persisted = merge_notification_settings(settings)
         for field in NOTIFICATION_SECRET_FIELDS:
-            persisted[field] = protect_local_secret(persisted.get(field, ""))
+            persisted[field] = protect_local_secret(persisted.get(field, ""), field)
         with self._settings_lock:
-            atomic_write_json(path, persisted)
+            atomic_write_json(self._notification_settings_path(), persisted)
+
+    @property
+    def notification_credentials_pending(self) -> bool:
+        return bool(self._keychain_pending)
+
+    def _load_keychain_backed_settings(self, payload: dict) -> dict:
+        """Read non-secret settings only; keychain secrets load in the background."""
+        pending, legacy = set(), {}
+        for field in NOTIFICATION_SECRET_FIELDS:
+            value = str(payload.get(field) or "")
+            if value.startswith(KEYCHAIN_SECRET_PREFIX):
+                if value != keychain_marker(field):
+                    raise ValueError("通知凭据的钥匙串标记无效。")
+                pending.add(field)
+                payload[field] = ""
+            elif value.startswith(LOCAL_SECRET_PREFIX):
+                unprotect_local_secret(value, field)  # Raises: a Windows blob cannot be read here.
+            elif value:
+                legacy[field] = value  # Plaintext from an older build: usable now, migrated later.
+        self._keychain_pending = frozenset(pending)
+        self._keychain_migration = legacy
+        return merge_notification_settings(payload)
+
+    def _start_keychain_preload(self) -> None:
+        if self._secret_store is None or not (self._keychain_pending or self._keychain_migration):
+            return
+        generation = self._keychain_generation
+        threading.Thread(target=self._preload_keychain_secrets, args=(generation,),
+                         name="railwatch-keychain", daemon=True).start()
+
+    def _preload_keychain_secrets(self, generation: int) -> None:
+        """Read (and migrate) keychain secrets while commands keep running.
+
+        An authorization prompt may block here indefinitely; there is no
+        deadline, so a slow answer is never mistaken for a refusal.
+        """
+        pending, legacy = self._keychain_pending, dict(self._keychain_migration)
+        try:
+            stored = (self._secret_store.read_all() or {}) if pending else {}
+            values = {field: stored[field] for field in pending if stored.get(field)}
+            missing = sorted(pending - set(values))
+            if legacy and not missing:
+                self._secret_store.write_all({**values, **legacy})
+        except Exception as exc:
+            denied = keychain_access_denied(exc)
+            self._finish_keychain_preload(generation, {}, "denied" if denied else "error",
+                                          f"钥匙串访问{'被拒绝' if denied else '失败'}：{exc}")
+            return
+        if missing:
+            self._finish_keychain_preload(generation, values, "missing", f"钥匙串中缺少通知凭据：{', '.join(missing)}")
+        else:
+            self._finish_keychain_preload(generation, values, "ready", "")
+
+    def _finish_keychain_preload(self, generation: int, values: dict, status: str, reason: str) -> None:
+        with self._settings_lock:
+            if generation != self._keychain_generation:
+                return  # Local data was cleared while the keychain was answering.
+            settings = dict(self.notification_service.settings)
+            for field in self._keychain_pending:
+                settings[field] = values.get(field, "")
+            migrated = bool(self._keychain_migration) and status == "ready"
+            if status == "ready":
+                self._keychain_written = {field: str(settings[field]) for field in NOTIFICATION_SECRET_FIELDS
+                                          if settings.get(field)}
+            else:
+                for channel in NOTIFICATION_CHANNELS:
+                    settings[f"{channel}_enabled"] = False
+            self._keychain_pending = frozenset()
+            self._keychain_migration = {}
+            if migrated:
+                try:
+                    self._persist_notification_file(settings)
+                except OSError as exc:
+                    self.log(f"通知凭据已写入钥匙串，但设置文件未能更新：{exc}", "WARN")
+            self.notification_service.update_settings(settings)
+        if status == "ready":
+            self.log("旧版明文通知凭据已迁移到系统钥匙串。" if migrated else "已从系统钥匙串读取通知凭据。", "INFO")
+        else:
+            self.log(f"通知设置无法读取，已禁用外部通知通道: {reason}", "WARN")
+        self.emit("notificationCredentials", {"status": status, "message": reason})
+
+    def _write_keychain_secrets(self, secrets: Dict[str, str]) -> None:
+        stored = {field: value for field, value in secrets.items() if value}
+        if stored == self._keychain_written:
+            return
+        try:
+            self._secret_store.write_all(stored)
+        except Exception as exc:
+            raise RuntimeError(f"macOS 钥匙串写入失败，通知凭据未保存：{exc}") from exc
+        self._keychain_written = stored
+
+    def _clear_keychain_secrets(self) -> str:
+        """Delete the keychain item after local data is cleared; return a warning, if any."""
+        if self._secret_store is None:
+            return ""
+        with self._settings_lock:
+            busy = bool(self._keychain_pending or self._keychain_migration)
+            self._keychain_generation += 1
+            self._keychain_pending = frozenset()
+            self._keychain_migration = {}
+            self._keychain_written = None
+        if busy:
+            # Deleting now could raise a second authorization prompt on the command path.
+            return "钥匙串授权尚未完成，系统钥匙串中的通知凭据尚未删除；处理授权弹窗后可再次清除本地数据。"
+        try:
+            self._secret_store.delete()
+        except Exception as exc:
+            return f"系统钥匙串中的通知凭据未能删除：{exc}"
+        self._keychain_written = {}
+        return ""
 
     def _monitor_worker(self, config: dict, task=None) -> None:
         task = task or self._task or MonitorTask(config)

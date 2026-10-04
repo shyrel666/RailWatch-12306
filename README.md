@@ -27,9 +27,30 @@
 
 ## 下载安装
 
-前往 [GitHub Releases](https://github.com/shyrel666/RailWatch-12306/releases)，下载 `RailWatch-12306-<版本>-x64.exe` 并安装。
+前往 [GitHub Releases](https://github.com/shyrel666/RailWatch-12306/releases) 下载对应平台的安装包。安装包内置 Python 运行时，无需另装 Node.js 或 Python，但需要安装 **Google Chrome**。
 
-需要 **Windows 10/11 + Google Chrome**。安装包内置 Python，无需另装 Node.js 或 Python；macOS / Linux 暂无安装包，尚未完成平台验收。
+| 平台 | 安装包 | 应用内更新 |
+| --- | --- | --- |
+| Windows 10/11 | `RailWatch-12306-<版本>-x64.exe` | 自动下载，点击「立即重启安装」 |
+| macOS 12 及以上（Apple Silicon） | `RailWatch-12306-<版本>-arm64.dmg` | 提示新版本，点击「前往下载」手动安装 |
+| macOS 12 及以上（Intel） | `RailWatch-12306-<版本>-x64.dmg` | 同上 |
+
+Linux 暂无安装包。
+
+### macOS 安装说明
+
+1. **选择芯片版本**：打开「苹果菜单 → 关于本机」，「芯片」显示 Apple M 系列选 `arm64.dmg`，显示 Intel 选 `x64.dmg`。
+2. 打开 DMG，把 RailWatch 12306 拖入「应用程序」文件夹。
+3. **首次打开**：当前 macOS 安装包未经 Apple 公证，系统会提示无法验证开发者。先尝试打开一次，再到「系统设置 → 隐私与安全性」点击「仍要打开」（macOS 15 起右键「打开」已不能绕过）。也可以在终端执行：
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/RailWatch 12306.app"
+   ```
+
+4. **通知凭据与钥匙串**：邮箱授权码、Server 酱 Key 和企业微信 Webhook 保存在系统钥匙串中。手动升级后首次启动可能弹出一次钥匙串授权框（发起程序显示为 `railwatch_runtime`），选择「始终允许」即可；选择拒绝只会停用外部通知，可稍后重新填写。
+5. **升级**：应用发现新版本后点击「前往下载」，下载新的 DMG 覆盖安装，配置和订单记录会保留。
+
+Intel 版依赖 GitHub 提供的 Intel 构建机，GitHub 已公告该构建机支持至 2027 年 8 月，之后 Intel 版的去向会提前在发布说明中公告。
 
 <a id="quick-start"></a>
 
@@ -58,7 +79,12 @@ npm ci
 npm run dev
 ```
 
-构建应用：`npm run build`。打包 Windows 安装程序：先执行 `python -m pip install pyinstaller`，再执行 `npm run package`，产物位于 `release/`。
+构建应用：`npm run build`。打包前先执行 `python -m pip install pyinstaller`：
+
+- Windows 安装程序：`npm run package`，或 `.\package-windows.cmd <版本>`。
+- macOS（在 Mac 上，按本机芯片打包 ad-hoc 签名的 DMG 与 ZIP）：`./package-macos.sh <版本>`，等同于 `npm run package:mac -- --arm64`（或 `--x64`）加上 ad-hoc 签名参数。
+
+产物位于 `release/`。推送 `v*` 标签后，[`package-release.yml`](.github/workflows/package-release.yml) 会构建三个安装包并统一发布到同一个 Release。
 
 ## 更多文档
 

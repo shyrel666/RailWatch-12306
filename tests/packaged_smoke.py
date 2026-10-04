@@ -1,4 +1,9 @@
-"""Smoke the packaged Electron/preload/runtime contract using temporary user data."""
+"""Smoke the packaged Electron/preload/runtime contract using temporary user data.
+
+Usage: python tests/packaged_smoke.py [--exe PATH]
+Windows defaults to release/win-unpacked; macOS needs the app executable, e.g.
+"release/mac-arm64/RailWatch 12306.app/Contents/MacOS/RailWatch 12306".
+"""
 import base64
 import json
 import os
@@ -17,12 +22,38 @@ from railwatch_config_contract import default_config
 from railwatch_orders import OrderIntent, OrderJournal, OrderResult
 
 EXE = ROOT / "release" / "win-unpacked" / "RailWatch 12306.exe"
+IS_WINDOWS = sys.platform == "win32"
+
+
+def isolated_user_data(tmp):
+    """Return (runtime data directory, environment) for a temporary user profile."""
+    if IS_WINDOWS:
+        return Path(tmp) / "railwatch-12306", dict(os.environ, LOCALAPPDATA=tmp, APPDATA=tmp, NODE_OPTIONS="")
+    # The Python runtime resolves ~/Library/Application Support through HOME.
+    return (Path(tmp) / "Library" / "Application Support" / "railwatch-12306",
+            dict(os.environ, HOME=tmp, NODE_OPTIONS=""))
+
+
+def stop(process):
+    if process.poll() is not None:
+        return
+    if IS_WINDOWS:
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True)
+    else:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    process.wait(timeout=10)
 
 
 def main():
     with tempfile.TemporaryDirectory(prefix="railwatch-package-test-") as tmp:
-        data_dir = Path(tmp) / "railwatch-12306"
-        data_dir.mkdir()
+        # macOS temporary folders live under /var, a symlink to /private/var.
+        tmp = os.path.realpath(tmp)
+        data_dir, env = isolated_user_data(tmp)
+        data_dir.mkdir(parents=True)
         old_config = default_config()
         old_config.pop("config_version", None)
         old_config.update({"from_station_cn": "北京", "to_station_cn": "上海", "passengers": "张三"})
@@ -39,15 +70,17 @@ def main():
         with socket.socket() as port_socket:
             port_socket.bind(("127.0.0.1", 0))
             port = port_socket.getsockname()[1]
-        env = dict(os.environ, LOCALAPPDATA=tmp, APPDATA=tmp, NODE_OPTIONS="")
         env.pop("ELECTRON_RUN_AS_NODE", None)
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 0
+        options = {}
+        if IS_WINDOWS:
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = 0
+            options["startupinfo"] = startup
         log_dir = ROOT / "build" / "qa"
         log_dir.mkdir(parents=True, exist_ok=True)
         with open(log_dir / "packaged-smoke.log", "w", encoding="utf-8") as log:
-            process = subprocess.Popen([str(EXE), f"--remote-debugging-port={port}", f"--remote-allow-origins=http://localhost:{port}", f"--user-data-dir={tmp}/electron"], env=env, stdout=log, stderr=log, startupinfo=startup)
+            process = subprocess.Popen([str(EXE), f"--remote-debugging-port={port}", f"--remote-allow-origins=http://localhost:{port}", f"--user-data-dir={tmp}/electron"], env=env, stdout=log, stderr=log, **options)
             ws = None
             try:
                 endpoint = None
@@ -102,7 +135,7 @@ def main():
                 assert runtime["app_version"] == expected_version
                 assert runtime["core_available"] and runtime["date_policy"]["timezone"] == "Asia/Shanghai"
                 assert "task" in runtime["state"]
-                assert runtime["data_dir"].startswith(tmp)
+                assert os.path.realpath(runtime["data_dir"]).startswith(tmp), runtime["data_dir"]
                 assert evaluate("window.railwatch.command('stopMonitor').then(s => s.monitoring)") is False
                 evaluate("[...document.querySelectorAll('.nav-item')].find(b => b.textContent.includes('购票监控')).click()")
                 # Initial trip loading can finish after the direct IPC checks.
@@ -121,12 +154,14 @@ def main():
                 process.wait(timeout=15)
             finally:
                 if ws: ws.close()
-                if process.poll() is None:
-                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True)
-                    process.wait(timeout=10)
+                stop(process)
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--exe":
         EXE = Path(sys.argv[2]).resolve()
+    elif not IS_WINDOWS:
+        raise SystemExit("Pass --exe with the packaged app executable on this platform.")
+    if not EXE.is_file():
+        raise SystemExit(f"Packaged app not found: {EXE}")
     main()

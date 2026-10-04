@@ -1,22 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
 
 # selenium >= 4.44 lazy-loads every browser submodule (chrome.options, edge.service, ...)
 # through module __getattr__, so static import analysis never sees them and the frozen
 # app only fails at runtime when the browser is first launched. Force-collect them.
-hiddenimports = collect_submodules("selenium") + ["win32crypt"]
+hiddenimports = collect_submodules("selenium")
+if IS_WINDOWS:
+    hiddenimports.append("win32crypt")
+if IS_MACOS:
+    # Notification secrets use the macOS keychain backend directly (MacSecretStore).
+    hiddenimports += ["keyring.backends.macOS", "keyring.backends.macOS.api"]
 
 
 # The CLI evaluates this spec before adding its directory to the module search
 # path. Resolve local policy data explicitly so console-script builds include it.
 datas = [(os.path.join(SPECPATH, "railwatch_policies", name), "railwatch_policies")
          for name in ("query_strategies.json", "date_strategies.json", "order_policies.json")]
+# macOS downloads its driver into the data directory on first environment check.
 for optional_file in (
-    "chromedriver.exe",
+    *(("chromedriver.exe",) if IS_WINDOWS else ()),
     "LICENSE.chromedriver",
     "THIRD_PARTY_NOTICES.chromedriver",
 ):
@@ -56,21 +65,50 @@ if missing:
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="railwatch_runtime",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+if IS_MACOS:
+    # onedir: nothing is unpacked on each launch, and every Mach-O stays a separate
+    # file that electron-builder signs inside the .app. UPX would break signatures.
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="railwatch_runtime",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        name="railwatch_runtime",
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="railwatch_runtime",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )

@@ -1,6 +1,6 @@
 {
   "name": "railwatch-12306-electron",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "private": true,
   "license": "MIT",
   "author": "RailWatch 12306 contributors",
@@ -24,6 +24,7 @@
     "build:runtime": "pyinstaller RailWatch_runtime.spec --distpath dist-runtime --workpath build/runtime -y",
     "build": "npm run clean && npm run typecheck && npm run build:electron && npm run build:renderer",
     "package": "npm run build && npm run build:runtime && electron-builder --publish never",
+    "package:mac": "npm run build && npm run build:runtime && electron-builder --mac --publish never",
     "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "test": "npm run test:electron && npm run test:renderer",
     "test:electron": "vitest run --config electron/vitest.config.ts",
@@ -50,6 +51,7 @@
     "cross-env": "^10.1.0",
     "electron": "^39.2.7",
     "electron-builder": "^26.15.0",
+    "js-yaml": "^4.3.2",
     "jsdom": "^29.1.1",
     "typescript": "^5.9.3",
     "vite": "^7.2.6",

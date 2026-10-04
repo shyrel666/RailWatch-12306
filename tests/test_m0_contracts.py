@@ -77,7 +77,7 @@ class PreferencePatchTests(unittest.TestCase):
 
     def test_secret_omission_empty_and_null_have_distinct_semantics(self):
         # Exercise public protocol semantics without a Windows-only dependency.
-        with patch("railwatch_bridge.protect_local_secret", side_effect=lambda value: "protected" if value else ""):
+        with patch("railwatch_bridge.protect_local_secret", side_effect=lambda value, slot="": "protected" if value else ""):
             result = self.request({"notification_settings": {"email_password": "private-password"}})
             self.assertEqual(result["notification_settings"]["email_password"], "")
             self.assertTrue(result["notification_settings"]["email_password_configured"])

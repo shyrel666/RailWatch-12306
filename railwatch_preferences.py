@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
-from typing import Literal
+from typing import Dict, Literal, Mapping, Optional
 
 from railwatch_config_contract import validate_trip_draft
 
@@ -16,6 +17,9 @@ ThemeMode = Literal["system", "light", "dark"]
 UI_PREFERENCES_FILE = "ui_preferences.json"
 TRIP_DRAFT_FILE = "trip_draft.json"
 LOCAL_SECRET_PREFIX = "dpapi:"
+KEYCHAIN_SECRET_PREFIX = "keychain:"
+KEYCHAIN_SERVICE = "org.railwatch.railwatch12306"
+KEYCHAIN_ACCOUNT = "notification-secrets"
 # One process-wide lock covers read/merge/write, including notification settings
 # in the bridge. Electron's single-instance lock owns cross-process admission.
 PREFERENCES_LOCK = threading.RLock()
@@ -55,9 +59,92 @@ def atomic_write_json(path: str, payload: object) -> None:
         raise
 
 
-def protect_local_secret(value: object) -> str:
-    """Protect a secret with the current Windows user's DPAPI credentials."""
+def uses_system_keychain() -> bool:
+    """macOS keeps notification secrets in the login keychain, not in the JSON file."""
+    return sys.platform == "darwin"
+
+
+def keychain_marker(slot: str) -> str:
+    return KEYCHAIN_SECRET_PREFIX + slot
+
+
+def _keychain_error_named(exc: BaseException, name: str) -> bool:
+    seen: Optional[BaseException] = exc
+    while seen is not None:
+        if type(seen).__name__ == name:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def keychain_access_denied(exc: BaseException) -> bool:
+    return _keychain_error_named(exc, "KeyringLocked")
+
+
+class MacSecretStore:
+    """Keep every notification secret in ONE generic-password keychain item.
+
+    An ad-hoc signed build is a new keychain client after each upgrade, so
+    every item asks for authorization again; one item means one prompt.
+    """
+
+    def __init__(self, backend=None, service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT):
+        self._backend = backend
+        self.service = service
+        self.account = account
+
+    def _keyring(self):
+        if self._backend is None:
+            # Use the macOS backend directly: entry-point discovery and keyringrc
+            # files are not reliable inside a frozen runtime.
+            try:
+                from keyring.backends.macOS import Keyring
+                from keyring.backends.macOS import api  # noqa: F401 - fails without Security.framework
+            except Exception as exc:
+                raise RuntimeError("macOS 钥匙串组件不可用。") from exc
+            self._backend = Keyring()
+        return self._backend
+
+    def read_all(self) -> Optional[Dict[str, str]]:
+        """Return the stored secrets, or None when the item does not exist."""
+        raw = self._keyring().get_password(self.service, self.account)
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("钥匙串中的通知凭据格式无效。") from exc
+        if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, str)
+                                                 for key, value in data.items()):
+            raise ValueError("钥匙串中的通知凭据格式无效。")
+        return data
+
+    def write_all(self, secrets: Mapping[str, str]) -> None:
+        values = {key: value for key, value in secrets.items() if value}
+        if not values:
+            self.delete()
+            return
+        self._keyring().set_password(self.service, self.account, json.dumps(values, ensure_ascii=False))
+
+    def delete(self) -> None:
+        try:
+            self._keyring().delete_password(self.service, self.account)
+        except Exception as exc:
+            if not _keychain_error_named(exc, "NotFound"):
+                raise
+
+
+def protect_local_secret(value: object, slot: str = "") -> str:
+    """Protect a secret: a Windows DPAPI blob, or a macOS keychain marker.
+
+    On macOS the caller stores the value itself with MacSecretStore; the file
+    only records which slot of the keychain item holds it.
+    """
     secret = str(value or "")
+    if secret and uses_system_keychain():
+        if not slot:
+            raise RuntimeError("通知凭据缺少钥匙串字段名，未保存。")
+        return keychain_marker(slot)
     if not secret or secret.startswith(LOCAL_SECRET_PREFIX) or os.name != "nt":
         return secret
     try:
@@ -72,10 +159,19 @@ def protect_local_secret(value: object) -> str:
     return LOCAL_SECRET_PREFIX + base64.b64encode(encrypted).decode("ascii")
 
 
-def unprotect_local_secret(value: object) -> str:
+def unprotect_local_secret(value: object, slot: str = "") -> str:
     protected = str(value or "")
+    if protected.startswith(KEYCHAIN_SECRET_PREFIX):
+        if not uses_system_keychain():
+            raise ValueError("通知凭据保存在 macOS 钥匙串中，当前系统无法读取。")
+        if protected != keychain_marker(slot):
+            raise ValueError("通知凭据的钥匙串标记无效。")
+        # Reading may wait for user authorization; MacSecretStore does it off the startup path.
+        raise ValueError("钥匙串中的通知凭据需由后台读取。")
     if not protected.startswith(LOCAL_SECRET_PREFIX):
         return protected
+    if uses_system_keychain():
+        raise ValueError("通知凭据来自 Windows，无法在 macOS 上解密，请重新填写。")
     if os.name != "nt":
         return ""
     try:

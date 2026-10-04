@@ -26,3 +26,17 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+mac:
+  icon: assets/images/icon.png
+  category: public.app-category.travel
+  minimumSystemVersion: "12.0"
+  target:
+    - dmg
+    - zip
+  artifactName: "RailWatch-12306-${version}-${arch}.${ext}"
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: assets/mac/entitlements.mac.plist
+  entitlementsInherit: assets/mac/entitlements.mac.plist
+dmg:
+  artifactName: "RailWatch-12306-${version}-${arch}.${ext}"

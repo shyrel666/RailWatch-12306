@@ -14,15 +14,18 @@ const harness = vi.hoisted(() => ({
   send: vi.fn(), reload: vi.fn(), rendererUrl: "",
   loadFailure: undefined as Error | undefined, loadErrorDialog: vi.fn(), closeWindow: vi.fn(),
   installUpdate: vi.fn(), updateState: vi.fn(),
+  setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn(), setAppUserModelId: vi.fn(),
+  windowOptions: undefined as any, updaterOptions: undefined as any, autoUpdater: {} as Record<string, unknown>,
 }));
 vi.mock("electron", () => ({
   app: { requestSingleInstanceLock: () => true, quit: harness.quit,
     on: (name: string, listener: (...args: any[]) => void) => harness.listeners.set(name, listener),
-    setAppUserModelId: vi.fn(), getVersion: () => "0.4.2",
+    setAppUserModelId: harness.setAppUserModelId, getVersion: () => "0.4.2",
     whenReady: () => ({ then: (callback: () => void) => { harness.ready = callback; } }) },
   ipcMain: { on: (name: string, listener: (...args: any[]) => void) => harness.ipcListeners.set(name, listener),
     handle: (name: string, listener: (...args: any[]) => any) => harness.ipcHandlers.set(name, listener) },
   BrowserWindow: class {
+    constructor(options: unknown) { harness.windowOptions = options; }
     webContents = { on: (name: string, listener: (...args: any[]) => void) => harness.webListeners.set(name, listener), setWindowOpenHandler: vi.fn(), send: harness.send };
     on = (name: string, listener: (...args: any[]) => void) => harness.windowListeners.set(name, listener);
     loadURL = (url: string) => { harness.rendererUrl = url; return harness.loadFailure ? Promise.reject(harness.loadFailure) : Promise.resolve(); }; hide = harness.hide; show = harness.show;
@@ -31,19 +34,21 @@ vi.mock("electron", () => ({
     isDestroyed = () => false; isMinimized = () => false;
     focus = vi.fn();
   },
-  Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
+  Menu: { setApplicationMenu: harness.setApplicationMenu, buildFromTemplate: harness.buildFromTemplate },
+  nativeImage: { createFromPath: () => ({ resize: () => "tray-image" }) },
   dialog: { showMessageBox: harness.loadErrorDialog },
   Tray: class { on = vi.fn(); setToolTip = vi.fn(); setContextMenu = vi.fn(); destroy = vi.fn(); },
   powerMonitor: { on: vi.fn() }, powerSaveBlocker: {}, shell: {},
 }));
-vi.mock("electron-updater", () => ({ autoUpdater: {} }));
+vi.mock("electron-updater", () => ({ autoUpdater: harness.autoUpdater }));
 vi.mock("../nsisUpdater", () => ({ RailWatchNsisUpdater: class {} }));
 vi.mock("../pythonRuntime", () => ({
   RailWatchPythonRuntimeClient: class { request = harness.request; stop = harness.stop; forceStop = harness.forceStop; on = vi.fn(); },
 }));
-vi.mock("../updateManager", () => ({ createUpdateManager: () => ({
-  installUpdate: harness.installUpdate, getState: harness.updateState,
-}), shouldEnableAutoUpdate: vi.fn() }));
+vi.mock("../updateManager", () => ({ createUpdateManager: (options: unknown) => {
+  harness.updaterOptions = options;
+  return { installUpdate: harness.installUpdate, getState: harness.updateState };
+}, shouldEnableAutoUpdate: vi.fn() }));
 vi.mock("../alertManager", () => ({ cleanupUrgentAlert: harness.cleanupAlert,
   registerAlertIpcHandlers: vi.fn(), showUrgentAlert: vi.fn(), stopUrgentAlertLoop: vi.fn() }));
 vi.mock("../confirmationBridge", () => ({
@@ -64,6 +69,8 @@ async function exitAttempt() {
 beforeEach(async () => {
   vi.resetModules();
   vi.resetAllMocks();
+  vi.unstubAllGlobals();
+  for (const key of Object.keys(harness.autoUpdater)) delete harness.autoUpdater[key];
   harness.listeners.clear();
   harness.windowListeners.clear();
   harness.webListeners.clear();
@@ -329,4 +336,29 @@ test("a failed recovery flush cannot initialize the renderer with an older revis
   harness.request.mockRejectedValue(new Error("disk full"));
   await expect(harness.ipcHandlers.get("railwatch:command")!(event, "loadTripState")).rejects.toThrow("disk full");
   expect(harness.request).not.toHaveBeenCalledWith("loadTripState", expect.anything());
+});
+
+test("macOS gets an edit menu, a PNG icon and release-page-only updates", async () => {
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "darwin" } }));
+  harness.ready!();
+  expect(harness.buildFromTemplate).toHaveBeenCalledWith([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }]);
+  expect(harness.setApplicationMenu).not.toHaveBeenCalledWith(null);
+  expect(harness.setAppUserModelId).not.toHaveBeenCalled();
+  expect(harness.windowOptions.icon).toMatch(/icon\.png$/);
+  expect(harness.autoUpdater.autoDownload).toBe(false);
+  expect(harness.updaterOptions.installMode).toBe("manual");
+  expect(harness.updaterOptions.releaseUrlFor("0.6.1")).toBe("https://github.com/shyrel666/RailWatch-12306/releases/tag/v0.6.1");
+  // Cmd+Q and the app menu's Quit reach before-quit, which keeps the safe exit path.
+  const quitting = await exitAttempt();
+  expect(quitting.preventDefault).toHaveBeenCalled();
+  expect(harness.request).toHaveBeenCalledWith("prepareShutdown", { purpose: "quit" }, { timeoutMs: 45000 });
+});
+
+test("Windows keeps no application menu, the ICO icon and NSIS auto-download", async () => {
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "win32" } }));
+  harness.ready!();
+  expect(harness.setApplicationMenu).toHaveBeenCalledWith(null);
+  expect(harness.setAppUserModelId).toHaveBeenCalledWith("org.railwatch.railwatch12306");
+  expect(harness.windowOptions.icon).toMatch(/icon\.ico$/);
+  expect(harness.updaterOptions.installMode).toBe("auto");
 });

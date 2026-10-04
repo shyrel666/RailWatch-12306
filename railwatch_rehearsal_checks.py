@@ -196,9 +196,13 @@ def check_scheduler(sample):
     return result(status, f"本机唤醒迟到 P95 {p95:.1f}ms；不代表开售时官方响应速度")
 
 
-def check_alerts(settings, statuses):
+def check_alerts(settings, statuses, credentials_pending=False):
     required = {"server_chan": ("server_chan_key",), "email": ("email_smtp_host", "email_user", "email_password", "email_to"),
                 "wecom_webhook": ("wecom_webhook_url",)}
+    if credentials_pending:
+        return result("warn", "外部通知凭据尚未授权，命中时无法发送外部提醒",
+                      details=["请在系统钥匙串授权弹窗中选择“始终允许”。"],
+                      fix=fix("系统设置", "settings-notifications", "检查提醒设置"))
     warnings = [key for key, fields in required.items() if settings.get(f"{key}_enabled") and
                 (not all(settings.get(field) for field in fields) or statuses.get(key, {}).get("status") in ("failed", "not_configured", "queue_full"))]
     enabled = any(settings.get(f"{key}_enabled") for key in required)
@@ -277,7 +281,8 @@ def make_checks(bridge, config):
     def alerts(report, cancel, _):
         if shared.get("send_test_notification"):
             await_diagnostic(background(bridge.notification_service.test_notification), cancel)
-        return check_alerts(bridge.notification_service.settings, bridge.notification_service.status())
+        return check_alerts(bridge.notification_service.settings, bridge.notification_service.status(),
+                            getattr(bridge, "notification_credentials_pending", False))
     shared["send_test_notification"] = False
     return {"config": lambda *_: check_config(config), "sale_time": sale, "browser": browser, "login": login,
             "passengers": passengers, "train_seat": train, "drill": drill, "clock": clock,
