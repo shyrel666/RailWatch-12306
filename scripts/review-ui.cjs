@@ -437,6 +437,8 @@ fs.mkdirSync(output, { recursive: true });
     await overwrite.waitFor({ state: "hidden" });
     await picker.getByRole("button", { name: /取\s*消/ }).click();
     await picker.waitFor({ state: "hidden" });
+    // The picker returns focus to the drawer after its close animation; Escape only reaches the drawer then.
+    await page.waitForFunction(() => document.querySelector(".log-drawer")?.contains(document.activeElement));
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "hidden" });
   }

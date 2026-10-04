@@ -301,6 +301,16 @@
 .update-pending {
   color: var(--accent-text);
 }
+/* Event log drawer: a timetable of runtime events. */
+.log-drawer .ant-drawer-header {
+  padding: 18px 20px 4px;
+  border-bottom: 0;
+}
+.log-drawer .ant-drawer-title {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+}
 .event-panel {
   display: flex;
   flex-direction: column;
@@ -314,73 +324,149 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 4px 14px 12px 20px;
 }
-.event-caption {
-  font-size: 12px;
+.event-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12.5px;
   color: var(--muted);
+  white-space: nowrap;
+}
+.event-live.paused {
+  color: var(--warning);
 }
 .event-head-actions {
   display: flex;
   gap: 2px;
 }
 .event-clear-btn {
-  padding: 6px 8px;
-  font-size: 12px;
-  gap: 4px;
+  height: 30px;
+  padding: 0 9px;
+  font-size: 12.5px;
+  gap: 5px;
 }
 .event-clear-btn.active {
-  color: var(--accent-text);
-  background: var(--accent-soft);
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 .event-tabs {
-  display: flex;
-  border-bottom: 1px solid var(--border);
-  gap: 12px;
-  padding-inline: 16px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+  margin: 0 20px 6px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--subtle);
 }
 .event-tab {
-  border: 0;
-  border-bottom: 2px solid transparent;
   display: flex;
-  gap: 6px;
   align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  border: 0;
+  border-radius: 7px;
   background: transparent;
   color: var(--muted);
-  padding: 9px 4px;
-  font-size: 12px;
+  font-size: 13px;
+}
+.event-tab:hover {
+  color: var(--text);
 }
 .event-tab.active {
-  color: var(--accent-text);
-  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+  background: var(--surface);
+  box-shadow: var(--card-ring);
 }
 .event-tab span {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font-family: var(--font-mono);
   font-size: 11px;
-  background: var(--subtle);
-  padding: 0 4px;
-  border-radius: 7px;
+  font-weight: 500;
+  line-height: 17px;
+}
+.event-tab span.warn {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.event-tab span.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.event-dropped {
+  margin: 4px 20px 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 12px;
 }
 .event-list {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0 20px;
+  padding: 6px 8px 16px;
 }
 .event-entry {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border);
+  position: relative;
+  display: grid;
+  grid-template-columns: 58px 20px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "time dot title level"
+    ". . detail detail";
+  column-gap: 6px;
+  padding: 8px 12px 10px;
+  border-radius: 8px;
   overflow-wrap: anywhere;
 }
+/* The rail runs through the dot column so consecutive entries read as one line. */
+.event-entry::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 85px;
+  width: 2px;
+  background: var(--border);
+}
+.event-entry:hover {
+  background: var(--subtle);
+}
+.event-body,
+.event-row {
+  display: contents;
+}
+.event-row time {
+  grid-area: time;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+  white-space: nowrap;
+}
 .event-dot {
-  width: 6px;
-  height: 6px;
-  flex-shrink: 0;
+  grid-area: dot;
+  position: relative;
+  z-index: 1;
+  justify-self: center;
+  width: 9px;
+  height: 9px;
+  margin-top: 6px;
   border-radius: 50%;
-  background: var(--muted);
-  margin-top: 7px;
+  background: var(--faint);
+  box-shadow: 0 0 0 3px var(--surface);
+}
+.event-entry:hover .event-dot {
+  box-shadow: 0 0 0 3px var(--subtle);
 }
 .event-dot.success {
   background: var(--success);
@@ -391,30 +477,42 @@
 .event-dot.error {
   background: var(--danger);
 }
-.event-body {
-  flex: 1;
-  min-width: 0;
-}
-.event-row {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 4px;
-  font-size: 11px;
-  color: var(--muted);
-}
 .event-body strong {
-  font-size: 13px;
-  font-weight: 500;
+  grid-area: title;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 20px;
+}
+.event-entry.error .event-body strong {
+  color: var(--danger);
 }
 .event-body p {
-  font-size: 12px;
-  margin-top: 6px;
+  grid-area: detail;
+  margin-top: 2px;
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 .event-level {
   font-size: 11px;
-  border-radius: 7px;
-  padding: 1px 5px;
+  border-radius: 999px;
+  padding: 1px 7px;
   background: var(--subtle);
+  white-space: nowrap;
+}
+.event-entry .event-level {
+  grid-area: level;
+  align-self: start;
+  margin-top: 1px;
+}
+/* Informational rows skip the badge visually; the label stays for screen readers. */
+.event-entry .event-level.info,
+.event-entry .event-level.success {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 .event-level.error {
   color: var(--danger);
@@ -427,11 +525,25 @@
 .event-empty {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 64px 0;
+  align-items: center;
+  gap: 6px;
+  padding: 72px 24px;
   text-align: center;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 12.5px;
+}
+.event-empty > svg {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 6px;
+  padding: 11px;
+  border-radius: 12px;
+  background: var(--subtle);
+  color: var(--faint);
+}
+.event-empty strong {
+  color: var(--text);
+  font-size: 14px;
 }
 @media (max-width: 1279px) {
   .page-header { padding-inline: 20px; height: 68px; }

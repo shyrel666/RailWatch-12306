@@ -48,7 +48,12 @@ export function EventPanel({
   return (
     <aside className="event-panel" aria-label="事件面板">
       <div className="event-head">
-        <span className="event-caption">运行记录</span>
+        <span className={"event-live" + (logPaused ? " paused" : "")}>
+          <i className={"lamp " + (logPaused ? "wait" : "go live")} aria-hidden="true" />
+          {logPaused
+            ? `已暂停${pausedCount ? ` · ${pausedCount} 条待显示` : ""}`
+            : "实时接收中"}
+        </span>
         <div className="event-head-actions">
           {onExport ? (
             <button
@@ -72,11 +77,7 @@ export function EventPanel({
               type="button"
             >
               {logPaused ? <Play size={14} /> : <Pause size={14} />}
-              <span>
-                {logPaused
-                  ? `恢复${pausedCount ? `(${pausedCount})` : ""}`
-                  : "暂停"}
-              </span>
+              <span>{logPaused ? "恢复" : "暂停"}</span>
             </button>
           </Tooltip>
           <Tooltip title="清空事件">
@@ -104,12 +105,22 @@ export function EventPanel({
             type="button"
           >
             {label}
-            <span>{counts[label]}</span>
+            <span
+              className={
+                counts[label] && label === "警告"
+                  ? "warn"
+                  : counts[label] && label === "错误"
+                    ? "error"
+                    : undefined
+              }
+            >
+              {counts[label]}
+            </span>
           </button>
         ))}
       </div>
       {droppedLogs > 0 ? (
-        <small role="status">
+        <small className="event-dropped" role="status">
           仅保留最近 1,000 条日志，已丢弃 {droppedLogs} 条。
         </small>
       ) : null}

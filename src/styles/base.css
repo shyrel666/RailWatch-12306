@@ -342,9 +342,6 @@ em {
 .path-text {
   overflow-wrap: anywhere;
 }
-.health-ok {
-  color: var(--success);
-}
 .health-warning {
   color: var(--warning);
 }

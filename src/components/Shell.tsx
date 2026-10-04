@@ -162,7 +162,11 @@ export function ShellLayout({
             ? (document
                 .getElementById("monitor-controls")
                 ?.getBoundingClientRect().height ?? 0)
-            : 0;
+            : pageSection.startsWith("settings-")
+              ? (document
+                  .querySelector(".settings-nav")
+                  ?.getBoundingClientRect().height ?? 0)
+              : 0;
         scroller.scrollTop = Math.max(
           0,
           scroller.scrollTop +
@@ -239,7 +243,7 @@ export function ShellLayout({
           if (!open) logTriggerRef.current?.focus();
         }}
         title="事件日志"
-        size={400}
+        size={440}
         open={eventPanelVisible}
         onClose={onToggleEventPanel}
         forceRender

@@ -1,8 +1,9 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ScrollText } from "lucide-react";
 import { formatEventTime, type PresentedEvent } from "../lib/formatEventLog";
 
 type Entry = PresentedEvent & { id?: number };
-const ESTIMATE = 88;
+const ESTIMATE = 64;
 const OVERSCAN = 5;
 
 function MeasuredEntry({ entry, onHeight }: { entry: Entry; onHeight: (id: number, height: number) => void }) {
@@ -16,11 +17,14 @@ function MeasuredEntry({ entry, onHeight }: { entry: Entry; onHeight: (id: numbe
     observer.observe(element);
     return () => observer.disconnect();
   }, [entry.id, onHeight]);
+  const formatted = formatEventTime(entry.time);
+  // The timeline column shows the clock; the full Beijing date stays in the tooltip.
+  const clock = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(formatted) ? formatted.slice(11) : formatted;
   return (
     <article ref={ref} className={`event-entry ${entry.tone}`}>
       <span aria-hidden="true" className={`event-dot ${entry.tone}`} />
       <div className="event-body">
-        <div className="event-row"><time dateTime={entry.time} title={`北京时间 · ${formatEventTime(entry.time)}`}>{formatEventTime(entry.time)}</time><span className={`event-level ${entry.tone}`}>{entry.label}</span></div>
+        <div className="event-row"><time dateTime={entry.time} title={`北京时间 · ${formatted}`}>{clock}</time><span className={`event-level ${entry.tone}`}>{entry.label}</span></div>
         <strong>{entry.title}</strong>
         {entry.detail ? <p>{entry.detail}</p> : null}
       </div>
@@ -66,7 +70,7 @@ export function VirtualEventList({ entries, className }: { entries: Entry[]; cla
   last = Math.min(entries.length, last + OVERSCAN);
   return (
     <div ref={ref} className={className} role="feed" aria-label="事件流">
-      {entries.length === 0 ? <div className="event-empty"><strong>暂无事件</strong><span>运行日志会在这里按时间倒序显示。</span></div> : (
+      {entries.length === 0 ? <div className="event-empty"><ScrollText size={22} aria-hidden="true" /><strong>暂无事件</strong><span>运行日志会在这里按时间倒序显示。</span></div> : (
         <div style={{ flexShrink: 0, paddingTop: offsets[first], paddingBottom: offsets[entries.length] - offsets[last] }}>
           {entries.slice(first, last).map(entry => <MeasuredEntry key={entry.id} entry={entry} onHeight={onHeight} />)}
         </div>
