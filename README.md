@@ -56,8 +56,6 @@
   </tr>
 </table>
 
-<sub>截图由 <code>scripts/capture-readme.py</code> 使用离线演示数据从生产界面生成，不连接 12306。</sub>
-
 <a id="download"></a>
 
 ## 下载安装
@@ -129,7 +127,7 @@ npm run dev
 
 ## 参与贡献
 
-欢迎提交 Issue 与 Pull Request，开始前请阅读 [贡献指南](CONTRIBUTING.md)；安全问题请按 [安全策略](SECURITY.md) 报告。反馈问题时请隐去个人信息。
+欢迎提交 Issue，开始前请阅读 [贡献指南](CONTRIBUTING.md)；安全问题请按 [安全策略](SECURITY.md) 报告。反馈问题时请隐去个人信息。
 
 ## 许可证
 
