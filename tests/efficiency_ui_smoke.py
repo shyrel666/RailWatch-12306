@@ -12,6 +12,7 @@ import tempfile
 import threading
 
 from selenium import webdriver
+from selenium.common.exceptions import ElementClickInterceptedException, ElementNotInteractableException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -87,6 +88,9 @@ def main():
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
             url = f"http://127.0.0.1:{server.server_port}/"
             wait = WebDriverWait(driver, 12)
+            # Dropdown and dialog motion can briefly cover the target; retry until the click lands.
+            settle = WebDriverWait(driver, 12, ignored_exceptions=(ElementClickInterceptedException,
+                                                                   ElementNotInteractableException))
 
             def click_text(text):
                 element = wait.until(lambda d: d.find_element("xpath", f"//button[normalize-space(.)='{text}']"))
@@ -103,7 +107,7 @@ def main():
                 select = wait.until(lambda d: d.find_element("css selector", '[aria-label="多日期策略"]'))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'})", select)
                 select.click()
-                wait.until(lambda d: d.find_element("xpath", "//div[contains(@class,'ant-select-item-option-content') and text()='限时扫描多日期现票']")).click()
+                settle.until(lambda d: d.find_element("xpath", "//div[contains(@class,'ant-select-item-option-content') and text()='限时扫描多日期现票']").click() or True)
                 budget = wait.until(lambda d: d.find_element("css selector", '[aria-label="跨日期扫描预算（秒）"]'))
                 budget.send_keys(Keys.CONTROL, "a")
                 budget.send_keys("45", Keys.TAB)

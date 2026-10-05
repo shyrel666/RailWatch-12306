@@ -9,6 +9,8 @@ import tempfile
 import threading
 
 from selenium import webdriver
+from selenium.common.exceptions import (ElementClickInterceptedException, ElementNotInteractableException,
+                                        StaleElementReferenceException)
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -93,6 +95,10 @@ def main():
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
             url = f"http://127.0.0.1:{server.server_port}/"
             wait = WebDriverWait(driver, 12)
+            # Dropdown and dialog motion can briefly cover the target; retry until the click lands.
+            settle = WebDriverWait(driver, 12, ignored_exceptions=(ElementClickInterceptedException,
+                                                                   ElementNotInteractableException,
+                                                                   StaleElementReferenceException))
 
             def click(element):
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'})", element)
@@ -101,11 +107,19 @@ def main():
             def button(text):
                 click(wait.until(lambda d: d.find_element("xpath", f"//button[normalize-space(.)='{text}']")))
 
-            def automation():
+            def automation(enable_alternate=False):
                 driver.find_element("css selector", '[aria-label="行程设置"]').click()
                 section = wait.until(lambda d: d.find_element("id", "trip-automation"))
                 if not section.get_attribute("open"):
                     click(section.find_element("css selector", "summary"))
+                if enable_alternate:
+                    # Alternate settings stay hidden until the risk confirmation is accepted.
+                    assert not section.find_elements("css selector", '[aria-label="候补组合"]')
+                    click(section.find_element("xpath", ".//label[.//strong[text()='候补排队关闭']]//button[@role='switch']"))
+                    dialogs = lambda d: [e for e in d.find_elements("css selector", ".railwatch-dialog") if e.is_displayed()]
+                    wait.until(dialogs)
+                    # A click during the dialog's entry motion can be dropped, so keep confirming until it closes.
+                    settle.until(lambda d: not dialogs(d) or d.find_element("css selector", ".railwatch-dialog .ant-btn-primary").click())
                 return wait.until(lambda d: d.find_element("css selector", '[aria-label="候补组合"]'))
 
             def capture(name):
@@ -118,8 +132,8 @@ def main():
                 driver.execute_script("localStorage.setItem('qa-theme',arguments[0]);localStorage.removeItem('qa-config')", theme)
                 driver.get(url)
                 wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
-                click(automation())
-                click(wait.until(lambda d: d.find_element("xpath", "//div[contains(@class,'ant-select-item-option-content') and text()='多个已配置组合']")))
+                click(automation(enable_alternate=True))
+                settle.until(lambda d: d.find_element("xpath", "//div[contains(@class,'ant-select-item-option-content') and text()='多个已配置组合']").click() or True)
                 for label, value in (("候补组合上限", "8"), ("订单核对间隔（秒）", "120")):
                     field = driver.find_element("css selector", f'[aria-label="{label}"]')
                     field.send_keys(Keys.CONTROL, "a")
@@ -128,7 +142,7 @@ def main():
                 wait.until(lambda d: d.execute_script("return JSON.parse(localStorage.getItem('qa-config')||'{}').alternate_max_combinations===8"))
                 saved = driver.execute_script("return JSON.parse(localStorage.getItem('qa-config'))")
                 assert saved["alternate_mode"] == "multiple" and saved["order_watch_interval_seconds"] == 120
-                assert saved["order_watch_enabled"] and not saved["auto_submit"] and not saved["auto_alternate"]
+                assert saved["order_watch_enabled"] and not saved["auto_submit"] and saved["auto_alternate"]
                 driver.get(url)
                 wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
                 automation()

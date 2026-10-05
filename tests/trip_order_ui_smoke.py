@@ -25,8 +25,9 @@ OUTPUT = ROOT / "build" / "qa" / "m4-m5"
 
 def main():
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    # Alternate deadline options are only rendered once automatic alternate is enabled.
     config = {**default_config(), "date_range": "单日", "train_code": "G101", "seat_keyword": "二等座",
-              "passengers": "张三"}
+              "passengers": "张三", "auto_alternate": True}
     runtime = {"app_display_name": "RailWatch 12306", "app_version": "0.4.2", "pages": [],
                "state": state_to_payload(RailWatchState.initial()), "date_policy": {"presale_window_days": 15},
                "seat_capabilities": public_seat_capabilities(), "data_dir": "离线演示目录",
