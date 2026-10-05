@@ -67,8 +67,10 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
   const canReview = (item: OrderHistorySummary) => item.recovery_required && !monitoring && activity?.state !== "busy";
 
   return <div className="order-center">
-    <header className="order-center-head"><div><span className="eyebrow">订单中心</span>
-      <h2>本地订单历史</h2><p>官方订单状态以匹配页面证据为准；历史查看不占用浏览器。</p></div>
+    <header className="order-center-head">
+      <span className="order-center-summary">
+        {loading ? "订单记录读取中…" : `当前显示 ${page.items.length} 条订单`}
+      </span>
       <div className="order-center-actions">
         <Select aria-label="按状态筛选" value={statusFilter ?? "all"} onChange={value => { setStatusFilter(value === "all" ? null : value); setCursor(null); }}
           options={[{ value: "all", label: "全部状态" }, ...Object.entries(statusLabels).map(([value, label]) => ({ value, label }))]} />

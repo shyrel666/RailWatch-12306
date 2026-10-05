@@ -50,7 +50,7 @@ export function TimerSettings({ config, update, windowDays }: {
     update((!validTarget || target <= now ? saleTimePatch() : null) ?? { timer_enabled: true });
   };
 
-  return <PreferenceSection id="trip-timer" title="定时启动" description={summary} enabled={config.timer_enabled}>
+  return <PreferenceSection id="trip-timer" title="定时启动" description={summary}>
     <div className="timer-mode-options" role="radiogroup" aria-label="开始方式">
       <label className={`timer-mode${!config.timer_enabled ? " selected" : ""}`}>
         <input type="radio" name="timer-mode" aria-label="立即开始" checked={!config.timer_enabled}

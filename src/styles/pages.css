@@ -297,11 +297,13 @@
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.trip-setup-head p {
-  font-size: 12px;
-  margin-top: 4px;
+.trip-load-button {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 .trip-setup-form-scroll {
   overflow-y: auto;
@@ -597,10 +599,51 @@
   gap: 8px;
   font-size: 13px;
 }
-.trip-advanced-risk {
+.trip-automation-toggles {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.trip-automation-toggles .risk-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: start;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+}
+.trip-automation-toggles .risk-toggle > .ant-switch { grid-area: 1 / 2; margin: 0; }
+.trip-automation-toggles .risk-toggle > span { display: contents; }
+.trip-automation-toggles .risk-toggle strong { grid-area: 1 / 1; font-size: 13px; }
+.trip-automation-toggles .risk-toggle small { grid-column: 1 / -1; font-size: 12px; line-height: 1.6; }
+.trip-automation-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.trip-automation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+.trip-automation-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.trip-automation-watch {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.trip-automation-watch-controls { align-items: end; }
+.trip-automation-watch-controls > .switch-row { min-height: 32px; }
+#trip-automation { container-type: inline-size; }
+@container (max-width: 360px) {
+  .trip-automation-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .trip-select {
   width: 100%;
@@ -1587,7 +1630,6 @@
   padding: 8px 16px;
   font-size: 12px;
 }
-.trip-save-status { border-bottom: 1px solid var(--border); }
 .trip-draft-recovery { background: var(--accent-soft); border-radius: 8px; }
 .trip-draft-recovery button,
 .trip-station-refresh,
@@ -1605,7 +1647,6 @@
 .order-center-head, .order-history-item header, .order-detail header {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
 }
-.order-center-head h2 { margin: 4px 0; }
 .order-center-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .order-history-list { display: grid; gap: 10px; }
 .order-history-item, .order-detail {
@@ -1637,12 +1678,13 @@
 }
 .preference-section[open] > summary { border-bottom: 1px solid var(--border); margin-bottom: 14px; background: transparent; }
 .preference-section > summary:hover { background: var(--subtle); }
-.trip-save-status { padding: 8px 0; margin-bottom: 10px; color: var(--muted); font-size: 11px; }
+.trip-save-status { flex: 1; min-width: 0; padding: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .order-history-list { gap: 0; border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: var(--card-ring); }
 .order-history-item { border: 0; border-radius: 0; padding: 14px 20px; box-shadow: none; }
 .order-history-item + .order-history-item { border-top: 1px solid var(--border); }
-.order-center-head { border-bottom: 1px solid var(--border); padding-bottom: 12px; }
-.order-center-head p { font-size: 12px; }
+.order-center-head { align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+.order-center-summary { color: var(--muted); font-size: 12px; }
+.order-center-head > .order-center-actions { margin-left: auto; }
 .order-history-item p, .order-detail p { font-size: 12px; }
 .order-center-actions .ant-select { min-width: 140px; }
 .trip-strategy-sections { min-width: 0; }
@@ -1652,7 +1694,6 @@
   #trip-basics .trip-form-row:last-child { grid-template-columns: 1fr; }
   #trip-basics .trip-input-with-action { flex-wrap: wrap; }
   .trip-strategy-sections .trip-form-row--quad { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .trip-strategy-sections .trip-advanced-risk { grid-template-columns: 1fr; gap: 8px; }
 }
 @media (max-width: 1279px) {
   .trip-form-row--quad { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -28,6 +28,10 @@ function EditableForm({ initial = config }: { initial?: RailWatchConfig }) {
 
 test("a released trip can switch to immediate mode without filling a time or leaving disabled actions", async () => {
   render(<EditableForm initial={{ ...config, date: "2026-10-07" }} />);
+  const section = screen.getByRole("heading", { name: "定时启动" }).closest("details")!;
+  expect(section.open).toBe(false);
+  fireEvent.click(screen.getByRole("heading", { name: "定时启动" }));
+  expect(section.open).toBe(true);
   await screen.findByText("已进入预售期，建议立即开始监控，无需填写定时时间。");
   fireEvent.click(screen.getByRole("button", { name: "改为立即开始" }));
   expect((screen.getByRole("radio", { name: "立即开始" }) as HTMLInputElement).checked).toBe(true);

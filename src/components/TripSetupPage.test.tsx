@@ -64,11 +64,20 @@ describe("TripSetupPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
 
-  test("multi-choice and order observation settings persist without enabling submission", async () => {
+  test("automation settings require accepted activation and persist when hidden or remounted", async () => {
     const user = userEvent.setup();
-    const mount = () => render(<TripSetupPage busy={null} confirm={async () => false} runCommand={async () => undefined} />);
+    const confirm = vi.fn(async () => false);
+    const mount = () => render(<TripSetupPage busy={null} confirm={confirm} runCommand={async () => undefined} />);
     let view = mount();
     await user.click(screen.getByRole("heading", { name: "自动化" }));
+    expect(screen.queryByRole("combobox", { name: "候补组合" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "候补截止" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "持续订单核对" })).toBeNull();
+    await user.click(screen.getByRole("switch", { name: /候补排队关闭/ }));
+    expect(confirm).toHaveBeenCalled();
+    expect(screen.queryByRole("combobox", { name: "候补组合" })).toBeNull();
+    confirm.mockResolvedValue(true);
+    await user.click(screen.getByRole("switch", { name: /候补排队关闭/ }));
     await user.click(screen.getByRole("combobox", { name: "候补组合" }));
     await user.click(await screen.findByText("多个已配置组合", { selector: ".ant-select-item-option-content" }));
     const limit = screen.getByRole("spinbutton", { name: "候补组合上限" });
@@ -80,7 +89,16 @@ describe("TripSetupPage", () => {
     await user.type(interval, "120");
     await user.tab();
     expect(railwatchStore.getState().config).toMatchObject({ alternate_mode: "multiple", alternate_max_combinations: 8,
-      order_watch_enabled: true, order_watch_interval_seconds: 120, auto_submit: false, auto_alternate: false });
+      order_watch_enabled: true, order_watch_interval_seconds: 120, auto_submit: false, auto_alternate: true });
+    await user.click(screen.getByRole("switch", { name: /候补排队已启用/ }));
+    expect(screen.queryByRole("spinbutton", { name: "候补组合上限" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "持续订单核对" })).toBeNull();
+    await user.click(screen.getByRole("switch", { name: /自动提交关闭/ }));
+    expect(screen.getByRole("switch", { name: "持续订单核对" })).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "候补截止" })).toBeNull();
+    expect((screen.getByRole("spinbutton", { name: "订单核对间隔（秒）" }) as HTMLInputElement).value).toBe("120");
+    await user.click(screen.getByRole("switch", { name: /自动提交已启用/ }));
+    await user.click(screen.getByRole("switch", { name: /候补排队关闭/ }));
     view.unmount();
     view = mount();
     await user.click(screen.getByRole("heading", { name: "自动化" }));
@@ -92,6 +110,7 @@ describe("TripSetupPage", () => {
 
   test("offers deadline choices and preserves manually entered dates on remount", async () => {
     const user = userEvent.setup();
+    railwatchStore.setState({ config: { ...defaultConfig, auto_alternate: true } });
     const renderPage = () => render(<TripSetupPage busy={null} confirm={async () => false}
       runCommand={(async () => undefined) as CommandRunner} />);
     let page = renderPage();
@@ -289,7 +308,6 @@ describe("TripSetupPage", () => {
     );
 
     expect(screen.getByRole("heading", { name: "路线与乘客" })).toBeTruthy();
-    expect(screen.getByText("配置查询条件与监控策略")).toBeTruthy();
     expect(screen.getByRole("button", { name: "恢复上次保存" })).toBeTruthy();
     expect(screen.getByLabelText("出发站")).toBeTruthy();
     expect(screen.getByLabelText("到达站")).toBeTruthy();

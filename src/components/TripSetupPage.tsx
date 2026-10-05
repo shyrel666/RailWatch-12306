@@ -410,13 +410,16 @@ export function TripSetupPage({
     <div className="trip-setup-workspace">
       <section className="trip-setup-card">
         <header className="trip-setup-head">
-          <div>
-            <span className="eyebrow">行程偏好</span>
-            <p>
-              {monitoring
-                ? "运行中的行程保持不变，修改将在下次运行生效"
-                : "配置查询条件与监控策略"}
-            </p>
+          <div className="trip-save-status" role="status">
+            <span>{formalDirty ? "有未正式保存的修改" : "当前编辑与上次正式保存一致"}</span>
+            <span>上次正式保存：{formatSavedAt(savedAt)}（北京时间）</span>
+            <span>草稿：{draftSaveState === "editing" ? "编辑中" : draftSaveState === "saving" ? "保存中" :
+              draftSaveState === "saved" ? `已保存 ${formatSavedAt(draftSavedAt)}` : draftSaveState === "error" ? "保存失败" :
+              draftRead.status === "available" ? `发现可恢复草稿 ${formatSavedAt(draftRead.draft.saved_at)}` : "尚未保存"}</span>
+            {monitoring ? <span>运行中的行程保持不变，修改将在下次运行生效</span> : null}
+            {!tripInitialized ? <span role="alert">已保存的行程尚未加载，暂不能保存配置，以免覆盖原配置。</span> : null}
+            {configSaveError ? <span role="alert">正式保存失败：{configSaveError}</span> : null}
+            {draftError ? <span role="alert">草稿：{draftError}</span> : null}
           </div>
           <Button
             className="trip-load-button"
@@ -427,16 +430,6 @@ export function TripSetupPage({
             恢复上次保存
           </Button>
         </header>
-        <div className="trip-save-status" role="status">
-          <span>{formalDirty ? "有未正式保存的修改" : "当前编辑与上次正式保存一致"}</span>
-          <span>上次正式保存：{formatSavedAt(savedAt)}（北京时间）</span>
-          <span>草稿：{draftSaveState === "editing" ? "编辑中" : draftSaveState === "saving" ? "保存中" :
-            draftSaveState === "saved" ? `已保存 ${formatSavedAt(draftSavedAt)}` : draftSaveState === "error" ? "保存失败" :
-            draftRead.status === "available" ? `发现可恢复草稿 ${formatSavedAt(draftRead.draft.saved_at)}` : "尚未保存"}</span>
-          {!tripInitialized ? <span role="alert">已保存的行程尚未加载，暂不能保存配置，以免覆盖原配置。</span> : null}
-          {configSaveError ? <span role="alert">正式保存失败：{configSaveError}</span> : null}
-          {draftError ? <span role="alert">草稿：{draftError}</span> : null}
-        </div>
         {draftRead.status === "available" ? <div className="trip-draft-recovery" role="group" aria-label="恢复行程草稿">
           <span>发现上次未正式保存的行程草稿（{formatSavedAt(draftRead.draft.saved_at)}）。恢复后不会启动监控。</span>
           <button type="button" onClick={applyDraft}>恢复草稿</button>
@@ -519,25 +512,6 @@ export function TripSetupPage({
             </div>
 
             <div className="trip-form-row trip-form-row--split">
-              <div className="trip-field">
-                <span>多日期策略</span>
-                <Select aria-label="多日期策略" className="trip-select" value={dateStrategy(config)}
-                  disabled={dateRange === "单日"}
-                  options={Object.entries(DATE_STRATEGIES).map(([value, policy]) => ({ value, label: policy.label }))}
-                  onChange={value => update({ date_strategy: value })} />
-                <small className="field-help">{dateStrategySummary(config)}</small>
-              </div>
-              {dateStrategy(config) === "inventory_first" && dateRange !== "单日" ? <label className="trip-field">
-                <span>跨日期扫描预算（秒）</span>
-                <InputNumber aria-label="跨日期扫描预算（秒）" className="trip-select"
-                  min={DATE_SCAN_BUDGET.min_budget_seconds} max={DATE_SCAN_BUDGET.max_budget_seconds} precision={0}
-                  value={config.date_scan_budget_seconds ?? DATE_SCAN_BUDGET.scan_budget_seconds}
-                  onChange={value => { if (value !== null) update({ date_scan_budget_seconds: value }); }} />
-                <small className="field-help">扫描结束后仍会重新确认候补；{config.alternate_mode === "multiple" ? "按自动化设置添加并核对备选组合。" : "仅提交一个已核对的组合。"}</small>
-              </label> : null}
-            </div>
-
-            <div className="trip-form-row trip-form-row--split">
               <label className="trip-field">
                 <span>车次（可多选）</span>
                 <span className="trip-input-with-action">
@@ -571,6 +545,25 @@ export function TripSetupPage({
                 </span> : null}
                 <small className="field-help">查询本路线全部车次后，可在结果页按日期和实际区间选择目标。</small>
               </label>
+              <div className="trip-field">
+                <span>多日期策略</span>
+                <Select aria-label="多日期策略" className="trip-select" value={dateStrategy(config)}
+                  disabled={dateRange === "单日"}
+                  options={Object.entries(DATE_STRATEGIES).map(([value, policy]) => ({ value, label: policy.label }))}
+                  onChange={value => update({ date_strategy: value })} />
+                <small className="field-help">{dateStrategySummary(config)}</small>
+                {dateStrategy(config) === "inventory_first" && dateRange !== "单日" ? <label className="trip-field">
+                  <span>跨日期扫描预算（秒）</span>
+                  <InputNumber aria-label="跨日期扫描预算（秒）" className="trip-select"
+                    min={DATE_SCAN_BUDGET.min_budget_seconds} max={DATE_SCAN_BUDGET.max_budget_seconds} precision={0}
+                    value={config.date_scan_budget_seconds ?? DATE_SCAN_BUDGET.scan_budget_seconds}
+                    onChange={value => { if (value !== null) update({ date_scan_budget_seconds: value }); }} />
+                  <small className="field-help">扫描结束后仍会重新确认候补；{config.alternate_mode === "multiple" ? "按自动化设置添加并核对备选组合。" : "仅提交一个已核对的组合。"}</small>
+                </label> : null}
+              </div>
+            </div>
+
+            <div className="trip-form-row">
               <div className="trip-field">
                 <span>席别（可多选）</span>
                 <div aria-label="席别" className="chip-group" role="group">
@@ -792,50 +785,7 @@ export function TripSetupPage({
                   : "自动提交与自动候补默认关闭"
               }
             >
-              <label className="trip-field">
-                <span>候补组合</span>
-                <Select aria-label="候补组合" className="trip-select" value={config.alternate_mode ?? "single"}
-                  options={[{ value: "single", label: "首个可用组合" }, { value: "multiple", label: "多个已配置组合" }]}
-                  onChange={value => update({ alternate_mode: value })} />
-              </label>
-              {config.alternate_mode === "multiple" ? <label className="trip-field">
-                <span>候补组合上限</span>
-                <InputNumber aria-label="候补组合上限" min={1} max={ORDER_POLICY.max_combinations} precision={0}
-                  value={config.alternate_max_combinations ?? ORDER_POLICY.alternate_max_combinations}
-                  onChange={value => { if (value !== null) update({ alternate_max_combinations: value }); }} />
-                <small className="field-help">最多{ORDER_POLICY.max_dates}个日期。按配置的日期、车次和席别选择页面可用组合；统一核对并提交一个候补订单，实际清单可在订单中心查看。</small>
-              </label> : null}
-              <label className="switch-row">
-                <Switch aria-label="持续订单核对" checked={config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled}
-                  onChange={value => update({ order_watch_enabled: value })} />
-                <span>持续订单核对</span>
-              </label>
-              {(config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled) ? <label className="trip-field">
-                <span>订单核对间隔（秒）</span>
-                <InputNumber aria-label="订单核对间隔（秒）" precision={0}
-                  min={ORDER_POLICY.min_watch_interval_seconds} max={ORDER_POLICY.max_watch_interval_seconds}
-                  value={config.order_watch_interval_seconds ?? ORDER_POLICY.order_watch_interval_seconds}
-                  onChange={value => { if (value !== null) update({ order_watch_interval_seconds: value }); }} />
-                <small className="field-help">取得订单号后在独立标签页核对，保留付款页面。候补生效后持续等待兑现；异常时放慢，可在订单中心停止。退出或重启后需点击继续核对。</small>
-              </label> : null}
-              <label className="trip-field">
-                <span>候补截止</span>
-                <AutoComplete
-                  aria-label="候补截止"
-                  className="trip-select"
-                  placeholder="选择截止时间，或输入完整日期时间"
-                  options={["开车前20分钟", "开车前1小时", "开车前2小时", "开车前3小时", "开车前6小时", "开车前12小时", "开车前1天"].map(value => ({ value }))}
-                  suffixIcon={<ChevronDown size={14} style={{ pointerEvents: "none" }} />}
-                  value={config.alternate_deadline === "开车前60分钟" ? "开车前1小时" : config.alternate_deadline}
-                  onChange={(value) =>
-                    update({ alternate_deadline: value })
-                  }
-                />
-              </label>
-              <p>
-                可选择常用截止时间，也可输入完整日期时间（如 2026-10-01 18:00）；提交时以官方页面实际提供的选项为准。
-              </p>{" "}
-              <div className="trip-advanced-risk">
+              <div className="trip-automation-toggles">
                 <RiskToggle
                   checked={config.auto_submit}
                   title={config.auto_submit ? "自动提交已启用" : "自动提交关闭"}
@@ -855,6 +805,60 @@ export function TripSetupPage({
                   }
                 />
               </div>
+              {config.auto_alternate ? <div className="trip-automation-group">
+                <div className="trip-automation-grid">
+                  <label className="trip-field">
+                    <span>候补组合</span>
+                    <Select aria-label="候补组合" className="trip-select" value={config.alternate_mode ?? "single"}
+                      options={[{ value: "single", label: "首个可用组合" }, { value: "multiple", label: "多个已配置组合" }]}
+                      onChange={value => update({ alternate_mode: value })} />
+                  </label>
+                  <label className="trip-field">
+                    <span>候补截止</span>
+                    <AutoComplete
+                      aria-label="候补截止"
+                      className="trip-select"
+                      placeholder="选择或输入完整日期时间"
+                      options={["开车前20分钟", "开车前1小时", "开车前2小时", "开车前3小时", "开车前6小时", "开车前12小时", "开车前1天"].map(value => ({ value }))}
+                      suffixIcon={<ChevronDown size={14} style={{ pointerEvents: "none" }} />}
+                      value={config.alternate_deadline === "开车前60分钟" ? "开车前1小时" : config.alternate_deadline}
+                      onChange={value => update({ alternate_deadline: value })}
+                    />
+                  </label>
+                </div>
+                <p className="trip-automation-help">
+                  可选择常用截止时间，也可输入完整日期时间（如 2026-10-01 18:00）；提交时以官方页面实际提供的选项为准。
+                </p>
+                {config.alternate_mode === "multiple" ? <>
+                  <div className="trip-automation-grid">
+                    <label className="trip-field">
+                      <span>候补组合上限</span>
+                      <InputNumber aria-label="候补组合上限" className="trip-select" min={1} max={ORDER_POLICY.max_combinations} precision={0}
+                        value={config.alternate_max_combinations ?? ORDER_POLICY.alternate_max_combinations}
+                        onChange={value => { if (value !== null) update({ alternate_max_combinations: value }); }} />
+                    </label>
+                  </div>
+                  <p className="trip-automation-help">最多{ORDER_POLICY.max_dates}个日期。按配置的日期、车次和席别选择页面可用组合；统一核对并提交一个候补订单，实际清单可在订单中心查看。</p>
+                </> : null}
+              </div> : null}
+              {config.auto_submit || config.auto_alternate ? <div className="trip-automation-group trip-automation-watch">
+                <div className="trip-automation-grid trip-automation-watch-controls">
+                  <label className="switch-row">
+                    <Switch aria-label="持续订单核对" checked={config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled}
+                      onChange={value => update({ order_watch_enabled: value })} />
+                    <span>持续订单核对</span>
+                  </label>
+                  {(config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled) ? <label className="trip-field">
+                    <span>订单核对间隔（秒）</span>
+                    <InputNumber aria-label="订单核对间隔（秒）" className="trip-select" precision={0}
+                      min={ORDER_POLICY.min_watch_interval_seconds} max={ORDER_POLICY.max_watch_interval_seconds}
+                      value={config.order_watch_interval_seconds ?? ORDER_POLICY.order_watch_interval_seconds}
+                      onChange={value => { if (value !== null) update({ order_watch_interval_seconds: value }); }} />
+                  </label> : null}
+                </div>
+                {(config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled) ?
+                  <p className="trip-automation-help">取得订单号后在独立标签页核对，保留付款页面。候补生效后持续等待兑现；异常时放慢，可在订单中心停止。退出或重启后需点击继续核对。</p> : null}
+              </div> : null}
             </PreferenceSection>
           </div>
         </div>
