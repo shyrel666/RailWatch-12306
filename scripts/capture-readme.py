@@ -36,8 +36,18 @@ def main():
                "seat": "二等座", "status": "active", "official_status": "active",
                "official_verified_at": now - 300, "updated_at": now - 300,
                "last_checked_at": now - 300, "observing": False, "recovery_required": True}
-    data = json.dumps({"config": config, "runtime": runtime, "summary": summary, "now": now}, ensure_ascii=False)
-    bootstrap = "const {config,runtime,summary,now}=" + data + ";" + """
+    orders = [summary,
+              {**summary, "intent_id": "demo-payment", "order_id": "DEMO456", "kind": "regular", "train_code": "G103",
+               "seat": "一等座", "status": "pending_payment", "official_status": "pending_payment",
+               "official_verified_at": now - 90, "updated_at": now - 90, "last_checked_at": now - 90,
+               "recovery_required": False},
+              {**summary, "intent_id": "demo-fulfilled", "order_id": "DEMO789", "kind": "regular", "train_code": "G105",
+               "seat": "二等座", "status": "fulfilled", "official_status": "fulfilled",
+               "official_verified_at": now - 86400, "updated_at": now - 86400, "last_checked_at": now - 86400,
+               "recovery_required": False}]
+    data = json.dumps({"config": config, "runtime": runtime, "summary": summary, "orders": orders, "now": now},
+                      ensure_ascii=False)
+    bootstrap = "const {config,runtime,summary,orders,now}=" + data + ";" + """
       let theme='light'; window.demoListeners=[];
       window.railwatch={command:async(name,payload={})=>{
         if(name==='getRuntimeInfo') return runtime;
@@ -48,8 +58,11 @@ def main():
           favorites:[{from_station:'北京',to_station:'上海',trains:['G101','G103']}]};
         if(name==='loadPreferences') return {theme,close_to_tray:false,notification_settings:{}};
         if(name==='savePreferences') {theme=payload.theme||theme;return {theme,notification_settings:{}};}
-        if(name==='searchStations') return {items:[],warning:null};
-        if(name==='orderHistory') return {items:[summary],next_cursor:null};
+        if(name==='searchStations') return {items:[{name:payload.query,code:'DEMO',pinyin:''}],warning:null};
+        if(name==='orderHistory') return {items:orders,next_cursor:null};
+        if(name==='stationSaleTimes') return {station:payload.station,status:'available',checked_at:now,
+          expires_at:now+3600,retry_at:now+60,warning:null,source_url:'https://kyfw.12306.cn/index/view/infos/sale_time.html',
+          schedules:[{station_name:payload.station,station_code:'DEMO',sale_time:'13:30',start_date:'2010-01-01',stop_date:'2099-12-31'}]};
         if(name==='orderDetail') return {summary,history_complete:false,events:[]};
         if(name==='saveTripDraft') return {schema_version:1,revision:payload.revision,saved_at:now,config:payload.config};
         return {};
@@ -90,6 +103,7 @@ def main():
                     assert driver.execute_script("return document.documentElement.scrollWidth<=innerWidth")
                     driver.save_screenshot(str(ROOT / "docs/images" / f"{name}-v{version}.png"))
 
+                capture("dashboard")
                 driver.find_element("css selector", '[aria-label="行程设置"]').click()
                 wait.until(lambda d: "恢复草稿" in d.find_element("tag name", "body").text)
                 capture("trip-setup")
