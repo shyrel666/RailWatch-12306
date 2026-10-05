@@ -168,6 +168,10 @@ jobs:
           echo "RUNTIME_PATH=$RUNTIME_PATH" >> "$GITHUB_ENV"
 
       - name: Smoke the final app with a temporary keychain
+        # A keychain dialog would wait forever on a headless runner; fail instead.
+        timeout-minutes: 15
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           set -eo pipefail
           KEYCHAIN="$RUNNER_TEMP/railwatch-ci.keychain-db"
@@ -187,13 +191,18 @@ jobs:
           security unlock-keychain -p railwatch-ci "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
           security default-keychain -d user -s "$KEYCHAIN"
+          # The smoke tests give the runtime a temporary HOME; they point it at this keychain.
+          export RAILWATCH_TEST_KEYCHAIN="$KEYCHAIN"
 
+          echo "Keychain probe"
           PROBE_HOME="$(python -c 'import os, tempfile; print(os.path.realpath(tempfile.mkdtemp(prefix="railwatch-probe-home-")))')"
           if ! HOME="$PROBE_HOME" python scripts/keychain_probe.py --keychain "$KEYCHAIN"; then
             echo "::error::测试钥匙串不可用（钥匙串环境问题，不是运行时缺陷）"
             exit 1
           fi
+          echo "Runtime order smoke"
           python -X utf8 tests/runtime_order_smoke.py --exe "$RUNTIME_PATH"
+          echo "Packaged app smoke"
           python -X utf8 tests/packaged_smoke.py --exe "$APP_PATH/Contents/MacOS/RailWatch 12306"
 
       - name: Re-verify the app and update metadata after smoke tests

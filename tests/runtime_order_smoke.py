@@ -19,6 +19,7 @@ import threading
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from railwatch_orders import OrderIntent, OrderJournal, OrderResult
+from scripts.ci_keychain import use_test_keychain
 
 IS_MACOS = sys.platform == "darwin"
 KEYCHAIN_SERVICE = "org.railwatch.railwatch12306"
@@ -37,6 +38,7 @@ def isolated_environment(home: str) -> dict:
     """Point the runtime's data directory at a temporary folder."""
     if sys.platform == "win32":
         return dict(os.environ, LOCALAPPDATA=home, APPDATA=home)
+    use_test_keychain(home)
     return dict(os.environ, HOME=home)
 
 

@@ -20,8 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from railwatch_config_contract import default_config
 from railwatch_orders import OrderIntent, OrderJournal, OrderResult
+from scripts.ci_keychain import use_test_keychain
 
-EXE = ROOT / "release" / "win-unpacked" / "RailWatch 12306.exe"
+EXE =ROOT / "release" / "win-unpacked" / "RailWatch 12306.exe"
 IS_WINDOWS = sys.platform == "win32"
 
 
@@ -30,6 +31,7 @@ def isolated_user_data(tmp):
     if IS_WINDOWS:
         return Path(tmp) / "railwatch-12306", dict(os.environ, LOCALAPPDATA=tmp, APPDATA=tmp, NODE_OPTIONS="")
     # The Python runtime resolves ~/Library/Application Support through HOME.
+    use_test_keychain(tmp)
     return (Path(tmp) / "Library" / "Application Support" / "railwatch-12306",
             dict(os.environ, HOME=tmp, NODE_OPTIONS=""))
 

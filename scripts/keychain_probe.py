@@ -6,6 +6,7 @@ test keychain setup is broken, not the runtime, so it is reported separately.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import uuid
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from railwatch_preferences import KEYCHAIN_SERVICE, MacSecretStore  # noqa: E402
+from scripts.ci_keychain import use_test_keychain  # noqa: E402
 
 PROBE_SERVICE = KEYCHAIN_SERVICE + ".ci-probe"
 
@@ -32,6 +34,8 @@ def main() -> int:
     account = f"probe-{uuid.uuid4().hex[:12]}"
     store = MacSecretStore(service=PROBE_SERVICE, account=account)
     try:
+        # Same preparation the smoke tests apply to their temporary HOME.
+        use_test_keychain(os.environ["HOME"], args.keychain)
         store.write_all({"probe": "value"})
         if store.read_all() != {"probe": "value"}:
             raise RuntimeError("读回的条目与写入内容不一致")
