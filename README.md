@@ -94,8 +94,6 @@
   </tr>
 </table>
 
-<sub>v0.7.0 截图，使用离线演示数据。</sub>
-
 <a id="download"></a>
 
 ## 下载安装
