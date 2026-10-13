@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { NsisUpdater } from "electron-updater";
+import { INSTALLER_UNAVAILABLE } from "./updateManager";
 
 /** Resolve on OS launch acknowledgement, not merely a returned ChildProcess. */
 export function launchProcess(executable: string, args: string[], elevated = false): Promise<void> {
@@ -30,7 +31,7 @@ export class RailWatchNsisUpdater extends NsisUpdater {
     const installer = this.installerPath;
     const helper = this.downloadedUpdateHelper;
     if (!installer || !helper?.downloadedFileInfo) {
-      throw new Error("已下载的安装程序不可用，请重新检查更新。");
+      throw Object.assign(new Error("已下载的安装程序不可用，请重新检查更新。"), { code: INSTALLER_UNAVAILABLE });
     }
     const args = ["--updated"];
     if (this.autoRunAppAfterInstall) args.push("--force-run");

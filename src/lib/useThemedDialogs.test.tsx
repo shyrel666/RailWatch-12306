@@ -124,47 +124,77 @@ test("declines the active confirmation when the hook unmounts mid-dialog", async
   expect(responded).toEqual([{ id: "confirm-1", accepted: false }]);
 });
 
-test("prompts to install once per downloaded version and installs on acceptance", async () => {
-  renderHook(() => useUpdateReadyPrompt(showDialog));
+test("opens the update panel once per downloaded version without installing", async () => {
+  const showUpdate = vi.fn<(state: UpdateRuntimeState) => void>();
+  const downloaded: UpdateRuntimeState = { phase: "downloaded", currentVersion: "0.3.6", latestVersion: "0.3.7", downloadPercent: 100 };
+  renderHook(() => useUpdateReadyPrompt(showUpdate));
 
   await act(async () => {
     updateCaptor?.({ phase: "downloading", currentVersion: "0.3.6" });
   });
+  expect(showUpdate).not.toHaveBeenCalled();
+  expect(railwatchApi.command).not.toHaveBeenCalled();
+
+  await act(async () => {
+    updateCaptor?.(downloaded);
+    updateCaptor?.(downloaded);
+  });
+  expect(railwatchApi.command).toHaveBeenCalledExactlyOnceWith("taskActivity");
+  expect(showUpdate).toHaveBeenCalledExactlyOnceWith(downloaded);
+
+  await act(async () => {
+    updateCaptor?.(downloaded);
+  });
+  expect(showUpdate).toHaveBeenCalledTimes(1);
+  expect(railwatchApi.command).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    updateCaptor?.({ ...downloaded, latestVersion: "0.3.8" });
+  });
+  expect(showUpdate).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    updateCaptor?.(downloaded);
+  });
+  expect(showUpdate).toHaveBeenCalledTimes(2);
+  expect(installed).toHaveLength(0);
   expect(showDialog).not.toHaveBeenCalled();
-
-  await act(async () => {
-    updateCaptor?.({ phase: "downloaded", currentVersion: "0.3.6", latestVersion: "0.3.7" });
-  });
-  await waitFor(() => expect(showDialog).toHaveBeenCalledTimes(1));
-  expect(showDialog).toHaveBeenCalledWith({
-    title: "发现新版本",
-    content: "RailWatch 12306 0.3.7 已下载完成。是否立即重启安装更新？",
-    okText: "立即重启安装",
-    cancelText: "稍后",
-  });
-
-  await act(async () => {
-    updateCaptor?.({ phase: "downloaded", currentVersion: "0.3.6", latestVersion: "0.3.7" });
-  });
-  expect(showDialog).toHaveBeenCalledTimes(1);
-  await waitFor(() => expect(installed).toHaveLength(1));
 });
 
-test("does not install again when the user chooses to wait", async () => {
-  showDialog.mockResolvedValueOnce(false);
-  renderHook(() => useUpdateReadyPrompt(showDialog));
+test("does not open the update panel if the activity check resolves after unmount", async () => {
+  const showUpdate = vi.fn<(state: UpdateRuntimeState) => void>();
+  let resolveActivity: ((value: import("../types").TaskActivity) => void) | undefined;
+  vi.spyOn(railwatchApi, "command").mockImplementationOnce(() => new Promise(resolve => {
+    resolveActivity = resolve;
+  }) as never);
+  const { unmount } = renderHook(() => useUpdateReadyPrompt(showUpdate));
 
   await act(async () => {
     updateCaptor?.({ phase: "downloaded", currentVersion: "0.3.6", latestVersion: "0.3.7" });
   });
-  await waitFor(() => expect(showDialog).toHaveBeenCalledTimes(1));
+  unmount();
+  await act(async () => {
+    resolveActivity?.({ state: "idle", run_id: null, operation: null, unresolved_order: false, checked_at: 1 });
+  });
+  expect(showUpdate).not.toHaveBeenCalled();
+  expect(showDialog).not.toHaveBeenCalled();
   expect(installed).toHaveLength(0);
 });
 
-test("defers update prompt while a task is active", async () => {
-  vi.spyOn(railwatchApi, "command").mockImplementation(async () => ({ state: "busy", run_id: "run", operation: "submitting", unresolved_order: false, checked_at: 1 }) as never);
-  renderHook(() => useUpdateReadyPrompt(showDialog));
-  await act(async () => { updateCaptor?.({ phase: "downloaded", currentVersion: "0.4.1", latestVersion: "0.4.2" }); });
+test.each([
+  { state: "busy" as const, run_id: "run", operation: "submitting", unresolved_order: false, checked_at: 1 },
+  { state: "idle" as const, run_id: null, operation: null, unresolved_order: true, checked_at: 1 },
+])("defers the update panel for activity $state with unresolved order $unresolved_order and retries later", async (activity) => {
+  const showUpdate = vi.fn<(state: UpdateRuntimeState) => void>();
+  const downloaded: UpdateRuntimeState = { phase: "downloaded", currentVersion: "0.4.1", latestVersion: "0.4.2" };
+  vi.spyOn(railwatchApi, "command").mockImplementationOnce(async () => activity as never);
+  renderHook(() => useUpdateReadyPrompt(showUpdate));
+  await act(async () => { updateCaptor?.(downloaded); });
+  expect(showUpdate).not.toHaveBeenCalled();
   expect(showDialog).not.toHaveBeenCalled();
+  expect(installed).toHaveLength(0);
+
+  await act(async () => { updateCaptor?.(downloaded); });
+  expect(showUpdate).toHaveBeenCalledExactlyOnceWith(downloaded);
+  expect(railwatchApi.command).toHaveBeenCalledTimes(2);
   expect(installed).toHaveLength(0);
 });

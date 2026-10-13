@@ -105,11 +105,14 @@ class TripChoicesTests(unittest.TestCase):
     def test_seat_transaction_support_is_explicit(self):
         seats = public_seat_capabilities()
         self.assertIn("硬卧", [item["name"] for item in seats if item["regular"]])
+        self.assertEqual([item["name"] for item in seats if item["alternate"]], ["二等座", "一等座", "硬座", "软座", "硬卧", "软卧"])
         self.assertEqual(validate_automation_seats("硬座，软卧", regular=True, alternate=False), ["硬座", "软卧"])
+        self.assertEqual(validate_automation_seats("一等座，硬座，软座，硬卧，软卧", regular=True, alternate=True),
+                         ["一等座", "硬座", "软座", "硬卧", "软卧"])
         with self.assertRaisesRegex(ValueError, "尚未通过"):
             validate_automation_seats("高级软卧", regular=True, alternate=False)
         with self.assertRaisesRegex(ValueError, "尚未通过"):
-            validate_automation_seats("硬座", regular=False, alternate=True)
+            validate_automation_seats("无座", regular=False, alternate=True)
 
     def test_structured_passenger_selection_keeps_legacy_name_field(self):
         selected = validate_config({"passengers": "张三", "passenger_selections": [

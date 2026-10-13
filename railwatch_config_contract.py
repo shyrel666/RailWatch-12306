@@ -6,6 +6,8 @@ import datetime as dt
 import math
 import re
 from railwatch_dates import validate_travel_date, beijing_now
+from railwatch_alternate_options import canonical_deadline, deadline_minutes, normalize_windows
+from dataclasses import asdict
 from railwatch_policies import DATE_STRATEGIES, ORDER_POLICIES, normalize_strategy, priority_defaults
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
@@ -37,6 +39,8 @@ TRIP_FIELD_KEYS = (
     "passenger_selections",
     "auto_alternate",
     "alternate_deadline",
+    "alternate_accept_new_trains",
+    "alternate_new_train_windows",
     "alternate_mode",
     "alternate_max_combinations",
     "order_watch_enabled",
@@ -82,7 +86,9 @@ def default_config(
         "passengers": "",
         "passenger_selections": [],
         "auto_alternate": False,
-        "alternate_deadline": "开车前60分钟",
+        "alternate_deadline": "开车前1小时",
+        "alternate_accept_new_trains": False,
+        "alternate_new_train_windows": [],
         **{key: ORDER_POLICIES[key] for key in ("alternate_mode", "alternate_max_combinations",
                                                "order_watch_enabled", "order_watch_interval_seconds")},
         "date_range": "±1天",
@@ -171,7 +177,9 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     trip["seat_prefer"] = str(trip.get("seat_prefer", "无偏好")).strip() or "无偏好"
     trip["passengers"] = str(trip.get("passengers", "")).strip()
     trip["passenger_selections"] = normalize_passenger_selections(trip.get("passenger_selections", []))
-    trip["alternate_deadline"] = str(trip.get("alternate_deadline", "开车前60分钟")).strip() or "开车前60分钟"
+    trip["alternate_deadline"] = canonical_deadline(trip.get("alternate_deadline", "开车前1小时"))
+    trip["alternate_accept_new_trains"] = _to_bool(trip.get("alternate_accept_new_trains", False))
+    trip["alternate_new_train_windows"] = [asdict(item) for item in normalize_windows(trip.get("alternate_new_train_windows", []))]
     trip["target_time"] = str(trip.get("target_time", "00:00:00")).strip() or "00:00:00"
     for key in ("sale_at", "sale_time_source", "sale_time_checked_at"):
         trip[key] = str(trip.get(key, "")).strip()
@@ -270,6 +278,9 @@ def merge_notification_settings(raw: Optional[Mapping[str, Any]] = None) -> Dict
     defaults = {
         "desktop_urgent": True,
         "sound_loop": True,
+        "sound_tone": "beep",
+        "sound_custom_file": "",
+        "sound_custom_name": "",
         "window_attention": True,
         "server_chan_enabled": False,
         "server_chan_key": "",
@@ -288,6 +299,16 @@ def merge_notification_settings(raw: Optional[Mapping[str, Any]] = None) -> Dict
     merged = {**defaults, **dict(raw)}
     merged["desktop_urgent"] = _to_bool(merged.get("desktop_urgent"))
     merged["sound_loop"] = _to_bool(merged.get("sound_loop"))
+    if merged.get("sound_tone") not in ("beep", "chime", "double", "alarm", "custom"):
+        merged["sound_tone"] = "beep"
+    file = merged.get("sound_custom_file")
+    if not isinstance(file, str) or not re.fullmatch(r"[a-f0-9]{64}\.(wav|mp3|ogg|m4a)", file):
+        merged["sound_custom_file"] = ""
+        merged["sound_custom_name"] = ""
+    name = merged.get("sound_custom_name")
+    merged["sound_custom_name"] = name[:160] if isinstance(name, str) and not any(ord(char) < 32 for char in name) else ""
+    if merged["sound_tone"] == "custom" and not merged["sound_custom_file"]:
+        merged["sound_tone"] = "beep"
     merged["window_attention"] = _to_bool(merged.get("window_attention"))
     merged["server_chan_enabled"] = _to_bool(merged.get("server_chan_enabled"))
     merged["email_enabled"] = _to_bool(merged.get("email_enabled"))
@@ -304,8 +325,8 @@ def validate_notification_patch(patch: object) -> dict:
     if not isinstance(patch, dict):
         raise ValueError("通知设置必须为对象。")
     bool_fields = {"desktop_urgent", "sound_loop", "window_attention", "server_chan_enabled", "email_enabled", "wecom_webhook_enabled"}
-    text_fields = {"server_chan_key", "email_smtp_host", "email_user", "email_password", "email_to", "wecom_webhook_url"}
-    known = bool_fields | text_fields | {"email_smtp_port", "event_channels"}
+    text_fields = {"server_chan_key", "email_smtp_host", "email_user", "email_password", "email_to", "wecom_webhook_url", "sound_custom_file", "sound_custom_name"}
+    known = bool_fields | text_fields | {"email_smtp_port", "event_channels", "sound_tone"}
     events = set(merge_notification_settings()["event_channels"])
     channels = {"server_chan", "email", "wecom_webhook"}
     cleaned = {}
@@ -322,6 +343,12 @@ def validate_notification_patch(patch: object) -> dict:
             raise ValueError(f"通知字段包含非法换行：{key}")
         if key == "email_smtp_port" and (type(value) is not int or not 1 <= value <= 65535):
             raise ValueError("SMTP 端口必须在 1 至 65535 之间。")
+        if key == "sound_tone" and value not in ("beep", "chime", "double", "alarm", "custom"):
+            raise ValueError("提示音选择无效。")
+        if key == "sound_custom_file" and value and not re.fullmatch(r"[a-f0-9]{64}\.(wav|mp3|ogg|m4a)", value):
+            raise ValueError("自定义提示音文件无效，请先导入音频。")
+        if key == "sound_custom_name" and (len(value) > 160 or any(ord(char) < 32 for char in value)):
+            raise ValueError("自定义提示音名称无效。")
         if key == "event_channels":
             if not isinstance(value, dict) or set(value) - events:
                 raise ValueError("通知事件选择无效。")
@@ -377,6 +404,8 @@ def validate_trip_draft(payload: object) -> dict:
         raise ValueError("草稿配置版本不受支持。")
     if "passenger_selections" in config:
         normalize_passenger_selections(config["passenger_selections"])
+    if "alternate_new_train_windows" in config:
+        normalize_windows(config["alternate_new_train_windows"])
     return deepcopy(payload)
 
 
@@ -443,6 +472,17 @@ def automation_config_issue(config) -> Optional[str]:
         validate_automation_seats(config.get("seat_keyword", ""),
                                   regular=bool(config.get("auto_submit")),
                                   alternate=bool(config.get("auto_alternate")))
+        if config.get("auto_alternate"):
+            if not deadline_minutes(config.get("alternate_deadline", "开车前1小时")):
+                raise ValueError("请重新选择截止兑现时间，仅支持官网提供的选项。")
+            if config.get("alternate_accept_new_trains"):
+                from railwatch_dates import expand_travel_dates
+                windows = normalize_windows(config.get("alternate_new_train_windows", []))
+                if not windows:
+                    raise ValueError("接受新增列车时，请设置至少一个日期和出发时段。")
+                dates = expand_travel_dates(config.get("date", ""), config.get("date_range", "单日"))
+                if any(item.date not in dates for item in windows):
+                    raise ValueError("新增列车日期须在当前行程日期范围内，请重新选择。")
     except ValueError as exc:
         return str(exc)
     return None

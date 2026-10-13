@@ -107,20 +107,31 @@ def main():
             def button(text):
                 click(wait.until(lambda d: d.find_element("xpath", f"//button[normalize-space(.)='{text}']")))
 
+            def automation_dialog(d):
+                return next((e for e in d.find_elements("css selector", ".automation-dialog") if e.is_displayed()), None)
+
+            def close_automation():
+                click(automation_dialog(driver).find_element("css selector", ".ant-modal-footer .ant-btn-primary"))
+                wait.until(lambda d: not automation_dialog(d))
+
             def automation(enable_alternate=False):
                 driver.find_element("css selector", '[aria-label="行程设置"]').click()
                 section = wait.until(lambda d: d.find_element("id", "trip-automation"))
-                if not section.get_attribute("open"):
-                    click(section.find_element("css selector", "summary"))
                 if enable_alternate:
-                    # Alternate settings stay hidden until the risk confirmation is accepted.
-                    assert not section.find_elements("css selector", '[aria-label="候补组合"]')
-                    click(section.find_element("xpath", ".//label[.//strong[text()='候补排队关闭']]//button[@role='switch']"))
+                    # Enable alternate from the trip page before its configuration becomes available.
+                    assert not automation_dialog(driver)
+                    assert not section.find_elements("css selector", "button[aria-haspopup='dialog']")
+                    click(section.find_element("css selector", "button[role='switch'][aria-label^='自动候补已关闭']"))
                     dialogs = lambda d: [e for e in d.find_elements("css selector", ".railwatch-dialog") if e.is_displayed()]
                     wait.until(dialogs)
+                    assert not automation_dialog(driver)
+                    assert not driver.find_elements("css selector", '[aria-label="候补组合"]')
                     # A click during the dialog's entry motion can be dropped, so keep confirming until it closes.
                     settle.until(lambda d: not dialogs(d) or d.find_element("css selector", ".railwatch-dialog .ant-btn-primary").click())
-                return wait.until(lambda d: d.find_element("css selector", '[aria-label="候补组合"]'))
+                elif not automation_dialog(driver):
+                    click(section.find_element("css selector", "button[aria-haspopup='dialog']"))
+                dialog = wait.until(automation_dialog)
+                return dialog.find_element("css selector", '[aria-label="候补组合"]')
 
             def capture(name):
                 assert driver.execute_script("return document.querySelector('.page-surface').scrollWidth<=document.querySelector('.page-surface').clientWidth+1")
@@ -131,26 +142,34 @@ def main():
                 driver.get(url)
                 driver.execute_script("localStorage.setItem('qa-theme',arguments[0]);localStorage.removeItem('qa-config')", theme)
                 driver.get(url)
-                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
+                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 7
+                           and not d.find_elements("id", "startup-splash"))
                 click(automation(enable_alternate=True))
                 settle.until(lambda d: d.find_element("xpath", "//div[contains(@class,'ant-select-item-option-content') and text()='多个已配置组合']").click() or True)
-                for label, value in (("候补组合上限", "8"), ("订单核对间隔（秒）", "120")):
-                    field = driver.find_element("css selector", f'[aria-label="{label}"]')
-                    field.send_keys(Keys.CONTROL, "a")
-                    field.send_keys(value, Keys.TAB)
+                limit = automation_dialog(driver).find_element("css selector", '[aria-label="候补组合上限"]')
+                limit.send_keys(Keys.CONTROL, "a")
+                limit.send_keys("8", Keys.TAB)
+                close_automation()
+                # Order tracking covers regular orders too, so it lives on the trip page, not in the waitlist dialog.
+                interval = driver.find_element("css selector", '#trip-automation [aria-label="订单核对间隔（秒）"]')
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'})", interval)
+                interval.send_keys(Keys.CONTROL, "a")
+                interval.send_keys("120", Keys.TAB)
                 button("保存配置")
                 wait.until(lambda d: d.execute_script("return JSON.parse(localStorage.getItem('qa-config')||'{}').alternate_max_combinations===8"))
                 saved = driver.execute_script("return JSON.parse(localStorage.getItem('qa-config'))")
                 assert saved["alternate_mode"] == "multiple" and saved["order_watch_interval_seconds"] == 120
                 assert saved["order_watch_enabled"] and not saved["auto_submit"] and saved["auto_alternate"]
                 driver.get(url)
-                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
+                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 7
+                           and not d.find_elements("id", "startup-splash"))
                 automation()
                 assert driver.find_element("css selector", '[aria-label="候补组合上限"]').get_attribute("value") == "8"
-                interval = driver.find_element("css selector", '[aria-label="订单核对间隔（秒）"]')
-                assert interval.get_attribute("value") == "120"
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'})", interval)
+                assert not automation_dialog(driver).find_elements("css selector", '[aria-label="订单核对间隔（秒）"]')
                 capture(f"trip-{width}-{theme}.png")
+                close_automation()
+                interval = driver.find_element("css selector", '#trip-automation [aria-label="订单核对间隔（秒）"]')
+                assert interval.get_attribute("value") == "120"
                 driver.execute_script("qa.observe(true)")
                 driver.find_element("css selector", '[aria-label="购票监控"]').click()
                 policy = wait.until(lambda d: d.find_element("css selector", '[aria-label="本次候补与核对策略"]'))

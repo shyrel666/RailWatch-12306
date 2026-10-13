@@ -13,7 +13,7 @@ import type { CommandRunner } from "./componentTypes";
 const verdictSummary = { ready: "开售时的主要路径已验证", blocked: "当前配置存在会阻止执行的步骤", risky: "请查看检查结果", cancelled: "本次彩排未完成" };
 
 const timelineHelp = <div className="rehearsal-timeline-help-content">
-  <p>T0 表示起售时刻。绿色条按阶段先后排列，长度表示预计耗时，并非实时进度。</p>
+  <p>T0 表示起售时刻。条形按阶段先后排列，长度表示预计耗时，最长的阶段以深色标出；并非实时进度。</p>
   <ul>
     <li><strong>唤醒迟到：</strong>定时程序到点后，实际开始执行的延迟。</li>
     <li><strong>查询往返：</strong>发起一次余票查询到收到结果的时间。</li>
@@ -109,7 +109,7 @@ export function RehearsalPanel({ busy, runCommand }: { busy: string | null; runC
         {countChecks(report.checks).filter(([, count]) => count).map(([key, count]) => ` ${count} ${checkLabels[key]}`).join(" ·")}</p>
       {stale ? <p role="status" className="rehearsal-warning">行程已修改或来自历史记录，彩排结果已过期</p> : null}
     </div> : null}
-    {!status.monitoring && status.task?.run_id ? <Button onClick={() => navigate("订单中心", "order-run-reviews")}>查看本次复盘</Button> : null}
+    {!status.monitoring && status.task?.run_id ? <Button onClick={() => navigate("运行复盘")}>查看本次复盘</Button> : null}
     <Modal open={open} centered width={820} className="railwatch-dialog rehearsal-dialog" onCancel={() => setOpen(false)}
       title={<span className="dialog-title"><ClipboardCheck size={18} />{title}</span>}
       footer={<>{active && rehearsal.trigger === "manual" ? <Button onClick={() => void cancel()}>取消彩排</Button> : null}
@@ -133,7 +133,7 @@ export function RehearsalPanel({ busy, runCommand }: { busy: string | null; runC
               </button>
             </Popover>
           </h3>
-          <TimelineWaterfall segments={report.prediction} />
+          <TimelineWaterfall segments={report.prediction} label="预测时间线" showSource />
         </> : null}
       </div>
     </Modal>

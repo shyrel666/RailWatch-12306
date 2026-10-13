@@ -151,6 +151,74 @@ class RunReviewTests(unittest.TestCase):
             finally:
                 bridge.notification_service.close()
 
+    def test_query_pulse_reads_the_newest_queried_run_oldest_first(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_task import MonitorTask
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = RailWatchBridge(directory)
+            journal = bridge.order_journal
+            try:
+                self.assertEqual(bridge.query_pulse(), {"run_id": None, "started_at": None, "target_at": None,
+                                                        "trip": {}, "recorded": 0, "items": [], "active": False})
+                journal.mark("old-run", "target_sale", detail={"target_at": None, "trip": {"from_station": "北京"}})
+                journal.record_telemetry("old-run", "query_timing", detail={"status": "ok"})
+                journal.mark("new-run", "target_sale", detail={"target_at": 1700000000, "trip": {"from_station": "上海"}})
+                steps = [{"id": "prepare", "duration_ms": 100}, {"id": "query", "duration_ms": 1400.5}]
+                for index in range(5):
+                    journal.record_telemetry("new-run", "query_timing", detail={
+                        "status": "timeout" if index == 1 else "ok", "date": f"2026-10-1{index}",
+                        "hit": index == 4, "steps": steps})
+                journal.record_telemetry("new-run", "query_timing", detail={
+                    "status": "ok", "steps": [None, {"id": "query", "duration_ms": -1}]})
+                pulse = bridge.query_pulse(3)
+                self.assertEqual((pulse["run_id"], pulse["recorded"], pulse["target_at"], pulse["trip"], pulse["active"]),
+                                 ("new-run", 6, 1700000000, {"from_station": "上海"}, False))
+                self.assertIsInstance(pulse["started_at"], float)
+                self.assertEqual([(item["date"], item["status"], item["duration_ms"], item["hit"]) for item in pulse["items"]],
+                                 [("2026-10-13", "ok", 1500.5, False), ("2026-10-14", "ok", 1500.5, True), ("", "ok", None, None)])
+                self.assertEqual([item["status"] for item in bridge.query_pulse(10)["items"]][:2], ["ok", "timeout"])
+                task = MonitorTask({})
+                bridge._task = task
+                live = bridge.query_pulse()
+                self.assertEqual((live["run_id"], live["items"], live["active"]), (task.run_id, [], True))
+                for limit in (0, 201, "60"):
+                    with self.assertRaises(ValueError):
+                        journal.query_pulse(limit)
+                with self.assertRaises(ValueError):
+                    journal.query_pulse(1, "invalid/'id")
+            finally:
+                bridge._task = None
+                bridge.notification_service.close()
+
+    def test_query_pulse_reads_buffered_timings_without_flushing_or_counting_twice(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            journal = OrderJournal(Path(directory) / "orders.sqlite3")
+            journal.mark("run", "target_sale", detail={"target_at": None, "trip": {}})
+            for index in range(3):
+                journal.record_telemetry("run", "query_timing", detail={"status": "ok", "date": f"2026-10-1{index}"})
+            pulse = journal.query_pulse(10)
+            self.assertEqual((pulse["run_id"], pulse["recorded"], len(pulse["items"])), ("run", 3, 3))
+            # A dashboard poll leaves batching to the monitor.
+            self.assertEqual(len(journal._telemetry_batch), 3)
+            journal.flush_telemetry()
+            self.assertEqual(journal.query_pulse(10), pulse)
+            journal.record_telemetry("run", "query_timing", detail={"status": "timeout"})
+            original, flushed = journal.connection, []
+
+            def flush_after_copy():
+                # The monitor flushes between the buffer copy and the table read.
+                if not flushed:
+                    flushed.append(True)
+                    journal.flush_telemetry()
+                return original()
+
+            with patch.object(journal, "connection", side_effect=flush_after_copy):
+                raced = journal.query_pulse(10)
+            self.assertEqual(raced["recorded"], 4)
+            self.assertEqual([item["status"] for item in raced["items"]], ["ok", "ok", "ok", "timeout"])
+
     def test_query_pair_does_not_cross_a_new_click(self):
         review = build_run_review([event(1, "target_sale", 0), event(2, "query_click", 1),
                                   event(3, "query_click", 10), event(4, "query_result", 11)])

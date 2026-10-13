@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { launchProcess, RailWatchNsisUpdater } from "../nsisUpdater";
+import { INSTALLER_UNAVAILABLE } from "../updateManager";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock("node:child_process", async importOriginal => ({
@@ -45,6 +46,13 @@ test("a ChildProcess return is not success until spawn is acknowledged", async (
   expect(mocks.spawn).toHaveBeenCalledWith("installer.exe", ["--updated"], {
     detached: true, stdio: "ignore", windowsHide: true,
   });
+});
+
+test("a vanished download is reported with the code that sends users back to checking", async () => {
+  const instance = updater();
+  Object.assign(instance, { downloadedUpdateHelper: null });
+  await expect(instance.launchInstaller()).rejects.toMatchObject({ code: INSTALLER_UNAVAILABLE });
+  expect(mocks.spawn).not.toHaveBeenCalled();
 });
 
 test("asynchronous spawn failure is returned without requesting app quit", async () => {

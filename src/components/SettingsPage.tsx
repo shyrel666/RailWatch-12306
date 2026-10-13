@@ -3,16 +3,22 @@ import { useContext, useEffect, useRef, useState, type RefObject } from "react";
 import {
   Activity,
   Bell,
+  CalendarClock,
+  Check,
   Cpu,
   Database,
   Download,
+  FolderOpen,
   Globe,
   HardDrive,
   LogIn,
   Monitor,
+  MonitorX,
   Palette,
+  PanelBottomClose,
   SlidersHorizontal,
   Trash2,
+  UserRound,
   Wifi,
   Wrench,
   XCircle,
@@ -27,6 +33,7 @@ import type { RailWatchStatus } from "../types";
 import type { RailWatchPreferences } from "../types";
 import { railwatchApi } from "../lib/railwatchApi";
 import { NotificationSettingsPanel } from "./NotificationSettingsPanel";
+import { SettingRow, SettingsSection } from "./SettingsPrimitives";
 
 const SECTIONS: { id: string; label: string; icon: LucideIcon }[] = [
   { id: "settings-environment", label: "环境与登录", icon: Activity },
@@ -68,6 +75,7 @@ function ThemePicker() {
             <i className="tp-board" />
             <i className="tp-card" />
             <i className="tp-card short" />
+            <span className="theme-option-check"><Check size={11} strokeWidth={3} /></span>
           </span>
           <span className="theme-option-copy">
             <strong>{option.label}</strong>
@@ -79,12 +87,13 @@ function ThemePicker() {
   );
 }
 
-function useActiveSection(navRef: RefObject<HTMLElement | null>) {
+function useActiveSection(navRef: RefObject<HTMLElement | null>, suspended = false) {
   const [active, setActive] = useState(SECTIONS[0].id);
   // A clicked section stays selected during its smooth scroll, even when the page
   // bottoms out before its heading reaches the bar. Manual scrolling releases it.
   const pinned = useRef<string | null>(null);
   useEffect(() => {
+    if (suspended) return undefined;
     const scroller = navRef.current?.closest<HTMLElement>(".page-surface");
     if (!scroller) return undefined;
     const update = () => {
@@ -112,7 +121,7 @@ function useActiveSection(navRef: RefObject<HTMLElement | null>) {
       scroller.removeEventListener("keydown", release);
       scroller.removeEventListener("pointerdown", release);
     };
-  }, [navRef]);
+  }, [navRef, suspended]);
   const select = (id: string) => {
     pinned.current = id;
     setActive(id);
@@ -124,11 +133,16 @@ function useActiveSection(navRef: RefObject<HTMLElement | null>) {
 export function SettingsPage({
   busy,
   runCommand,
+  autoCheckEnvironment = false,
+  onEnvironmentCheckStart,
 }: {
   busy: string | null;
   runCommand: CommandRunner;
+  autoCheckEnvironment?: boolean;
+  onEnvironmentCheckStart?: () => void;
 }) {
   const runtime = useRailWatchStore((state) => state.runtime);
+  const environmentReady = useRailWatchStore((state) => state.status.environment_ready);
   const loginReady = useRailWatchStore((state) => state.status.login_ready);
   const [checkingLogin, setCheckingLogin] = useState(false);
   const [loginResult, setLoginResult] = useState<{ ready: boolean; message: string } | null>(null);
@@ -140,7 +154,16 @@ export function SettingsPage({
   const [trayReady, setTrayReady] = useState(false);
   const [trayError, setTrayError] = useState("");
   const navRef = useRef<HTMLElement>(null);
-  const [activeSection, selectSection] = useActiveSection(navRef);
+  const [activeSection, selectSection] = useActiveSection(navRef, autoCheckEnvironment);
+  const checkingEnvironment = busy === "checkEnvironment";
+  useEffect(() => {
+    if (!autoCheckEnvironment) return;
+    const timer = window.setTimeout(() => {
+      onEnvironmentCheckStart?.();
+      void runCommand("checkEnvironment");
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [autoCheckEnvironment, onEnvironmentCheckStart, runCommand]);
   useEffect(() => {
     let alive = true;
     void railwatchApi.command<RailWatchPreferences>("loadPreferences").then((value) => {
@@ -209,6 +232,38 @@ export function SettingsPage({
     },
   ];
   const loginOk = checkingLogin ? null : (loginResult?.ready ?? loginReady);
+  if (autoCheckEnvironment) {
+    return (
+      <div className="settings-page-loading" role="status" aria-label="环境检查进度" aria-live="polite">
+        <div className="settings-page-loading-content">
+          <span className="settings-page-loading-rail" aria-hidden="true">
+            <span className="settings-page-loading-track" />
+            <i className="settings-page-loading-station start" />
+            <i className="settings-page-loading-station middle" />
+            <i className="settings-page-loading-station end" />
+            <svg className="settings-page-loading-train" viewBox="-20 0 88 34" fill="none">
+              <g className="settings-page-loading-speed" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <path d="M-14 13h9M-19 19h13" />
+              </g>
+              <g stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+                <path className="loading-train-body" d="M5 9h33c10 0 18 6 26 17H5a3 3 0 0 1-3-3V12a3 3 0 0 1 3-3Z" />
+                <path d="M3 22h57M11 6h21" strokeLinecap="round" />
+              </g>
+              <g fill="currentColor">
+                <rect x="9" y="13" width="6" height="5" rx="1.2" />
+                <rect x="19" y="13" width="6" height="5" rx="1.2" />
+                <rect x="29" y="13" width="6" height="5" rx="1.2" />
+                <path d="M42 13c4 1 8 4 12 8H42Z" />
+                <circle cx="13" cy="28" r="2.5" />
+                <circle cx="43" cy="28" r="2.5" />
+              </g>
+            </svg>
+          </span>
+          <strong>检查程序启动中</strong>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="settings-workspace">
       <nav className="settings-nav" aria-label="设置分组" ref={navRef}>
@@ -226,129 +281,123 @@ export function SettingsPage({
         ))}
       </nav>
       <div className="settings-sections">
-        <section
-          className="settings-section"
+        <SettingsSection
           id="settings-environment"
-          tabIndex={-1}
-        >
-          <div className="section-heading">
-            <div className="section-title-copy">
-              <h2>环境与登录</h2>
-              <p>启动监控前，确认浏览器、驱动与 12306 会话都可用。</p>
-            </div>
+          icon={Activity}
+          title="环境与登录"
+          description="开始监控前，确认浏览器、驱动与登录状态。"
+          focusable
+          actions={
             <Button
+              className="settings-environment-check"
+              type="primary"
               icon={<Activity size={15} />}
-              loading={busy === "checkEnvironment"}
+              disabled={checkingEnvironment}
+              loading={checkingEnvironment}
               onClick={() => void runCommand("checkEnvironment")}
             >
               检查环境
             </Button>
-          </div>
+          }
+        >
           <div className="health-grid">
             {health.map((item) => (
               <div className={"health-tile" + (item.ok ? " ok" : " warn")} key={item.label}>
-                <div className="health-tile-head">
-                  <item.icon size={16} aria-hidden="true" />
+                <span className="health-tile-label">
+                  <item.icon size={14} aria-hidden="true" />
+                  {item.label}
+                </span>
+                <strong>
                   <i className={"lamp " + (item.ok ? "go" : "wait")} aria-hidden="true" />
-                </div>
-                <span>{item.label}</span>
-                <strong className={item.ok ? "health-ok" : "health-warning"}>
-                  {item.detail}
+                  <span>{item.detail}</span>
                 </strong>
               </div>
             ))}
           </div>
-          <div className="setting-row">
-            <div>
-              <strong>ChromeDriver</strong>
-              <p className="path-text mono">{runtime.chromedriver_path || "未安装"}</p>
-              <p>Chrome 版本 · {runtime.chrome_version}</p>
-            </div>
-            <Button
-              icon={<Download size={15} />}
-              loading={busy === "downloadChromeDriver"}
-              onClick={() => void runCommand("downloadChromeDriver")}
+          <SettingRow
+            icon={Download}
+            title="ChromeDriver"
+            control={
+              <Button
+                icon={<Download size={15} />}
+                loading={busy === "downloadChromeDriver"}
+                onClick={() => void runCommand("downloadChromeDriver")}
+              >
+                下载 ChromeDriver
+              </Button>
+            }
+          >
+            <p className="path-text mono">{runtime.chromedriver_path || "未安装"}</p>
+            <p className="setting-meta">Chrome 版本 · {runtime.chrome_version}</p>
+          </SettingRow>
+          <SettingRow
+            id="settings-login"
+            icon={UserRound}
+            title="12306 登录"
+            control={
+              <div className="button-row">
+                <Button
+                  icon={<LogIn size={15} />}
+                  loading={busy === "openLogin"}
+                  disabled={!environmentReady || checkingEnvironment || checkingLogin}
+                  onClick={() => { setLoginResult(null); void runCommand("openLogin"); }}
+                >
+                  打开登录
+                </Button>
+                <Button
+                  loading={checkingLogin || busy === "checkLogin"}
+                  disabled={!environmentReady || checkingEnvironment || busy === "openLogin"}
+                  onClick={() => void checkLogin()}
+                >
+                  检查登录
+                </Button>
+              </div>
+            }
+          >
+            <p
+              role="status"
+              aria-live="polite"
+              className={"login-state " + (loginOk === null ? "" : loginOk ? "health-ok" : "health-warning")}
             >
-              下载 ChromeDriver
-            </Button>
-          </div>
-          <div className="setting-row" id="settings-login" tabIndex={-1}>
-            <div>
-              <strong>12306 登录</strong>
-              <p>在官方页面完成登录后，检查当前会话。</p>
-              <p
-                role="status"
-                aria-live="polite"
-                className={"login-state " + (loginOk === null ? "" : loginOk ? "health-ok" : "health-warning")}
-              >
-                {checkingLogin ? "正在检查12306登录状态…" : loginResult?.message || (loginReady ? "登录已验证" : "尚未检查当前登录状态")}
-              </p>
-            </div>
-            <div className="button-row">
-              <Button
-                icon={<LogIn size={15} />}
-                loading={busy === "openLogin"}
-                disabled={checkingLogin}
-                onClick={() => { setLoginResult(null); void runCommand("openLogin"); }}
-              >
-                打开登录
-              </Button>
-              <Button
-                loading={checkingLogin || busy === "checkLogin"}
-                onClick={() => void checkLogin()}
-              >
-                检查登录
-              </Button>
-            </div>
-          </div>
-        </section>
-        <section className="settings-section" id="settings-appearance">
-          <div className="section-heading">
-            <div className="section-title-copy">
-              <h2>外观</h2>
-              <p>选择界面主题；顶部的主题按钮也可以随时切换。</p>
-            </div>
-          </div>
+              {checkingLogin
+                ? "正在检查12306登录状态…"
+                : !environmentReady
+                  ? "请先检查运行环境，再打开登录。"
+                  : loginResult?.message || (loginReady ? "登录已验证" : "尚未检查当前登录状态")}
+            </p>
+          </SettingRow>
+        </SettingsSection>
+        <SettingsSection id="settings-appearance" icon={Palette} title="外观" description="选择界面配色，切换后立即生效。">
           <ThemePicker />
-        </section>
-        <section className="settings-section" id="settings-behavior">
-          <div className="section-heading">
-            <div className="section-title-copy">
-              <h2>运行偏好</h2>
-              <p>窗口关闭方式与定时任务的准备动作。</p>
-            </div>
-          </div>
-          <div className="setting-row">
-            <div>
-              <strong>关闭到托盘</strong>
-              <p>关闭主窗口后继续运行监控；双击托盘图标可重新打开，退出请使用托盘菜单。</p>
-            </div>
-            <Switch aria-label="关闭到托盘" checked={closeToTray} disabled={!trayReady || traySaving} loading={traySaving} onChange={(next) => void saveTrayPreference(next)} />
-          </div>
-          <div className="setting-row">
-            <div>
-              <strong>启用起售彩排</strong>
-              <p>定时任务开始等待前，仅在距起售超过 15 分钟时自动彩排。</p>
-            </div>
-            <Switch aria-label="启用起售彩排" checked={autoRehearsal} disabled={!trayReady || rehearsalSaving} loading={rehearsalSaving}
-              onChange={next => { setRehearsalSaving(true); void railwatchApi.command<RailWatchPreferences>("savePreferences", { auto_rehearsal: next })
-                .then(saved => { if (saved.auto_rehearsal !== next) throw new Error("彩排偏好未保存"); setAutoRehearsal(saved.auto_rehearsal === true); setTrayError(""); })
-                .catch(() => setTrayError("自动彩排偏好未保存，请重试。" )).finally(() => setRehearsalSaving(false)); }} />
-          </div>
+        </SettingsSection>
+        <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式与开售前检查。">
+          <SettingRow
+            icon={PanelBottomClose}
+            title="关闭到托盘"
+            control={<Switch aria-label="关闭到托盘" checked={closeToTray} disabled={!trayReady || traySaving} loading={traySaving} onChange={(next) => void saveTrayPreference(next)} />}
+          >
+            <p>关闭窗口后继续监控，从托盘图标重新打开或退出。</p>
+          </SettingRow>
+          <SettingRow
+            icon={CalendarClock}
+            title="启用起售彩排"
+            control={
+              <Switch aria-label="启用起售彩排" checked={autoRehearsal} disabled={!trayReady || rehearsalSaving} loading={rehearsalSaving}
+                onChange={next => { setRehearsalSaving(true); void railwatchApi.command<RailWatchPreferences>("savePreferences", { auto_rehearsal: next })
+                  .then(saved => { if (saved.auto_rehearsal !== next) throw new Error("彩排偏好未保存"); setAutoRehearsal(saved.auto_rehearsal === true); setTrayError(""); })
+                  .catch(() => setTrayError("自动彩排偏好未保存，请重试。" )).finally(() => setRehearsalSaving(false)); }} />
+            }
+          >
+            <p>在购票监控页提供开售前的只读检查；定时任务距起售超过 15 分钟时自动运行一次。</p>
+          </SettingRow>
           {trayError && <p role="alert" className="settings-error">{trayError}</p>}
-        </section>
+        </SettingsSection>
         <NotificationSettingsPanel />
-        <section className="settings-section" id="settings-data">
-          <div className="section-heading">
-            <div className="section-title-copy">
-              <h2>本地数据</h2>
-              <p>配置、登录信息与订单记录只保存在这台电脑。</p>
-            </div>
-          </div>
+        <SettingsSection id="settings-data" icon={HardDrive} title="本地数据" description="所有配置与记录只保存在这台电脑。">
           <div className="data-grid">
             <div className="data-tile">
               <div className="data-tile-head">
-                <span>数据目录</span>
+                <span><FolderOpen size={14} aria-hidden="true" />数据目录</span>
                 <span className={"status-badge " + (runtime.data_dir_writable ? "green" : "amber")}>
                   {runtime.data_dir_writable ? "可读写" : "不可写"}
                 </span>
@@ -357,47 +406,46 @@ export function SettingsPage({
             </div>
             <div className="data-tile">
               <div className="data-tile-head">
-                <span>磁盘可用</span>
+                <span><Database size={14} aria-hidden="true" />磁盘可用</span>
               </div>
               <strong>{formatDataDirFreeSpace(runtime.data_dir_free_bytes)}</strong>
             </div>
           </div>
-        </section>
-        <section className="settings-section maintenance" id="settings-maintenance">
-          <div className="section-heading">
-            <div className="section-title-copy">
-              <h2>维护操作</h2>
-              <p>按需使用；清除数据不可撤销。</p>
-            </div>
-          </div>
-          <div className="setting-row">
-            <div>
-              <strong>关闭浏览器</strong>
-              <p>结束当前浏览器会话。</p>
-            </div>
-            <Button
-              icon={<XCircle size={15} />}
-              loading={busy === "closeBrowser"}
-              onClick={() => void runCommand("closeBrowser")}
-            >
-              关闭浏览器
-            </Button>
-          </div>
-          <div className="setting-row danger-zone">
-            <div>
-              <strong>清除数据</strong>
-              <p>关闭受控浏览器，删除本地配置、登录信息和历史记录；不会取消官方订单。</p>
-            </div>
-            <Button
-              danger
-              icon={<Trash2 size={15} />}
-              loading={busy === "clearLocalData"}
-              onClick={() => void runCommand("clearLocalData")}
-            >
-              清除数据
-            </Button>
-          </div>
-        </section>
+        </SettingsSection>
+        <SettingsSection id="settings-maintenance" className="maintenance" icon={Wrench} title="维护操作" description="结束浏览器会话，或清理这台电脑上的数据。">
+          <SettingRow
+            icon={MonitorX}
+            title="关闭浏览器"
+            control={
+              <Button
+                icon={<XCircle size={15} />}
+                loading={busy === "closeBrowser"}
+                onClick={() => void runCommand("closeBrowser")}
+              >
+                关闭浏览器
+              </Button>
+            }
+          >
+            <p>结束受控浏览器会话。</p>
+          </SettingRow>
+          <SettingRow
+            icon={Trash2}
+            title="清除数据"
+            tone="danger"
+            control={
+              <Button
+                danger
+                icon={<Trash2 size={15} />}
+                loading={busy === "clearLocalData"}
+                onClick={() => void runCommand("clearLocalData")}
+              >
+                清除数据
+              </Button>
+            }
+          >
+            <p>删除本地配置、登录信息与历史记录，不可撤销；不会取消官方订单。</p>
+          </SettingRow>
+        </SettingsSection>
       </div>
     </div>
   );

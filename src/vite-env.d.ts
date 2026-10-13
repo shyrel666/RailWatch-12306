@@ -1,16 +1,21 @@
 /// <reference types="vite/client" />
 
-import type { AppInfo, BridgeEvent, ConfirmRequestPayload, ExportLocations, ExportDirectory, UpdateCheckResult, UpdateRuntimeState } from "./types";
+import type { AppInfo, BridgeEvent, ConfirmRequestPayload, ExportLocations, ExportDirectory, ImportedNotificationSound,
+  NotificationSoundSelection, UpdateCheckResult, UpdateRuntimeState } from "./types";
 
 declare global {
   interface Window {
     railwatch?: {
+      whenWindowShown?: () => Promise<void>;
       command: <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
       stageDraft: (draft: { config: Record<string, unknown>; revision: number } | null) => void;
       onEvent: (callback: (event: BridgeEvent) => void) => () => void;
       getExportLocations: (defaultPath?: string) => Promise<ExportLocations>;
       listExportDirectory: (directory: string) => Promise<ExportDirectory>;
       prepareLogExport: (directory: string, fileName: string) => Promise<string | null>;
+      previewAlertSound?: (selection: NotificationSoundSelection) => Promise<{ duration_ms: number }>;
+      stopAlertSoundPreview?: () => void;
+      importAlertSound?: () => Promise<ImportedNotificationSound | null>;
       stopUrgentAlert: () => void;
       onConfirmRequest: (callback: (request: ConfirmRequestPayload) => void) => () => void;
       respondConfirmation: (id: string, accepted: boolean) => void;

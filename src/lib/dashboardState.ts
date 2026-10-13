@@ -17,6 +17,16 @@ export function hasUnresolvedOrder(order?: OrderStage) {
             ))),
   );
 }
+
+export function hasSetupWarning(status: RailWatchStatus) {
+  return Boolean(
+    status.error_message &&
+      status.risk_level === "warning" &&
+      !status.monitoring &&
+      (!status.environment_ready || !status.login_ready),
+  );
+}
+
 export type NextAction = {
   title: string;
   description: string;
@@ -38,7 +48,7 @@ export function dashboardAction(
         taskLabels[status.order!.stage || status.order!.status] ||
         "订单待核对",
       description:
-        status.order!.reason || "请查看订单状态，在官方页面完成支付或核验。",
+        status.order!.reason || "请在官方页面完成支付或核验。",
       label: "查看并处理订单",
       page: "购票监控",
       section: "monitor-attention",
@@ -62,7 +72,8 @@ export function dashboardAction(
       section: "monitor-controls",
       tone: "active",
     };
-  if (status.error_message)
+  const setupWarning = hasSetupWarning(status);
+  if (status.error_message && !setupWarning)
     return {
       title: "需要关注运行状态",
       description: status.error_message,
@@ -73,36 +84,40 @@ export function dashboardAction(
     };
   if (!status.environment_ready)
     return {
-      title: "先为出发做好准备",
-      description: "检查运行环境，确认浏览器与必要组件已经就绪。",
+      title: "检查运行环境",
+      description: setupWarning
+        ? "请先检查运行环境，再打开 12306 登录页面。"
+        : "确认 Chrome、驱动与运行组件可用。",
       label: "检查环境",
       page: "系统设置",
       section: "settings-environment",
-      tone: "normal",
+      tone: setupWarning ? "warning" : "normal",
     };
   if (!status.login_ready)
     return {
-      title: "登录后，继续你的行程",
-      description: "打开 12306，在官方页面完成登录与身份核验。",
+      title: "登录 12306",
+      description: setupWarning
+        ? status.error_message
+        : "在官方页面完成登录，之后即可查询与下单。",
       label: "前往登录",
       page: "系统设置",
       section: "settings-login",
-      tone: "normal",
+      tone: setupWarning ? "warning" : "normal",
     };
   if (!tripValid || !status.query_ready)
     return {
-      title: "确认你的出行安排",
-      description: "完善路线、日期与乘客，查询余票后核对结果。",
+      title: "完善你的行程",
+      description: "填写路线、日期与乘客，并查询一次余票。",
       label: "完善行程",
       page: "行程设置",
       section: "trip-basics",
       tone: "normal",
     };
-  if (rehearsalNeeded) return { title: "开售前先彩排一次", description: "检查登录、乘车人和执行路径，提前发现可修复的问题。",
+  if (rehearsalNeeded) return { title: "开售前先彩排一次", description: "提前检查登录、乘客与下单路径。",
     label: "前往起售彩排", page: "购票监控", section: "monitor-rehearsal", tone: "normal" };
   return {
-    title: "一切就绪，准备出发",
-    description: "你的行程已经准备好，进入监控页开始关注余票变化。",
+    title: "一切就绪",
+    description: "行程已准备好，可以开始监控余票。",
     label: "进入购票监控",
     page: "购票监控",
     section: "monitor-controls",

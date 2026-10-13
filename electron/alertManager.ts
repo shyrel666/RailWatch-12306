@@ -1,4 +1,7 @@
 import { BrowserWindow, Notification, app, ipcMain, shell } from "electron";
+import { isRecord } from "./ipcSecurity";
+import { isAlertSoundTone, readImportedSound, type AlertSoundSelection } from "./alertSoundFiles";
+import { AlertSoundPlayer, type AlertSoundPayload } from "./alertSoundPlayer";
 
 type UrgentAlertPayload = {
   title: string;
@@ -7,66 +10,115 @@ type UrgentAlertPayload = {
   kind?: "notify" | "humanAction";
 };
 
-export type AlertPreferences = {
+export type AlertPreferences = AlertSoundSelection & {
   desktop_urgent: boolean;
   sound_loop: boolean;
   window_attention: boolean;
 };
 
 let alertInterval: NodeJS.Timeout | null = null;
-let alertWindow: BrowserWindow | null = null;
+let alertLoopActive = false;
+let alertGeneration = 0;
+let activeSound: AlertSoundSelection = {};
+const urgentPlayer = new AlertSoundPlayer();
+const previewPlayer = new AlertSoundPlayer();
+let previewGeneration = 0;
+let previewTimer: NodeJS.Timeout | null = null;
 let alwaysOnTopTimer: NodeJS.Timeout | null = null;
 let trackedMainWindow: BrowserWindow | null = null;
 let alertShownAt = 0;
 const FOCUS_GRACE_MS = 1500;
 const ALWAYS_ON_TOP_MS = 15000;
 
-function playAlertTone(): void {
-  if (!alertWindow || alertWindow.isDestroyed()) {
-    alertWindow = new BrowserWindow({
-      show: false,
-      width: 1,
-      height: 1,
-      webPreferences: {
-        sandbox: true,
-        nodeIntegration: false,
-        contextIsolation: true,
-      },
-    });
-  }
-  void alertWindow.webContents.executeJavaScript(`
-    (() => {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const oscillator = ctx.createOscillator();
-      const gain = ctx.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.value = 880;
-      gain.gain.value = 0.08;
-      oscillator.connect(gain);
-      gain.connect(ctx.destination);
-      oscillator.start();
-      setTimeout(() => {
-        oscillator.stop();
-        ctx.close();
-      }, 220);
-    })();
-  `);
+function normalizedSelection(selection: AlertSoundSelection): AlertSoundSelection {
+  return {
+    sound_tone: isAlertSoundTone(selection.sound_tone) ? selection.sound_tone : "beep",
+    sound_custom_file: selection.sound_tone === "custom" ? selection.sound_custom_file : "",
+  };
 }
 
-export function startUrgentAlertLoop(): void {
-  if (alertInterval) {
-    return;
-  }
-  playAlertTone();
-  alertInterval = setInterval(() => playAlertTone(), 1800);
+async function soundPayload(selection: AlertSoundSelection): Promise<AlertSoundPayload> {
+  const tone = selection.sound_tone || "beep";
+  return tone === "custom"
+    ? { tone, audio: await readImportedSound(selection.sound_custom_file) }
+    : { tone };
+}
+
+export function startUrgentAlertLoop(selection: AlertSoundSelection = {}): void {
+  const next = normalizedSelection(selection);
+  if (alertLoopActive && JSON.stringify(activeSound) === JSON.stringify(next)) return;
+  stopUrgentAlertLoop();
+  activeSound = next;
+  alertLoopActive = true;
+  const generation = alertGeneration;
+  urgentPlayer.prepare();
+  let payload: AlertSoundPayload | null = null;
+  const tick = async () => {
+    let duration = 220;
+    try {
+      payload ??= await soundPayload(next).catch(() => ({ tone: "beep" as const }));
+      if (!alertLoopActive || generation !== alertGeneration) return;
+      try {
+        duration = await urgentPlayer.play(payload);
+      } catch (error) {
+        if (payload.tone !== "custom") throw error;
+        if (!alertLoopActive || generation !== alertGeneration) return;
+        payload = { tone: "beep" };
+        duration = await urgentPlayer.play(payload);
+      }
+    } catch { /* Desktop/window reminders remain available if audio is unavailable. */ }
+    if (alertLoopActive && generation === alertGeneration) {
+      // Let an imported clip finish; long clips never overlap or get cut off.
+      alertInterval = setTimeout(() => { void tick(); }, Math.max(1800, duration + 400));
+    }
+  };
+  void tick();
+}
+
+export function updateUrgentAlertSound(selection: AlertSoundSelection): void {
+  if (alertLoopActive) startUrgentAlertLoop(selection);
 }
 
 export function stopUrgentAlertLoop(): void {
+  alertLoopActive = false;
+  alertGeneration++;
   if (alertInterval) {
-    clearInterval(alertInterval);
+    clearTimeout(alertInterval);
     alertInterval = null;
+  }
+  urgentPlayer.stop();
+}
+
+export function stopAlertSoundPreview(): void {
+  previewGeneration++;
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = null;
+  previewPlayer.stop();
+}
+
+export async function previewAlertSound(selection: unknown): Promise<{ duration_ms: number }> {
+  if (!isRecord(selection) || !isAlertSoundTone(selection.sound_tone)) {
+    throw new Error("提示音选择无效。");
+  }
+  stopAlertSoundPreview();
+  const generation = previewGeneration;
+  const payload = await soundPayload({ sound_tone: selection.sound_tone,
+    sound_custom_file: typeof selection.sound_custom_file === "string" ? selection.sound_custom_file : "" });
+  if (generation !== previewGeneration) return { duration_ms: 0 };
+  const duration = await previewPlayer.play(payload);
+  if (generation === previewGeneration && duration > 0) {
+    previewTimer = setTimeout(stopAlertSoundPreview, duration + 25);
+  }
+  return { duration_ms: duration };
+}
+
+export async function validateImportedAlertSound(audio: string): Promise<void> {
+  stopAlertSoundPreview();
+  try {
+    const duration = await previewPlayer.play({ tone: "custom", audio }, true);
+    if (!duration) throw new Error("音频导入已中断，请重试。");
+  } finally {
+    stopAlertSoundPreview();
   }
 }
 
@@ -90,7 +142,7 @@ function attachFocusAutoStop(mainWindow: BrowserWindow): void {
   trackedMainWindow = mainWindow;
   // 用户主动聚焦窗口即视为已知晓告警；保留宽限期以忽略告警本身触发的程序化聚焦。
   mainWindow.on("focus", () => {
-    if (alertInterval && Date.now() - alertShownAt > FOCUS_GRACE_MS) {
+    if (alertLoopActive && Date.now() - alertShownAt > FOCUS_GRACE_MS) {
       stopUrgentAlert();
     }
   });
@@ -104,7 +156,7 @@ export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: Urgen
       title,
       body,
       urgency: "critical",
-      silent: false,
+      silent: preferences.sound_loop,
     });
     notification.on("click", () => {
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -118,8 +170,6 @@ export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: Urgen
     notification.show();
   }
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-  }
   if (preferences.window_attention && mainWindow && !mainWindow.isDestroyed()) {
     attachFocusAutoStop(mainWindow);
     alertShownAt = Date.now();
@@ -143,7 +193,7 @@ export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: Urgen
       }
     }, ALWAYS_ON_TOP_MS);
   }
-  if (preferences.sound_loop) startUrgentAlertLoop();
+  if (preferences.sound_loop) startUrgentAlertLoop(preferences);
   else stopUrgentAlertLoop();
 }
 
@@ -155,10 +205,7 @@ export function registerAlertIpcHandlers(isTrusted: (url: string | undefined) =>
 
 export function cleanupUrgentAlert(): void {
   stopUrgentAlert();
-  if (alertWindow && !alertWindow.isDestroyed()) {
-    alertWindow.destroy();
-    alertWindow = null;
-  }
+  stopAlertSoundPreview();
 }
 
 export async function openExternalUrl(url: string): Promise<void> {

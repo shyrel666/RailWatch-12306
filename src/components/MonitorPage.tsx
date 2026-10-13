@@ -1,12 +1,14 @@
 import { RehearsalPanel } from "./RehearsalPanel";
+import { AlternateReview } from "./AlternateReview";
 import { useState } from "react";
-import { Alert, Button, Switch } from "antd";
+import { Alert, Button } from "antd";
 import { useClock } from "../lib/useClock";
 import { hasUnresolvedOrder } from "../lib/dashboardState";
 import { automationConfigIssue } from "../lib/automationReadiness";
 import { DATE_STRATEGIES, dateStrategy, dateStrategySummary } from "../lib/dateStrategy";
-import { orderPolicySummary } from "../lib/orderPolicy";
-import { Bell, BellRing, Lock, Play, Square } from "lucide-react";
+import { ORDER_POLICY, orderPolicySummary } from "../lib/orderPolicy";
+import { Bell, BellRing, CalendarRange, Layers, Lock, Play, ShieldCheck, Square } from "lucide-react";
+import { Hint } from "./DisplayPrimitives";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import { railwatchStore, tripFingerprint } from "../store/railwatchStore";
 import { displayedConfig, taskLabels } from "../lib/taskDisplay";
@@ -189,6 +191,7 @@ export function MonitorPage({
     <div className="signal-tower">
       <DepartureBoard
         label="监控控制"
+        kicker={!status.monitoring && unresolvedOrder ? "下次监控配置 · 当前订单详情见下方" : undefined}
         id="monitor-controls"
         className="monitor-board"
         tone={boardTone}
@@ -209,7 +212,7 @@ export function MonitorPage({
         ]}
         actions={
           <>
-            {!status.monitoring && automationIssue ? (
+            {!status.monitoring && !unresolvedOrder && automationIssue ? (
               <Button onClick={() => setActivePage("行程设置", "trip-basics")}>完善自动化配置</Button>
             ) : null}
             {startError ? <span role="alert">{startError}</span> : null}
@@ -271,6 +274,7 @@ export function MonitorPage({
                     ? "请在官方页面完成支付；候补预付款支付后才生效。"
                     : "状态以匹配的官方订单证据为准。")}
               </p>
+              {order.intent?.kind === "alternate" ? <AlternateReview review={order.review} deadline={order.intent.deadline} windows={order.intent.new_train_windows} /> : null}
               {unresolvedOrder ? (
                 <div className="st-command-actions">
                 <Button
@@ -307,15 +311,31 @@ export function MonitorPage({
           onClose={clearHumanAction}
         />
       ) : null}
-      <p>购票辅助：核验与支付需人工完成，发现现票不代表订单已创建，订单状态以官方页面为准。</p>
-      <p aria-label="本次日期策略">日期策略：{config.date_range === "单日" ? "单日查询" : DATE_STRATEGIES[dateStrategy(config)].label}。{dateStrategySummary(config)}</p>
-      <p aria-label="本次候补与核对策略">{orderPolicySummary(config)}</p>
-
-      {status.monitoring ? (
-        <p role="status">
-          运行中使用启动时的行程配置；表单修改将在下次运行生效。
-        </p>
-      ) : null}
+      <ul className="st-policy-strip" aria-label="本次运行策略">
+        <li aria-label="本次日期策略">
+          <CalendarRange size={14} aria-hidden="true" />
+          <span>日期</span>
+          <strong>{config.date_range === "单日" ? "单日查询" : DATE_STRATEGIES[dateStrategy(config)].label}</strong>
+          <Hint label="日期策略" text={dateStrategySummary(config)} />
+        </li>
+        {autoSubmitEnabled || autoAlternateEnabled ? <li aria-label="本次候补与核对策略">
+          <Layers size={14} aria-hidden="true" />
+          {autoAlternateEnabled ? <>
+            <span>候补</span>
+            <strong>{config.alternate_mode === "multiple"
+              ? `最多${config.alternate_max_combinations ?? ORDER_POLICY.alternate_max_combinations}个组合` : "首个可用组合"}</strong>
+          </> : null}
+          <span>订单核对</span>
+          <strong>{(config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled)
+            ? `每${config.order_watch_interval_seconds ?? ORDER_POLICY.order_watch_interval_seconds}秒` : "关闭"}</strong>
+          <Hint label="候补与核对" text={orderPolicySummary(config)} />
+        </li> : null}
+        <li className="st-policy-note">
+          <ShieldCheck size={14} aria-hidden="true" />
+          <span>核验与支付在官网完成，订单状态以官网为准</span>
+        </li>
+        {status.monitoring ? <li className="st-policy-note" role="status">修改行程将在下次运行生效</li> : null}
+      </ul>
       {/* ── Metrics Signal Strip ── */}
       {rehearsalEnabled ? <RehearsalPanel busy={busy} runCommand={runCommand} /> : null}
       <section className="st-metrics-strip" aria-label="运行指标">
@@ -348,8 +368,8 @@ export function MonitorPage({
 
       {/* ── Two-Column Body ── */}
       {status.monitoring && tripFingerprint(draftConfig) !== tripFingerprint(config) ? <div className="st-running-draft-note" role="status">
-        本次执行：{config.date} · {config.from_station_cn} → {config.to_station_cn} · {config.train_code || "不限车次"}；
-        当前草稿：{draftConfig.date} · {draftConfig.from_station_cn} → {draftConfig.to_station_cn} · {draftConfig.train_code || "不限车次"}。草稿修改仅在下一次任务生效。
+        <span>本次运行 <strong>{config.date} · {config.from_station_cn} → {config.to_station_cn} · {config.train_code || "不限车次"}</strong></span>
+        <span>下次运行 <strong>{draftConfig.date} · {draftConfig.from_station_cn} → {draftConfig.to_station_cn} · {draftConfig.train_code || "不限车次"}</strong></span>
       </div> : null}
       {selectionError ? <p role="alert">{selectionError}</p> : null}
       <div className="st-body">
@@ -357,6 +377,10 @@ export function MonitorPage({
         <QueryResults views={queryViews} rows={results} config={queryConfig ?? config} editableRoute={draftConfig}
           onSelectTrains={trains => {
             const state = railwatchStore.getState();
+            if (!state.tripInitialized) {
+              setSelectionError("已保存的行程尚未加载，请稍后再选择车次。");
+              return;
+            }
             const allowed = selectableQueryTrains(state.queryViews, state.config);
             if (state.editRevision !== editRevision || !trains.length || trains.some(train => !allowed.has(train))) {
               setSelectionError("草稿或查询结果已变化，请重新选择当前路线的车次。");
@@ -407,20 +431,16 @@ export function MonitorPage({
                 自动化
               </h3>
             </div>
-            <label className="st-flag-row">
-              <Switch checked={autoSubmitEnabled} disabled size="small" />
-              <span>
-                自动提交{" "}
-                <strong>{autoSubmitEnabled ? "已启用" : "关闭"}</strong>
-              </span>
-            </label>
-            <label className="st-flag-row">
-              <Switch checked={autoAlternateEnabled} disabled size="small" />
-              <span>
-                自动候补{" "}
-                <strong>{autoAlternateEnabled ? "已启用" : "关闭"}</strong>
-              </span>
-            </label>
+            <div className="st-flag-row">
+              <i className={"lamp" + (autoSubmitEnabled ? " go" : "")} aria-hidden="true" />
+              <span>自动提交</span>
+              <strong>{autoSubmitEnabled ? "已开启" : "关闭"}</strong>
+            </div>
+            <div className="st-flag-row">
+              <i className={"lamp" + (autoAlternateEnabled ? " go" : "")} aria-hidden="true" />
+              <span>自动候补</span>
+              <strong>{autoAlternateEnabled ? "已开启" : "关闭"}</strong>
+            </div>
           </div>
         </aside>
       </div>

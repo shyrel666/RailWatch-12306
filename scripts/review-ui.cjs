@@ -1,24 +1,55 @@
 const { chromium } = require(process.env.RAILWATCH_PLAYWRIGHT || "playwright");
 const fs = require("node:fs");
 const path = require("node:path");
+const assert = require("node:assert/strict");
 const output = path.resolve("build/ui-review");
 fs.mkdirSync(output, { recursive: true });
 (async () => {
-  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  const browser = await chromium.launch({ headless: true,
+    ...(process.env.RAILWATCH_CHROME_PATH ? { executablePath: process.env.RAILWATCH_CHROME_PATH } : { channel: "chrome" }) });
   const page = await browser.newPage({
     viewport: { width: 1440, height: 900 },
     deviceScaleFactor: 1,
   });
   const errors = [];
+  const navigate = name => page.locator(".sidebar").getByRole("button", { name, exact: true }).click();
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     window.__commands = [];
     window.__pendingConfirm = new Map();
+    window.__eventListeners = new Set();
+    const state = {
+      phase: "idle", environment_ready: false, login_ready: false, query_ready: false, monitoring: false,
+      auto_submit_enabled: false, auto_alternate_enabled: false, risk_level: "notice",
+      status_message: "就绪", error_message: "", current_config: {}, hits: [], summary: "就绪",
+    };
+    const runs = [
+      { run_id: "review-immediate", started_at: Date.now() / 1000 - 600, target_at: null, conclusion: "已停止",
+        trip: { from_station: "北京", to_station: "上海" } },
+      { run_id: "review-timed", started_at: Date.now() / 1000 - 300, target_at: Date.now() / 1000 - 120,
+        conclusion: "需要人工处理", trip: { from_station: "广州", to_station: "长沙" } },
+    ];
+    const preferences = { theme: "light", close_to_tray: false, auto_rehearsal: false, notification_settings: {} };
     window.railwatch = {
-      command: async (command, payload) => {
+      command: async (command, payload = {}) => {
         window.__commands.push({ command, payload });
-        if (command === "loadPreferences") return { theme: "light" };
-        if (command === "savePreferences") return { theme: payload.theme };
+        if (command === "loadPreferences") return { ...preferences };
+        if (command === "savePreferences") return Object.assign(preferences, payload);
+        if (command === "rehearsalHistory") return { items: [] };
+        if (command === "queryPulse") return { run_id: null, started_at: null, target_at: null,
+          trip: {}, recorded: 0, items: [], active: false };
+        if (command === "runReviews") return { items: runs, next_cursor: null };
+        if (command === "runReview") return { ...runs.find(run => run.run_id === payload.run_id),
+          segments: [], prediction: [], slowest: null, preparation_margin_ms: null,
+          query_median_ms: null, history_complete: true, note: "本地界面测试数据" };
+        if (command === "checkEnvironment") return new Promise(resolve => {
+          window.__finishEnvironmentCheck = () => {
+            state.environment_ready = true;
+            resolve({ ...state });
+          };
+        });
+        if (command === "checkLogin") return { ...state, phase: "error", risk_level: "warning",
+          status_message: "请先打开登录页。", error_message: "请先打开登录页。" };
         if (command === "loadTripState") return { saved_config: await window.railwatch.command("loadConfig"),
           saved_at: Date.now() / 1000, draft: { status: "missing", draft: null, warning: null } };
         if (command === "loadTripChoices") return { recent_routes: [], favorites: [] };
@@ -69,25 +100,11 @@ fs.mkdirSync(output, { recursive: true });
             network_label: "正常",
             railway_ok: true,
             railway_label: "正常",
-            state: {
-              phase: "idle",
-              environment_ready: false,
-              login_ready: false,
-              query_ready: false,
-              monitoring: false,
-              auto_submit_enabled: false,
-              auto_alternate_enabled: false,
-              risk_level: "notice",
-              status_message: "就绪",
-              error_message: "",
-              current_config: {},
-              hits: [],
-              summary: "就绪",
-            },
+            state: { ...state },
           };
         return {};
       },
-      onEvent: () => () => {},
+      onEvent: listener => { window.__eventListeners.add(listener); return () => window.__eventListeners.delete(listener); },
       onConfirmRequest: (callback) => { window.__confirmRequest = callback; return () => { window.__confirmRequest = null; }; },
       respondConfirmation: (id, accepted) => {
         window.__commands.push({ command: "respondConfirmation", id, accepted });
@@ -135,12 +152,14 @@ fs.mkdirSync(output, { recursive: true });
   await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(output, "dashboard-light.png") });
   const switchTheme = async (value) => {
-    const control = page.getByRole("button", { name: /外观主题/ }).first();
+    const control = page
+      .getByRole("radiogroup", { name: "外观主题" })
+      .getByRole("radio", { name: value });
     for (let attempt = 0; attempt < 3; attempt++) {
-      if ((await control.textContent()).trim() === value) break;
+      if ((await control.getAttribute("aria-checked")) === "true") break;
       await control.click();
     }
-    if ((await control.textContent()).trim() !== value)
+    if ((await control.getAttribute("aria-checked")) !== "true")
       throw new Error("Theme did not switch to " + value);
     await page.waitForTimeout(250);
   };
@@ -148,6 +167,7 @@ fs.mkdirSync(output, { recursive: true });
   await page.screenshot({ path: path.join(output, "dashboard-dark.png") });
   await switchTheme("明亮");
   const measurements = [];
+  const interactions = [];
   for (const [width, height] of [
     [1180, 720],
     [1440, 900],
@@ -161,12 +181,38 @@ fs.mkdirSync(output, { recursive: true });
         "行程设置",
         "购票监控",
         "订单中心",
+        "运行复盘",
         "系统设置",
         "关于",
       ]) {
-        await page.getByRole("button", { name, exact: true }).click();
+        await navigate(name);
         await page.mouse.move(1150, 8);
         await page.waitForTimeout(350);
+        if (name === "仪表盘" && (
+          await page.getByLabel("自动化状态").count() ||
+          await page.getByRole("button", { name: /配置自动化/ }).count()
+        ))
+          throw new Error("Dashboard still exposes automation configuration");
+        if (name === "仪表盘") {
+          assert.equal(await page.getByRole("region", { name: "查询脉搏" })
+            .getByRole("button", { name: "运行复盘" }).count(), 0, "Query pulse still exposes the removed review link");
+          assert.equal(await page.getByRole("region", { name: "近 14 天运行" })
+            .getByRole("button", { name: "运行复盘" }).count(), 1, "Run history lost its review link");
+        }
+        if (name === "购票监控")
+          assert.equal(await page.getByText("调整自动化", { exact: true }).count(), 0, "Removed automation link is visible");
+        if (name === "运行复盘") {
+          await page.getByRole("article", { name: "复盘详情" }).waitFor();
+          assert.equal(await page.getByText("查看复盘", { exact: true }).count(), 0, "Removed review label is visible");
+          assert.equal(await page.getByText(/记录即时与定时监控的执行阶段/).count(), 0, "Removed review description is visible");
+          const offsets = await page.locator(".rv-run").evaluateAll(cards => cards.map(card => {
+            const box = card.getBoundingClientRect(), time = card.querySelector("time").getBoundingClientRect();
+            return Math.abs((box.top + box.bottom - time.top - time.bottom) / 2);
+          }));
+          assert.equal(offsets.length, 2, "Review fixture cards are missing");
+          assert.ok(offsets.every(offset => offset <= 1), `Review times are off center: ${offsets}`);
+          interactions.push({ scenario: "review-time-centering", width, height, theme, offsets });
+        }
         const layout = await page.evaluate(() => {
           const root = document.querySelector(".app-shell");
           const content = document.querySelector(".page-surface");
@@ -201,6 +247,7 @@ fs.mkdirSync(output, { recursive: true });
                 行程设置: "trip",
                 购票监控: "monitor",
                 订单中心: "orders",
+                运行复盘: "reviews",
                 系统设置: "settings",
                 关于: "about",
               }[name] +
@@ -211,7 +258,89 @@ fs.mkdirSync(output, { recursive: true });
     }
   }
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.getByRole("button", { name: "仪表盘", exact: true }).click();
+
+  for (const theme of ["明亮", "深色"]) {
+    await switchTheme(theme);
+    await page.evaluate(async () => {
+      const { railwatchStore, defaultStatus } = await import("/src/store/railwatchStore.ts");
+      railwatchStore.setState({ status: { ...defaultStatus }, lastHumanAction: null });
+      delete window.__finishEnvironmentCheck;
+    });
+    await navigate("系统设置");
+    const login = page.getByRole("button", { name: "检查登录", exact: true });
+    assert.equal(await login.isEnabled(), false, "Login check is enabled before the environment check");
+    assert.equal(await page.getByRole("button", { name: /打开登录/ }).isEnabled(), false);
+    // Replay the old login-before-environment response to verify recovery guidance.
+    await page.evaluate(async () => {
+      const { defaultStatus } = await import("/src/store/railwatchStore.ts");
+      window.__eventListeners.forEach(listener => listener({ event: "state", payload: {
+        ...defaultStatus, phase: "error", risk_level: "warning",
+        status_message: "请先打开登录页。", error_message: "请先打开登录页。",
+      } }));
+    });
+    await navigate("仪表盘");
+    await page.getByText("等待环境检查", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "查看运行详情" }).count(), 0);
+    await page.getByRole("button", { name: "检查环境", exact: true }).click();
+    await page.waitForFunction(() => typeof window.__finishEnvironmentCheck === "function");
+    assert.equal(await login.isEnabled(), false, "Login check is enabled while the environment check is pending");
+    const notice = page.locator(".railwatch-environment-success");
+    assert.equal(await notice.count(), 0, "Success was shown before the environment check finished");
+    await page.evaluate(() => window.__finishEnvironmentCheck());
+    await notice.waitFor();
+    assert.equal(await notice.textContent(), "环境检查完成，运行环境已就绪。");
+    const colors = await notice.evaluate(element => {
+      const reference = document.createElement("i");
+      reference.style.color = "var(--success)";
+      reference.style.backgroundColor = "var(--success-soft)";
+      document.body.append(reference);
+      const actual = getComputedStyle(element), expected = getComputedStyle(reference);
+      const result = { foreground: actual.color, background: actual.backgroundColor,
+        border: actual.borderTopColor, expectedForeground: expected.color, expectedBackground: expected.backgroundColor };
+      reference.remove();
+      return result;
+    });
+    assert.equal(colors.foreground, colors.expectedForeground);
+    assert.equal(colors.background, colors.expectedBackground);
+    assert.equal(colors.border, colors.expectedForeground);
+    await page.waitForTimeout(300); // Capture after the notice entrance animation.
+    const noticeBox = await notice.boundingBox();
+    assert.ok(noticeBox && noticeBox.y >= 0 && noticeBox.y + noticeBox.height <= 900, "Success popup is clipped");
+    await page.screenshot({ path: path.join(output, `environment-success-${theme === "明亮" ? "light" : "dark"}.png`) });
+    await notice.waitFor({ state: "hidden", timeout: 5000 });
+    assert.equal(await login.isEnabled(), true);
+    await login.click();
+    await page.waitForFunction(() => window.__commands.some(item => item.command === "checkLogin"));
+    await navigate("仪表盘");
+    await page.getByRole("button", { name: "前往登录", exact: true }).waitFor();
+    await page.getByText("等待登录", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "查看运行详情" }).count(), 0);
+    interactions.push({ scenario: "environment-success-and-login-guidance", theme, colors });
+  }
+
+  await navigate("运行复盘");
+  await page.getByRole("heading", { name: "北京 → 上海", exact: true }).waitFor();
+  for (const [index, target] of [[1, "route"], [0, "time"], [1, "padding"], [0, "card"], [1, "Enter"], [0, "Space"]]) {
+    const card = page.locator(".rv-run").nth(index);
+    const before = await page.evaluate(() => window.__commands.filter(item => item.command === "runReview").length);
+    if (target === "Enter" || target === "Space") {
+      await card.focus();
+      await card.press(target);
+    } else if (target === "padding") {
+      await card.click({ position: { x: 6, y: 6 } });
+    } else if (target === "card") {
+      await card.click();
+    } else {
+      await card.locator(target === "route" ? ".rv-run-trip" : "time").click();
+    }
+    await page.getByRole("heading", { name: index === 0 ? "北京 → 上海" : "广州 → 长沙", exact: true }).waitFor();
+    assert.equal(await card.getAttribute("aria-pressed"), "true");
+    assert.equal(await page.locator(".rv-run[aria-pressed=true]").count(), 1);
+    const after = await page.evaluate(() => window.__commands.filter(item => item.command === "runReview").length);
+    assert.equal(after - before, 1, `${target} sent duplicate review requests`);
+    interactions.push({ scenario: "review-card-open", target });
+  }
+  await navigate("仪表盘");
   await page.evaluate(async () => {
     const { railwatchStore, defaultStatus, defaultConfig } = await import(
       "/src/store/railwatchStore.ts"
@@ -263,7 +392,7 @@ fs.mkdirSync(output, { recursive: true });
       message: "请核对订单：等待你在官方页面继续处理",
     });
   });
-  await page.getByRole("button", { name: "购票监控", exact: true }).click();
+  await navigate("购票监控");
   await page.screenshot({
     path: path.join(output, "monitor-running-dark.png"),
   });
@@ -285,7 +414,7 @@ fs.mkdirSync(output, { recursive: true });
       },
     });
   });
-  await page.getByRole("button", { name: "仪表盘", exact: true }).click();
+  await navigate("仪表盘");
   await page.getByRole("button", { name: "查看并处理订单" }).click();
   await page.screenshot({
     path: path.join(output, "monitor-attention-dark.png"),
@@ -312,12 +441,10 @@ fs.mkdirSync(output, { recursive: true });
     throw new Error("Log filter not retained");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog").waitFor({ state: "hidden" });
-  await page.getByRole("button", { name: "仪表盘", exact: true }).click();
-  await page.getByRole("button", { name: /配置自动化/ }).click();
-  if (!(await page.locator("#trip-automation").evaluate((el) => el.open)))
-    throw new Error("Automation section did not open");
-  await page.getByRole("switch", { name: /自动提交关闭/ }).click();
-  await page.getByRole("dialog").waitFor();
+  await navigate("行程设置");
+  await page.locator("#trip-automation[open]").waitFor();
+  await page.getByRole("switch", { name: /自动提交已关闭/ }).click();
+  await page.locator(".railwatch-dialog").waitFor();
   await page.waitForTimeout(400);
   await page.screenshot({
     path: path.join(output, "automation-confirmation-dark.png"),
@@ -325,11 +452,13 @@ fs.mkdirSync(output, { recursive: true });
   await page.getByRole("button", { name: /取\s*消/ }).click();
   if (
     (await page
-      .getByRole("switch", { name: /自动提交关闭/ })
+      .getByRole("switch", { name: /自动提交已关闭/ })
       .getAttribute("aria-checked")) !== "false"
   )
     throw new Error("Automation enabled despite cancellation");
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page.locator(".railwatch-dialog").waitFor({ state: "hidden" });
+  if (await page.locator("#trip-automation").getByRole("button", { name: "配置", exact: true }).count())
+    throw new Error("Automation configuration available despite cancelled activation");
   // Stress the smallest usable renderer, including space occupied by a native title bar.
   await page.setViewportSize({ width: 1180, height: 688 });
   for (const theme of ["明亮", "深色"]) {
@@ -356,10 +485,10 @@ fs.mkdirSync(output, { recursive: true });
         results: [{ train: "G101", raw: "详细查询结果 · ".repeat(50) }],
       });
     });
-    for (const name of ["仪表盘", "行程设置", "购票监控", "订单中心", "系统设置"]) {
-      await page.getByRole("button", { name, exact: true }).click();
+    for (const name of ["仪表盘", "行程设置", "购票监控", "订单中心", "运行复盘", "系统设置"]) {
+      await navigate(name);
       if (name === "行程设置") {
-        for (const id of ["trip-query", "trip-timer", "trip-automation"]) {
+        for (const id of ["trip-query", "trip-timer"]) {
           await page.locator("#" + id + " > summary").click();
         }
       }
@@ -388,6 +517,7 @@ fs.mkdirSync(output, { recursive: true });
               行程设置: "trip",
               购票监控: "monitor",
               订单中心: "orders",
+              运行复盘: "reviews",
               系统设置: "settings",
             }[name] +
             ".png",
@@ -447,14 +577,14 @@ fs.mkdirSync(output, { recursive: true });
   const commands = await page.evaluate(() => window.__commands);
   fs.writeFileSync(
     path.join(output, "report.json"),
-    JSON.stringify({ measurements, errors, commands }, null, 2),
+    JSON.stringify({ measurements, interactions, errors, commands }, null, 2),
   );
   await browser.close();
   if (errors.length) throw new Error(errors.join("\n"));
   console.log(
     "UI review passed: " +
       measurements.length +
-      " page/theme/viewport combinations; logs, order navigation and confirmation verified. Screenshots: " +
+      " page/theme/viewport combinations; environment notifications, review cards, removed links, logs and confirmation verified. Screenshots: " +
       output,
   );
 })().catch((error) => {

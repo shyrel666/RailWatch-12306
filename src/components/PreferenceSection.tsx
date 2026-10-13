@@ -10,7 +10,7 @@ export function PreferenceSection({
 }: {
   id: string;
   title: string;
-  description: string;
+  description?: string;
   defaultOpen?: boolean;
   children: ReactNode;
 }) {
@@ -25,7 +25,7 @@ export function PreferenceSection({
       <summary>
         <div>
           <h2>{title}</h2>
-          <p>{description}</p>
+          {description ? <p>{description}</p> : null}
         </div>
         <ChevronDown size={16} />
       </summary>

@@ -59,6 +59,42 @@ class MultiAlternateBrowserTests(unittest.TestCase):
         self.assertEqual(self.js("return fixture.adds.length"), 0)
         self.assertFalse(self.bound)
 
+    def test_single_mode_reads_collapsed_order_after_submitting_once(self):
+        self.js("fixture.collapsed=true")
+        self.page.RESULT_UNKNOWN_TIMEOUT = .05
+        result = self.page.alternate(self.driver.find_element("id", "candidate"), PRIMARY)
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertTrue(result.evidence["matched"])
+        self.assertEqual(self.js("return fixture.detailClicks"), 1)
+        self.assertEqual(self.js("return fixture.submitClicks"), 1)
+        self.assertEqual(self.js("return fixture.adds.length"), 0)
+        self.assertFalse(self.bound)
+        self.assertFalse(self.page.snapshot()["dialogs"])
+
+    def test_single_mode_recovers_collapsed_order_after_navigation(self):
+        original_get = self.driver.get
+        def navigate(url):
+            original_get((ROOT / "tests/fixtures/multi-alternate.html").as_uri())
+            self.js("fixture.collapsed=true;fixture.record('待兑现')")
+        self.page.RECOVERY_TAB_TIMEOUT = .05
+        with patch.object(self.driver, "get", side_effect=navigate) as get:
+            result = self.page.reconcile(PRIMARY, known_id="E123456", navigate=True)
+        get.assert_called_once_with("https://kyfw.12306.cn/otn/view/lineUp_order.html")
+        self.assertEqual((result.status, result.order_id), ("active", "E123456"))
+        self.assertTrue(result.evidence["matched"])
+        self.assertEqual(self.js("return fixture.detailClicks"), 1)
+        self.assertEqual(self.js("return fixture.submitClicks"), 0)
+        self.assertFalse(self.page.snapshot()["dialogs"])
+
+    def test_single_mode_rejects_extra_choice_hidden_in_details(self):
+        self.js("fixture.collapsed=true;fixture.record('待支付',[primary,{...primary,train:'G999'}])")
+        result = self.page.wait_result(PRIMARY, timeout=.05)
+        self.assertEqual(result.status, "verification", result.reason)
+        self.assertFalse(result.can_fallback)
+        self.assertEqual(self.js("return fixture.detailClicks"), 1)
+        self.assertEqual(self.js("return fixture.submitClicks"), 0)
+        self.assertFalse(self.page.snapshot()["dialogs"])
+
     def test_collapsed_official_order_reads_full_detail_before_binding(self):
         self.js("fixture.collapsed=true")
         result = self.submit()
@@ -167,6 +203,20 @@ class MultiAlternateBrowserTests(unittest.TestCase):
         self.assertEqual(result.status, "fulfilled")
         self.assertEqual(len(result.evidence["fulfilled_choices"]), 1)
         self.assertEqual(self.page.result(intent, known_id="OTHER").status, "unknown")
+
+    def test_collapsed_fulfilled_order_accepts_bound_winner_and_keeps_original_choices(self):
+        self.js("fixture.collapsed=true")
+        self.assertEqual(self.submit().status, "pending_payment")
+        intent = self.bound[0]
+        self.js("fixture.record('已兑现',[fixture.selected[1]])")
+        result = self.page.reconcile(intent, known_id="E123456")
+        self.assertEqual((result.status, result.order_id), ("fulfilled", "E123456"))
+        self.assertEqual(result.evidence["fulfilled_choices"], self.js("return [fixture.selected[1]]"))
+        self.assertEqual(intent.combinations, CHOICES)
+        self.assertEqual(self.page.reconcile(intent, known_id="OTHER").status, "unknown")
+        self.assertEqual(self.js("return fixture.detailClicks"), 2)
+        self.assertEqual(self.js("return fixture.submitClicks"), 1)
+        self.assertFalse(self.page.snapshot()["dialogs"])
 
     def test_probe_preserves_payment_page_and_never_clicks_submit(self):
         original_handle, original_url = self.driver.current_window_handle, self.driver.current_url

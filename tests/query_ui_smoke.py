@@ -73,7 +73,8 @@ def main():
                 driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": bootstrap})
                 driver.get(f"http://127.0.0.1:{server.server_port}/")
                 wait = WebDriverWait(driver, 10)
-                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
+                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 7
+                           and not d.find_elements("id", "startup-splash"))
                 wait.until(lambda d: d.execute_script("return window.testEvents.length > 0"))
                 driver.find_element("css selector", '[aria-label="购票监控"]').click()
                 wait.until(lambda d: "G101" in d.find_element("tag name", "body").text)
@@ -100,7 +101,7 @@ def main():
                 for theme in ("light", "dark"):
                     if theme == "dark":
                         # Exercise the real persisted-theme control.
-                        driver.find_element("css selector", '[aria-label*="主题"]').click()
+                        driver.find_element("css selector", '[role="radiogroup"][aria-label="外观主题"] [role="radio"][aria-label="深色"]').click()
                         wait.until(lambda d: d.execute_script("return document.documentElement.dataset.theme") == "dark")
                     for width, height in ((1440, 900), (1180, 720)):
                         driver.set_window_size(width, height)

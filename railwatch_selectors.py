@@ -65,3 +65,19 @@ const rwActionReady = el => {
   return true;
 };
 """
+
+# The live query page also makes the seat cell itself the waitlist control.
+# Read only its structural markers; hbdata contains opaque official data.
+ALTERNATE_ACTION_JS = ACTION_READY_JS + r"""
+const rwAlternateAction = cell => {
+  if (!cell || !rwActionReady(cell)) return null;
+  const controls = [...cell.querySelectorAll('a,button,div')]
+    .filter(el => el.innerText.trim() === '候补');
+  if (controls.length) return controls.find(rwActionReady) || null;
+  if (cell.innerText.trim() === '候补' &&
+      cell.matches('td[role="button"][onclick][hbdata][hbid]') &&
+      cell.getAttribute('onclick')?.trim() && cell.getAttribute('hbdata')?.trim() &&
+      cell.getAttribute('hbid')?.trim()) return cell;
+  return null;
+};
+"""

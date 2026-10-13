@@ -1,5 +1,6 @@
 """Regression tests for failure combinations, without a live railway session."""
 import tempfile
+import sqlite3
 import unittest
 import threading
 from datetime import datetime
@@ -109,6 +110,36 @@ class ReliabilityTests(unittest.TestCase):
             bridge._browser_busy = True
             with self.assertRaises(RuntimeError):
                 bridge.start_monitor({"from_station_cn":"北京", "to_station_cn":"上海", "date":beijing_now().date().isoformat()})
+
+    def test_start_logging_failure_preserves_idle_state_and_allows_retry(self):
+        for previous in (None, MonitorTask({})):
+            with self.subTest(previous_task=previous is not None), tempfile.TemporaryDirectory() as tmp:
+                bridge = RailWatchBridge(tmp)
+                if previous:
+                    previous.done.set()
+                bridge._task = previous
+                bridge._monitor_worker = Mock()
+                config = {"from_station_cn": "北京", "to_station_cn": "上海",
+                          "date": beijing_now().date().isoformat()}
+                original_state = bridge.state
+                try:
+                    with patch.object(bridge.order_journal, "mark", side_effect=sqlite3.OperationalError("disk is full")):
+                        with self.assertRaisesRegex(sqlite3.OperationalError, "disk is full"):
+                            bridge.start_monitor(config)
+                    self.assertIs(bridge._task, previous)
+                    self.assertEqual(bridge.state, original_state)
+                    self.assertFalse(bridge.is_monitoring)
+                    bridge._monitor_worker.assert_not_called()
+                    self.assertFalse(bridge.stop_monitor()["monitoring"])
+                    bridge.start_monitor(config)
+                    task = bridge._task
+                    self.assertTrue(task.done.wait(2))
+                    task.thread.join(2)
+                    with bridge._task_lock:
+                        self.assertFalse(bridge.is_monitoring)
+                    bridge._monitor_worker.assert_called_once()
+                finally:
+                    bridge.notification_service.close()
 
     def test_old_task_callbacks_and_finalizer_cannot_change_current_task(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -65,18 +65,18 @@ class ReviewOrderTests(unittest.TestCase):
 
 
 class ReviewRuntimeTests(unittest.TestCase):
-    def test_cancellation_and_shutdown_bypass_saturated_lookup_workers(self):
+    def test_cancellation_and_shutdown_bypass_saturated_ordinary_workers(self):
         entered = threading.Barrier(5)
         release = threading.Event()
         cancelled = threading.Event()
         bridge = Mock()
 
-        def slow_search(*_):
+        def slow_load():
             entered.wait(5)
             release.wait(5)
             return {"items": []}
 
-        bridge.search_stations.side_effect = slow_search
+        bridge.load_config.side_effect = slow_load
         bridge.stop_monitor.side_effect = lambda: cancelled.set() or {"monitoring": False}
         bridge.cancel_rehearsal.return_value = {"cancelled": True}
         bridge.system_resumed.return_value = {}
@@ -88,12 +88,12 @@ class ReviewRuntimeTests(unittest.TestCase):
                                                    "payload": {"query": "北", "purpose": "quit"}}))
 
         try:
-            searches = [send("searchStations", i) for i in range(4)]
+            loads = [send("loadConfig", i) for i in range(4)]
             entered.wait(5)
             for command in ("stopMonitor", "cancelRehearsal", "systemResumed", "prepareShutdown"):
                 send(command).result(timeout=2)
             self.assertTrue(cancelled.is_set())
-            self.assertTrue(all(not future.done() for future in searches))
+            self.assertTrue(all(not future.done() for future in loads))
             bridge.cancel_rehearsal.assert_called_once()
             bridge.system_resumed.assert_called_once()
             bridge.prepare_shutdown.assert_called_once_with("quit")

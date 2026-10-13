@@ -13,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from railwatch_alternate_plan import AlternateChoice, AlternatePlan
+from railwatch_alternate_options import normalize_windows
 
 
 STAGES = {
@@ -28,7 +29,12 @@ QUERY_TELEMETRY_STAGES = frozenset({"query_click", "query_result", "query_timing
 BUFFERED_TELEMETRY_STAGES = QUERY_TELEMETRY_STAGES | {"scheduler_wake"}
 OFFICIAL_STATUSES = frozenset({"pending_payment", "active", "fulfilled", "cancelled", "expired", "failed"})
 EVENT_LABELS = {"submitting": "订单意图已在本地保存", "regular_submit": "已点击普通订单提交",
+                "alternate_confirm_attempt": "已尝试确认原候补订单，后续仅核对结果",
+                "alternate_confirm_rejected": "浏览器未送达确认点击（按钮被遮挡或已刷新），可重新确认",
                 "alternate_choices": "完整候补组合已在本地保存",
+                "alternate_options": "已读取官网候补截止选项", "alternate_form": "已核对候补条件和官网预估数据",
+                "alternate_quiet_confirm": "已自动确认官网静音车厢提示",
+                "alternate_deadline_reselected": "已为尚未提交的原方案重选截止兑现时间",
                 "alternate_submit": "已点击候补订单提交", "resume_claimed": "开始恢复原订单",
                 "resume_released": "原订单恢复已结束", "dismissed": "用户结束本地核对；官方订单未取消",
                 "order_result": "订单页面核对结果", "pending_payment": "官方订单待支付",
@@ -48,8 +54,12 @@ class OrderIntent:
     deadline: str = ""
     intent_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     choices: tuple[AlternateChoice, ...] = ()
+    new_train_windows: tuple = ()
 
     def __post_init__(self):
+        object.__setattr__(self, "new_train_windows", normalize_windows(self.new_train_windows))
+        if self.new_train_windows and self.kind != "alternate":
+            raise ValueError("新增列车仅用于候补订单")
         if self.choices and (self.kind != "alternate" or len(self.choices) > 60 or
                              len({choice.date for choice in self.choices}) > 3 or
                              self.choices[0] != AlternateChoice.from_intent(self) or
@@ -60,12 +70,26 @@ class OrderIntent:
     def combinations(self):
         return self.choices or (AlternateChoice.from_intent(self),)
 
+    def for_choice_dates(self):
+        """Keep only the authorized new-train windows on this order's own dates.
+
+        The official dialog lists just the waitlist's dates, so a window for
+        another trip date cannot apply to this order; it stays in the trip.
+        """
+        dates = {choice.date for choice in self.combinations}
+        windows = tuple(window for window in self.new_train_windows if window.date in dates)
+        return self if windows == self.new_train_windows else replace(self, new_train_windows=windows)
+
     @classmethod
     def from_config(cls, config, train, seat, kind):
         from railwatch_config_contract import parse_passenger_names
-        return cls(kind, train, config["date"], config["from_station_cn"],
-                   config["to_station_cn"], seat, tuple(parse_passenger_names(config.get("passengers", ""))),
-                   config.get("alternate_deadline", "") if kind == "alternate" else "")
+        intent = cls(kind, train, config["date"], config["from_station_cn"],
+                     config["to_station_cn"], seat, tuple(parse_passenger_names(config.get("passengers", ""))),
+                     config.get("alternate_deadline", "") if kind == "alternate" else "",
+                     new_train_windows=normalize_windows(config.get("alternate_new_train_windows", []))
+                     if kind == "alternate" and config.get("alternate_accept_new_trains") else ())
+        # A multi-choice order narrows its windows once the official choices are bound.
+        return intent if config.get("alternate_mode") == "multiple" else intent.for_choice_dates()
 
     @classmethod
     def from_dict(cls, value):
@@ -81,6 +105,7 @@ class OrderResult:
     evidence: dict = field(default_factory=dict)
     # True only after an explicit failure before submission was attempted.
     no_order: bool = False
+    review: dict = field(default_factory=dict)
 
     @property
     def can_fallback(self):
@@ -249,6 +274,58 @@ class OrderJournal:
         return {"items": [{"run_id": row[0], "started_at": row[1], **json.loads(row[2])} for row in rows[:limit]],
                 "next_cursor": self._cursor_encode(rows[limit-1][1], rows[limit-1][0]) if len(rows) > limit else None}
 
+    def query_pulse(self, limit=60, run_id=None):
+        """One run's latest query timings, oldest first; without a run, the newest run that queried.
+
+        Buffered timings are merged in memory. A dashboard poll must not flush
+        them, which would take the telemetry lock and write while a run queries.
+        """
+        import math
+        import re
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("查询数量须为 1–200。")
+        if run_id is not None and (not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id)):
+            raise ValueError("任务标识无效。")
+        with self._telemetry_guard:
+            buffered = [event for event in self._telemetry_batch if event[2] == "query_timing"]
+        with self.connection() as db:
+            if run_id is None:
+                # Buffered timings are always newer than stored ones.
+                latest = (buffered[-1][:1] if buffered else
+                          db.execute("SELECT run_id FROM order_events WHERE stage='query_timing' "
+                                     "ORDER BY sequence DESC LIMIT 1").fetchone())
+                run_id = latest[0] if latest else None
+            if run_id is None:
+                return {"run_id": None, "started_at": None, "target_at": None, "trip": {}, "recorded": 0, "items": []}
+            pending = [event for event in buffered if event[0] == run_id]
+            # A flush after the copy above moves those events into the table;
+            # read enough stored rows to recognise them instead of counting twice.
+            rows = db.execute("SELECT at,monotonic,detail FROM order_events WHERE run_id=? AND stage='query_timing' "
+                              "ORDER BY sequence DESC LIMIT ?", (run_id, limit + len(pending))).fetchall()
+            recorded = db.execute("SELECT count(*) FROM order_events WHERE run_id=? AND stage='query_timing'",
+                                  (run_id,)).fetchone()[0]
+            start = db.execute("SELECT at,detail FROM order_events WHERE run_id=? AND stage='target_sale' "
+                               "ORDER BY sequence LIMIT 1", (run_id,)).fetchone()
+        stored = {(at, monotonic) for at, monotonic, _ in rows}
+        pending = [event for event in pending if (event[3], event[4]) not in stored]
+        recorded += len(pending)
+        newest = [(event[3], event[5]) for event in reversed(pending)] + [(at, raw) for at, _, raw in rows]
+        sale = json.loads(start[1]) if start else {}
+        items = []
+        for at, raw in reversed(newest[:limit]):
+            detail = json.loads(raw)
+            steps = detail.get("steps") if isinstance(detail.get("steps"), list) else []
+            # Missing or malformed steps leave the duration unknown rather than zero.
+            spans = [step.get("duration_ms") for step in steps if isinstance(step, dict)]
+            spans = [value for value in spans if type(value) in (int, float) and math.isfinite(value) and value >= 0]
+            items.append({"at": at, "date": detail.get("date") if isinstance(detail.get("date"), str) else "",
+                          "status": str(detail.get("status") or "unconfirmed"),
+                          "duration_ms": round(sum(spans), 3) if spans else None,
+                          # Records written before the hit flag existed stay unknown, never "no hit".
+                          "hit": detail["hit"] if isinstance(detail.get("hit"), bool) else None})
+        return {"run_id": run_id, "started_at": start[0] if start else None, "target_at": sale.get("target_at"),
+                "trip": sale.get("trip") or {}, "recorded": recorded, "items": items}
+
     def rehearsal_for_run(self, run_id):
         with self.connection() as db:
             row = db.execute("SELECT report FROM rehearsals WHERE run_id=? ORDER BY started_at DESC LIMIT 1", (run_id,)).fetchone()
@@ -282,7 +359,8 @@ class OrderJournal:
             if not row:
                 raise RuntimeError("候补意图已失效")
             saved, config, result = OrderIntent.from_dict(json.loads(row[0])), json.loads(row[1]), json.loads(row[2])
-            if (saved.kind != "alternate" or replace(intent, choices=saved.choices) != saved
+            # Only the choices may change, plus the windows narrowing to their dates.
+            if (saved.kind != "alternate" or intent != replace(saved, choices=intent.choices).for_choice_dates()
                     or config.get("alternate_mode") != "multiple" or result.get("order_id")
                     or result.get("status") != "submitting" or not AlternatePlan(saved, config).validate(intent.combinations)):
                 raise ValueError("候补组合超出已保存的授权范围")
@@ -305,7 +383,7 @@ class OrderJournal:
                 raise RuntimeError("订单意图尚未持久化，不能确认结果")
             previous = json.loads(row[0])
             saved = OrderIntent.from_dict(json.loads(row[1]))
-            if saved.choices and saved != intent:
+            if saved != intent:
                 raise ValueError("订单核对必须使用已保存的完整候补组合")
             if result.status in ("pending_payment", "active", "fulfilled", "cancelled", "expired", "failed") and not (result.order_id and result.evidence.get("matched") is True):
                 result = OrderResult("unknown", "订单状态缺少匹配的订单号和页面证据")
@@ -330,6 +408,10 @@ class OrderJournal:
             if result.status in ("unknown", "verification") and previous.get("order_id"):
                 result = replace(result, order_id=previous["order_id"], evidence=previous.get("evidence", {}))
             unresolved = result.status not in TERMINAL
+            review = {**previous.get("review", {}), **result.review}
+            if result.status in ("unknown", "verification") and review.get("success_rate") is not None:
+                review["success_rate_status"] = "stale"
+            result = replace(result, review=review)
             updated = db.execute("UPDATE orders SET result=?,unresolved=?,updated_at=? WHERE intent_id=?", (
                 json.dumps(result.payload(), ensure_ascii=False), int(unresolved), time.time(), intent.intent_id))
             if updated.rowcount != 1:
@@ -440,6 +522,8 @@ class OrderJournal:
                 "status": result.get("status", "unknown"), "official_status": official_status,
                 "official_verified_at": official_verified_at, "updated_at": updated_at,
                 "last_checked_at": checked, "last_check_status": check_status, "observing": False,
+                "review": result.get("review", {}), "deadline": intent.get("deadline", ""),
+                "new_train_windows": intent.get("new_train_windows", []),
                 "recovery_required": bool(unresolved)}
 
     def history_page(self, *, limit=20, cursor=None, status=None):
@@ -501,9 +585,78 @@ class OrderJournal:
         return dict(intent=json.loads(row[0]), config=json.loads(row[1]), result=json.loads(row[2]),
                     run_id=row[3], updated_at=row[4])
 
+    def refresh_review(self, intent, result):
+        """Refresh presentation evidence without inventing a status transition."""
+        if not result.review or result.evidence.get("matched") is not True:
+            return result
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT intent,result FROM orders WHERE intent_id=? AND unresolved=1", (intent.intent_id,)).fetchone()
+            if not row:
+                return result
+            saved = json.loads(row[1])
+            if (OrderIntent.from_dict(json.loads(row[0])) != intent or saved.get("order_id") != result.order_id
+                    or not result.order_id or saved.get("status") != result.status):
+                return result
+            review = {**saved.get("review", {}), **result.review}
+            saved["review"] = review
+            db.execute("UPDATE orders SET result=?,updated_at=? WHERE intent_id=?",
+                       (json.dumps(saved, ensure_ascii=False), time.time(), intent.intent_id))
+        return replace(result, review=review)
+
     def submission_started(self, intent_id):
         with self.connection() as db:
             return bool(db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit','resume_claimed') LIMIT 1", (intent_id,)).fetchone())
+
+    def revise_alternate_deadline(self, intent_id, deadline):
+        """An explicit re-selection may amend only an unsubmitted original intent."""
+        from railwatch_alternate_options import canonical_deadline, deadline_minutes
+        if not isinstance(deadline, str) or not deadline_minutes(deadline):
+            raise ValueError("请选择官网提供的截止兑现时间")
+        lease = self._try_resume_lease()
+        if lease is None:
+            raise RuntimeError("订单正在恢复，请稍后重选")
+        try:
+            with self._ordered_events(), self.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT intent,config,result,run_id FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone()
+                if not row:
+                    raise ValueError("待处理订单已变化")
+                intent, config, result = json.loads(row[0]), json.loads(row[1]), json.loads(row[2])
+                review = result.get("review", {})
+                if (intent["kind"] != "alternate" or result.get("order_id") or not review.get("deadline_reselection")
+                        or db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit','alternate_confirm_attempt','resume_claimed') LIMIT 1", (intent_id,)).fetchone()):
+                    raise ValueError("已提交或正在处理的订单不能更改截止兑现时间，请仅核对原订单")
+                value = canonical_deadline(deadline)
+                if value not in {canonical_deadline(option) for option in review.get("deadline_options", [])}:
+                    raise ValueError("所选截止兑现时间不在已读取的官网选项中")
+                intent["deadline"] = config["alternate_deadline"] = value
+                review.update(deadline=value, success_rate=None, success_rate_status="stale", form_signature="")
+                db.execute("UPDATE orders SET intent=?,config=?,result=?,updated_at=? WHERE intent_id=?", (
+                    json.dumps(intent, ensure_ascii=False), json.dumps(config, ensure_ascii=False),
+                    json.dumps(result, ensure_ascii=False), time.time(), intent_id))
+                db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)", (
+                    row[3], intent_id, "alternate_deadline_reselected", time.time(), time.monotonic(),
+                    json.dumps({"deadline": value}, ensure_ascii=False)))
+        finally:
+            lease.close()
+
+    @staticmethod
+    def _confirmation_pending(db, intent_id):
+        """True while a confirmation click may have reached the official page.
+
+        Only a click WebDriver refused before dispatch is recorded as rejected,
+        so every other attempt keeps the one-confirmation guarantee.
+        """
+        attempts, rejected = db.execute(
+            "SELECT coalesce(sum(stage='alternate_confirm_attempt'),0), coalesce(sum(stage='alternate_confirm_rejected'),0)"
+            " FROM order_events WHERE intent_id=? AND stage IN ('alternate_confirm_attempt','alternate_confirm_rejected')",
+            (intent_id,)).fetchone()
+        return attempts > rejected
+
+    def alternate_confirmation_started(self, intent_id):
+        with self.connection() as db:
+            return self._confirmation_pending(db, intent_id)
 
     def dismiss(self, intent_id):
         """Archive a user-dismissed review without claiming any official outcome."""
@@ -578,6 +731,17 @@ class OrderJournal:
 
     def mark(self, run_id, stage, intent_id="", detail=None):
         with self._ordered_events(), self.connection() as db:
+            if stage == "alternate_confirm_attempt":
+                db.execute("BEGIN IMMEDIATE")
+                valid = db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1 AND json_extract(intent,'$.kind')='alternate'",
+                                   (intent_id,)).fetchone()
+                submitted = db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage='alternate_submit'", (intent_id,)).fetchone()
+                if not valid or not submitted or self._confirmation_pending(db, intent_id):
+                    raise RuntimeError("候补确认已尝试或意图无效，请仅核对原订单")
+            if stage == "alternate_confirm_rejected":
+                db.execute("BEGIN IMMEDIATE")
+                if not self._confirmation_pending(db, intent_id):
+                    raise RuntimeError("没有可撤回的候补确认尝试")
             if stage in ("regular_submit", "alternate_submit"):
                 db.execute("BEGIN IMMEDIATE")
                 if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
@@ -586,7 +750,16 @@ class OrderJournal:
                     raise RuntimeError("提交已开始或由其他恢复任务持有，请核对原订单")
             cursor = db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
                                 (run_id, intent_id, stage, time.time(), time.monotonic(), json.dumps(detail or {}, ensure_ascii=False)))
+            if stage == "alternate_form":
+                db.execute("UPDATE orders SET result=json_set(result,'$.review',json(?)) WHERE intent_id=?",
+                           (json.dumps(detail or {}, ensure_ascii=False), intent_id))
             return cursor.lastrowid
+
+    def latest_alternate_options(self):
+        with self.connection() as db:
+            row = db.execute("SELECT detail FROM order_events WHERE stage IN ('alternate_options','alternate_form') "
+                             "ORDER BY sequence DESC LIMIT 1").fetchone()
+        return json.loads(row[0]) if row else None
 
     def record_telemetry(self, run_id, stage, intent_id="", detail=None):
         """Buffer non-critical timing; submission ownership is always synchronous."""

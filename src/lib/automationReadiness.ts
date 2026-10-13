@@ -1,4 +1,5 @@
 import type { RailWatchConfig, RuntimeInfo } from "../types";
+import { alternateConfigIssue } from "./alternateOptions";
 
 // Check order mirrors RailWatchBridge.start_monitor; the shared cases in
 // tests/fixtures/automation-readiness-cases.json pin both implementations.
@@ -27,5 +28,5 @@ export function automationConfigIssue(
       }
     }
   }
-  return null;
+  return alternateConfigIssue(config);
 }

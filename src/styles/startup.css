@@ -1,0 +1,130 @@
+/* Rendered directly by index.html, before React and the runtime are ready. */
+#startup-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  background: #101113;
+  opacity: 1;
+  transition: opacity 220ms ease-out;
+}
+
+#root[inert] {
+  visibility: hidden;
+}
+
+.startup-logo {
+  display: block;
+  width: 112px;
+  height: 112px;
+  user-select: none;
+  animation: startup-logo-breathe 1800ms ease-in-out 1300ms infinite;
+}
+
+.startup-track {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: startup-track-draw 900ms ease-in-out both;
+}
+
+.startup-signal {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: startup-signal-on 380ms ease-out 900ms both;
+}
+
+.startup-signal-halo {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: startup-signal-glow 1800ms ease-out 1300ms infinite;
+}
+
+/* Electron paints hidden windows before ready-to-show. Keep the first frame
+   until the main process confirms that the window has actually been shown. */
+.startup-logo,
+.startup-track,
+.startup-signal,
+.startup-signal-halo {
+  animation-play-state: paused;
+}
+
+.startup-splash-running .startup-logo,
+.startup-splash-running .startup-track,
+.startup-splash-running .startup-signal,
+.startup-splash-running .startup-signal-halo {
+  animation-play-state: running;
+}
+
+#startup-splash.startup-splash-leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes startup-logo-breathe {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.86;
+    transform: scale(1.035);
+  }
+}
+
+@keyframes startup-track-draw {
+  0% {
+    opacity: 0;
+    stroke-dashoffset: 1;
+  }
+  8% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes startup-signal-on {
+  0% {
+    opacity: 0;
+    transform: scale(0.35);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.14);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes startup-signal-glow {
+  0%, 100% {
+    opacity: 0;
+    transform: scale(0.75);
+  }
+  25% {
+    opacity: 0.16;
+  }
+  70% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #startup-splash {
+    transition: none;
+  }
+
+  .startup-logo,
+  .startup-track,
+  .startup-signal,
+  .startup-signal-halo {
+    animation: none;
+  }
+}

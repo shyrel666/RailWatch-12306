@@ -1,0 +1,648 @@
+/* Software update: the sidebar trigger and the ticket-shaped update panel.
+   The panel's dark half is a small departure board (installed version →
+   new version, with the download travelling the track); the light half is
+   the stub holding notes and actions, torn off at the perforation notches. */
+
+/* Sidebar trigger ---------------------------------------------------------- */
+.statusbar-icon-button.update-status-trigger {
+  position: relative;
+}
+.statusbar-icon-button.update-open {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.update-status-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--rail);
+}
+.update-ready .update-status-dot {
+  background: var(--success);
+}
+.update-status-trigger .update-status-ring {
+  position: absolute;
+  inset: -1px;
+  width: calc(100% + 2px);
+  height: calc(100% + 2px);
+  overflow: visible;
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+.update-status-ring circle {
+  fill: none;
+  stroke-width: 1.75;
+}
+.update-status-ring circle:first-child {
+  stroke: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.update-status-ring circle + circle {
+  stroke: var(--accent);
+  stroke-dasharray: var(--ring-value) 100;
+  stroke-linecap: round;
+  transition: stroke-dasharray 400ms var(--ease-out);
+}
+.update-status-ring.indeterminate {
+  animation: rw-update-spin 1.1s linear infinite;
+}
+
+/* Popover shell ------------------------------------------------------------ */
+.update-popover {
+  --update-radius: 16px;
+}
+.update-popover .ant-popover-container {
+  padding: 0;
+  border-radius: var(--update-radius);
+  background: transparent;
+  box-shadow: none;
+  /* The panel is notched, so the shadow follows its outline, not the box. */
+  filter: drop-shadow(0 18px 30px rgb(0 0 0 / 0.16)) drop-shadow(0 2px 5px rgb(0 0 0 / 0.08));
+}
+:root[data-theme="dark"] .update-popover .ant-popover-container {
+  filter: drop-shadow(0 20px 40px rgb(0 0 0 / 0.55)) drop-shadow(0 2px 6px rgb(0 0 0 / 0.35));
+}
+
+.rw-update-panel {
+  --update-glow: var(--led);
+  --update-edge: transparent;
+  display: flex;
+  flex-direction: column;
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+:root[data-theme="dark"] .rw-update-panel {
+  --update-edge: #ffffff14;
+}
+.rw-update-go {
+  --update-glow: var(--led-go);
+}
+.rw-update-stop {
+  --update-glow: var(--led-stop);
+}
+.rw-update-idle {
+  --update-glow: var(--board-muted);
+}
+.rw-update-panel svg {
+  flex-shrink: 0;
+}
+
+/* Board -------------------------------------------------------------------- */
+.rw-update-board {
+  flex-shrink: 0;
+  padding: 15px 18px 20px 20px;
+  border: 1px solid var(--update-edge);
+  border-bottom: 0;
+  border-radius: var(--update-radius, 16px) var(--update-radius, 16px) 0 0;
+  background:
+    radial-gradient(90% 130% at 100% 0%, color-mix(in srgb, var(--update-glow) 10%, transparent), transparent 62%),
+    var(--board);
+  color: var(--board-text);
+  /* Perforation notches: half here, half on the stub. */
+  mask:
+    radial-gradient(circle at 0 100%, transparent 8px, #000 8.5px) left / 51% 100% no-repeat,
+    radial-gradient(circle at 100% 100%, transparent 8px, #000 8.5px) right / 51% 100% no-repeat;
+}
+.rw-update-board :focus-visible {
+  outline-color: var(--board-text);
+}
+.rw-update-kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.rw-update-kicker h2 {
+  color: var(--board-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.rw-update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 24px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #ffffff12;
+  color: var(--board-text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.rw-update-pill .lamp {
+  --lamp: var(--board-muted);
+  width: 6px;
+  height: 6px;
+  background: var(--lamp);
+}
+.rw-update-pill .lamp.go {
+  --lamp: var(--led-go);
+}
+.rw-update-pill .lamp.wait {
+  --lamp: var(--led);
+}
+.rw-update-pill .lamp.stop {
+  --lamp: var(--led-stop);
+}
+.rw-update-pill .lamp.live {
+  animation: rw-update-lamp 1.8s ease-out infinite;
+}
+.rw-update-close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: -4px -6px -4px auto;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--board-muted);
+}
+.rw-update-close:hover {
+  background: #ffffff14;
+  color: var(--board-text);
+}
+
+/* Route: origin, track, destination. */
+.rw-update-route {
+  display: grid;
+  grid-template-columns: auto minmax(56px, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  margin-top: 20px;
+}
+.rw-update-station {
+  min-width: 0;
+}
+.rw-update-station > strong {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 32px;
+  white-space: nowrap;
+}
+.rw-update-station > small {
+  display: block;
+  margin-top: 3px;
+  color: var(--board-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.rw-update-route.compact .rw-update-station > strong {
+  font-size: 19px;
+}
+.rw-update-destination {
+  text-align: right;
+}
+.rw-update-destination > strong {
+  transform-origin: 50% 0;
+  animation: rw-update-flap 460ms var(--ease-out) both;
+}
+.rw-update-destination > strong.led {
+  color: var(--led);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--led) 30%, transparent);
+}
+.rw-update-destination > strong.go {
+  color: var(--led-go);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--led-go) 24%, transparent);
+}
+.rw-update-destination > strong.dim,
+.rw-update-destination > strong.pending {
+  color: var(--board-muted);
+}
+.rw-update-route .rw-update-destination > strong.pending {
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.rw-update-track {
+  --update-rail: color-mix(in srgb, var(--board-muted) 55%, transparent);
+  --update-run: calc(100% - 9px);
+  position: relative;
+  height: 32px;
+  /* Departure dot. */
+  background: radial-gradient(circle at 4px 50%, var(--board-text) 0 3.5px, transparent 4px) no-repeat;
+}
+.rw-update-track::before {
+  content: "";
+  position: absolute;
+  top: calc(50% - 1px);
+  left: 4px;
+  right: 6px;
+  height: 2px;
+  background: repeating-linear-gradient(90deg, var(--update-rail) 0 6px, transparent 6px 11px);
+}
+/* Arrival ring; it lights up once the update has arrived. */
+.rw-update-track::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 5px);
+  right: 0;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--board-muted);
+  border-radius: 50%;
+  background: var(--board);
+  transition: background-color 240ms var(--ease-out), border-color 240ms var(--ease-out), box-shadow 240ms var(--ease-out);
+}
+.rw-update-track > em {
+  position: absolute;
+  top: -5px;
+  left: clamp(14px, calc(4px + var(--update-run) * var(--update-progress, 0)), calc(100% - 18px));
+  transform: translateX(-50%);
+  color: var(--led);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition: left 400ms var(--ease-out);
+}
+.rw-update-track-fill {
+  position: absolute;
+  top: calc(50% - 1px);
+  left: 4px;
+  width: calc(var(--update-run) * var(--update-progress, 0));
+  height: 2px;
+  border-radius: 2px;
+  background: var(--led);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--led) 55%, transparent);
+  opacity: 0;
+  transition: width 400ms var(--ease-out), opacity 200ms var(--ease-out), background-color 240ms var(--ease-out);
+}
+/* The train: a lit head riding the end of the line. */
+.rw-update-track-fill::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--led);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--led) 22%, transparent), 0 0 12px var(--led);
+}
+.rw-update-track.moving .rw-update-track-fill,
+.rw-update-track.arrived .rw-update-track-fill,
+.rw-update-track.scanning .rw-update-track-fill {
+  opacity: 1;
+}
+/* Searching: a lit stretch of the rail sweeps towards the destination. */
+.rw-update-track.scanning .rw-update-track-fill {
+  width: var(--update-run);
+  background: repeating-linear-gradient(90deg, var(--led) 0 6px, transparent 6px 11px);
+  box-shadow: none;
+  mask: linear-gradient(90deg, transparent, #000 45% 55%, transparent) -67% 0 / 40% 100% no-repeat;
+  animation: rw-update-scan 1.7s ease-in-out infinite;
+}
+.rw-update-track.scanning .rw-update-track-fill::after,
+.rw-update-track.arrived .rw-update-track-fill::after,
+.rw-update-track.arrived > em {
+  display: none;
+}
+.rw-update-track.arrived .rw-update-track-fill {
+  width: var(--update-run);
+  background: var(--led-go);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--led-go) 45%, transparent);
+}
+.rw-update-track.arrived::after {
+  border-color: var(--led-go);
+  background: var(--led-go);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--led-go) 65%, transparent);
+}
+.rw-update-stop .rw-update-track::after {
+  border-color: var(--led-stop);
+}
+
+.rw-update-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px dashed var(--board-line);
+  font-size: 12px;
+}
+.rw-update-facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.rw-update-facts dt {
+  color: var(--board-muted);
+  white-space: nowrap;
+}
+.rw-update-facts dd {
+  margin: 0;
+  color: var(--board-text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Stub --------------------------------------------------------------------- */
+.rw-update-stub {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 var(--update-radius, 16px) var(--update-radius, 16px);
+  background: var(--surface);
+  mask:
+    radial-gradient(circle at 0 0, transparent 8px, #000 8.5px) left / 51% 100% no-repeat,
+    radial-gradient(circle at 100% 0, transparent 8px, #000 8.5px) right / 51% 100% no-repeat;
+}
+.rw-update-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 20px 16px;
+  overflow-y: auto;
+}
+.rw-update-detail {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.rw-update-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.rw-update-note svg {
+  margin-top: 2px;
+}
+.rw-update-note.ready {
+  background: var(--subtle);
+  color: var(--muted);
+}
+.rw-update-note.ready svg {
+  color: var(--success);
+}
+.rw-update-note.warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.rw-update-note.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.rw-update-release {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 2px;
+}
+.rw-update-release-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rw-update-release-head h3 {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.rw-update-release-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.rw-update-release-head span {
+  order: 1;
+  color: var(--faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.rw-update-release-headline {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.rw-update-release-content {
+  max-height: 188px;
+  margin-right: -10px;
+  padding-right: 10px;
+  overflow-y: auto;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  /* Edge shadows appear only while there is more to scroll. */
+  background:
+    linear-gradient(var(--surface) 30%, transparent) center top / 100% 20px no-repeat local,
+    linear-gradient(transparent, var(--surface) 70%) center bottom / 100% 20px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, color-mix(in srgb, var(--text) 14%, transparent), transparent) center top / 100% 7px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, color-mix(in srgb, var(--text) 14%, transparent), transparent) center bottom / 100% 7px no-repeat scroll;
+}
+.rw-update-release-content > * + * {
+  margin-top: 8px;
+}
+.rw-update-release-content > h4 + ul {
+  margin-top: 4px;
+}
+.rw-update-release-content h4 {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.7;
+}
+.rw-update-release-content ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rw-update-release-content li {
+  position: relative;
+  padding-left: 14px;
+}
+.rw-update-release-content li::before {
+  content: "";
+  position: absolute;
+  top: calc(0.85em - 2px);
+  left: 2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.rw-update-release-content strong {
+  color: var(--text);
+}
+.rw-update-release-content code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--subtle);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.rw-update-release-empty {
+  color: var(--faint);
+}
+.rw-update-release-link {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 500;
+}
+.rw-update-release-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.rw-update-release-link svg {
+  transition: transform 180ms var(--ease-out);
+}
+.rw-update-release-link:hover svg {
+  transform: translate(1px, -1px);
+}
+
+.rw-update-footer {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  padding: 12px 16px 12px 20px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--subtle) 45%, var(--surface));
+}
+.rw-update-footer-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.rw-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.rw-update-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 64px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+  box-shadow: var(--control-shadow);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.rw-update-button:hover:enabled {
+  border-color: var(--border-strong);
+  background: var(--subtle);
+}
+.rw-update-button.primary {
+  border-color: transparent;
+  background: var(--accent);
+  box-shadow: inset 0 1px 0 #ffffff26, 0 1px 2px #00000026;
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.rw-update-button.primary:hover:enabled {
+  border-color: transparent;
+  background: var(--accent-hover);
+}
+.rw-update-button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.rw-update-spinner {
+  animation: rw-update-spin 0.9s linear infinite;
+}
+
+@keyframes rw-update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rw-update-lamp {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--lamp) 60%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+@keyframes rw-update-scan {
+  from {
+    mask-position: -67% 0;
+  }
+  to {
+    mask-position: 167% 0;
+  }
+}
+/* A found version drops in like a split-flap display. */
+@keyframes rw-update-flap {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+    transform: perspective(240px) rotateX(-70deg);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rw-update-track.scanning .rw-update-track-fill {
+    animation: none;
+    mask-position: 50% 0;
+  }
+}

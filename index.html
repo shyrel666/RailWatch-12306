@@ -4,9 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RailWatch 12306</title>
+    <link rel="stylesheet" href="/src/styles/startup.css" />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="startup-splash" role="status" aria-label="RailWatch 12306 正在启动">
+      <svg class="startup-logo" xmlns="http://www.w3.org/2000/svg" width="112" height="112" viewBox="0 0 1024 1024" aria-hidden="true">
+        <rect x="32" y="32" width="960" height="960" rx="224" fill="#0B1016" />
+        <path class="startup-track" d="M287 813 L287 165 A300 180 0 0 1 287 525 L703 813" pathLength="1" fill="none" stroke="#EDF5F7" stroke-width="112" stroke-linecap="round" stroke-linejoin="round" />
+        <circle cx="703" cy="813" r="90" fill="#0B1016" />
+        <circle class="startup-signal-halo" cx="703" cy="813" r="96" fill="#2FBF83" />
+        <circle class="startup-signal" cx="703" cy="813" r="64" fill="#2FBF83" />
+      </svg>
+    </div>
+    <div id="root" inert></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

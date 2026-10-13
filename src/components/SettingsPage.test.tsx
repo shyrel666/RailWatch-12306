@@ -36,25 +36,78 @@ describe("SettingsPage", () => {
     cleanup();
   });
 
+  test("login stays disabled until the environment is ready and locks again if readiness is lost", async () => {
+    railwatchStore.setState({ runtime: {
+      ...railwatchStore.getState().runtime,
+      core_available: true, selenium_available: true, chromedriver_manager_available: true,
+      network_ok: true, railway_ok: true,
+    } });
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    render(<SettingsPage busy={null} runCommand={runCommand} />);
+    const login = screen.getByRole("button", { name: /打开登录/ });
+    const checkLogin = screen.getByRole("button", { name: /检查登录/ });
+    expect(login.hasAttribute("disabled")).toBe(true);
+    expect(checkLogin.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("status").textContent).toBe("请先检查运行环境，再打开登录。");
+    await userEvent.click(login);
+    await userEvent.click(checkLogin);
+    expect(runCommand).not.toHaveBeenCalled();
+
+    act(() => railwatchStore.setState({ status: { ...defaultStatus, environment_ready: true } }));
+    expect(login.hasAttribute("disabled")).toBe(false);
+    expect(checkLogin.hasAttribute("disabled")).toBe(false);
+    await userEvent.click(login);
+    expect(runCommand).toHaveBeenCalledWith("openLogin");
+
+    act(() => railwatchStore.setState({ status: { ...defaultStatus } }));
+    expect(login.hasAttribute("disabled")).toBe(true);
+    expect(checkLogin.hasAttribute("disabled")).toBe(true);
+    await userEvent.click(login);
+    await userEvent.click(checkLogin);
+    expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  test("login is disabled during an environment recheck even when the previous check passed", async () => {
+    railwatchStore.setState({ status: { ...defaultStatus, environment_ready: true } });
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    const page = render(<SettingsPage busy="checkEnvironment" runCommand={runCommand} />);
+    const login = screen.getByRole("button", { name: /打开登录/ });
+    const checkLogin = screen.getByRole("button", { name: /检查登录/ });
+    expect(login.hasAttribute("disabled")).toBe(true);
+    expect(checkLogin.hasAttribute("disabled")).toBe(true);
+    await userEvent.click(login);
+    await userEvent.click(checkLogin);
+    expect(runCommand).not.toHaveBeenCalled();
+
+    page.rerender(<SettingsPage busy={null} runCommand={runCommand} />);
+    expect(login.hasAttribute("disabled")).toBe(false);
+    expect(checkLogin.hasAttribute("disabled")).toBe(false);
+    await userEvent.click(login);
+    expect(runCommand).toHaveBeenCalledWith("openLogin");
+  });
+
   test("login check shows progress and its returned result", async () => {
+    railwatchStore.setState({ status: { ...defaultStatus, environment_ready: true } });
     let finish!: (value: RailWatchStatus) => void;
     const runCommand = vi.fn(() => new Promise<RailWatchStatus>((resolve) => { finish = resolve; }));
     render(<SettingsPage busy={null} runCommand={runCommand as CommandRunner} />);
     await userEvent.click(screen.getByRole("button", { name: /检查登录/ }));
     expect(runCommand).toHaveBeenCalledWith("checkLogin");
     expect(screen.getByRole("status").textContent).toContain("正在检查");
-    await act(async () => finish({ ...defaultStatus, login_ready: true, status_message: "登录已验证" }));
+    await act(async () => finish({ ...defaultStatus, environment_ready: true, login_ready: true, status_message: "登录已验证" }));
     expect(screen.getByRole("status").textContent).toBe("登录已验证");
   });
 
   test.each(["请先打开登录页。", "暂时无法确认登录状态，请检查网络后重试。"])("shows unsuccessful login result: %s", async (text) => {
-    const runCommand = vi.fn(async () => ({ ...defaultStatus, login_ready: false, status_message: text }));
+    railwatchStore.setState({ status: { ...defaultStatus, environment_ready: true } });
+    const runCommand = vi.fn(async () => ({ ...defaultStatus, environment_ready: true, login_ready: false, status_message: text }));
     render(<SettingsPage busy={null} runCommand={runCommand as CommandRunner} />);
     await userEvent.click(screen.getByRole("button", { name: /检查登录/ }));
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe(text));
   });
 
   test("a failed command does not leave login checking indefinitely", async () => {
+    railwatchStore.setState({ status: { ...defaultStatus, environment_ready: true } });
     const runCommand = vi.fn(async () => undefined) as CommandRunner;
     render(<SettingsPage busy={null} runCommand={runCommand} />);
     await userEvent.click(screen.getByRole("button", { name: /检查登录/ }));

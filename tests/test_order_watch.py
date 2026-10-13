@@ -42,6 +42,42 @@ class OrderWatchTests(unittest.TestCase):
         with patch("railwatch_bridge.OrderPage", return_value=self.page):
             self.bridge._observe_order(self.task, Mock(), self.intent, initial)
 
+    def run_monitor_with_active_order(self):
+        self.bridge.driver = Mock()
+        self.bridge._ensure_driver = Mock(return_value=self.bridge.driver)
+        self.bridge._make_param_filler = Mock()
+        self.bridge._prepare_query_page = Mock(return_value=True)
+        self.bridge._check_session_for_task = Mock(return_value=True)
+        self.bridge._valid_dates = Mock(return_value=[self.intent.date])
+        self.bridge._start_monitor_heartbeat = Mock()
+        monitor = Mock()
+        monitor.run.side_effect = lambda: self.bridge._handle_order(
+            self.intent, self.bridge.order_journal.record(self.intent, self.result("active")))
+        with patch("railwatch_bridge.TicketMonitor", return_value=monitor), \
+                patch("railwatch_bridge.OrderPage", return_value=self.page):
+            self.bridge._monitor_worker(self.task.config, self.task)
+        monitor.run.assert_called_once()
+        self.assertTrue(self.task.done.is_set())
+        self.assertNotEqual(self.task.status, "error")
+
+    def test_monitor_first_observes_active_order_until_fulfilled(self):
+        self.page.probe_known_order.return_value = self.result("fulfilled")
+        self.run_monitor_with_active_order()
+        self.page.probe_known_order.assert_called_once_with(self.intent, "E123456")
+        self.page.result.assert_not_called()
+        self.assertEqual(self.delays, [60])
+        self.assertIsNone(self.bridge.order_journal.pending())
+        self.assertEqual(self.bridge.state.order["status"], "fulfilled")
+        self.assertFalse(self.bridge.state.order["observing"])
+
+    def test_monitor_does_not_watch_initial_active_order_when_disabled(self):
+        self.task.config["order_watch_enabled"] = False
+        self.run_monitor_with_active_order()
+        self.page.probe_known_order.assert_not_called()
+        self.page.result.assert_not_called()
+        self.assertEqual(self.delays, [])
+        self.assertEqual(self.bridge.order_journal.pending()["result"]["status"], "active")
+
     def test_active_order_is_checked_beyond_ten_minutes_and_fulfillment_releases_lock(self):
         self.page.probe_known_order.side_effect = [self.result("active")] * 12 + [self.result("fulfilled")]
         self.observe()

@@ -11,21 +11,27 @@ class SeatCapability:
     prefix: str | None
     query: bool = True
     regular: bool = False
-    alternate: bool = False
+    alternate_code: str | None = None
+
+    @property
+    def alternate(self) -> bool:
+        return self.alternate_code is not None
 
 
 # A prefix only identifies a query cell. Transaction flags require a browser
 # fixture proving option selection and readback before the submit click.
+# Waitlist codes are from the official lineUp_toPay seatNameTrain function;
+# tests/alternate_seats_browser_smoke.py verifies each enabled transaction path.
 SEAT_CAPABILITIES = (
-    SeatCapability("二等座", "ZE", regular=True, alternate=True),
-    SeatCapability("一等座", "ZY", regular=True),
+    SeatCapability("二等座", "ZE", regular=True, alternate_code="O"),
+    SeatCapability("一等座", "ZY", regular=True, alternate_code="M"),
     SeatCapability("商务座", "SWZ"),
     SeatCapability("特等座", "TZ"),
     SeatCapability("无座", "WZ"),
-    SeatCapability("硬座", "YZ", regular=True),
-    SeatCapability("软座", "RZ", regular=True),
-    SeatCapability("硬卧", "YW", regular=True),
-    SeatCapability("软卧", "RW", regular=True),
+    SeatCapability("硬座", "YZ", regular=True, alternate_code="1"),
+    SeatCapability("软座", "RZ", regular=True, alternate_code="2"),
+    SeatCapability("硬卧", "YW", regular=True, alternate_code="3"),
+    SeatCapability("软卧", "RW", regular=True, alternate_code="4"),
     SeatCapability("高级软卧", "GR"),
     SeatCapability("动卧", "SRRB"),
 )
@@ -35,6 +41,10 @@ CAPABILITIES_BY_NAME = {seat.name: seat for seat in SEAT_CAPABILITIES}
 def seat_prefix(name: str) -> str | None:
     seat = CAPABILITIES_BY_NAME.get(name)
     return seat.prefix if seat else None
+
+
+def alternate_seat_codes() -> dict[str, str]:
+    return {seat.name: seat.alternate_code for seat in SEAT_CAPABILITIES if seat.alternate_code is not None}
 
 
 def public_seat_capabilities() -> list[dict]:

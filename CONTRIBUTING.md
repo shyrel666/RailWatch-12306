@@ -28,6 +28,9 @@ npm run dev
 ## Rules For Contributions
 
 - Do not commit logs, Chrome profiles, cookies, user configs, station caches, build output, release artifacts or downloaded driver binaries.
+- Keep test/acceptance reports, implementation plans and historical version documents and screenshots local. Test code and fixtures remain part of the repository.
+- Under `docs/`, commit only the current version's release notes and four README screenshots allowed by `.gitignore`. When preparing a release, update that allowlist, untrack the previous version's files with `git rm --cached`, and refresh the README images. Do not add a documentation section to the README.
+- Release notes and new changelog entries describe only added features and bug fixes. Omit frontend layout/style changes, download or installation instructions, validation reports and other commentary.
 - New automation behavior must be disabled by default and require explicit user confirmation.
 - Do not bypass 12306 login, captcha, order confirmation, payment, website rules or service rate limits.
 - Keep UI changes accessible and predictable for long-running monitoring workflows.
@@ -53,7 +56,7 @@ npm run package
 ## Pull Request Checklist
 
 - Tests and build commands pass locally.
-- README and docs are updated when setup, behavior, packaging or safety boundaries change.
+- README and current release notes reflect relevant user-facing changes and follow the documentation rules above.
 - No personal data, cookies, Chrome profiles, local configs or generated artifacts are included.
 - Dangerous actions remain opt-in and confirmation-gated.
 - The change is scoped to the relevant layer and does not mix unrelated refactors.

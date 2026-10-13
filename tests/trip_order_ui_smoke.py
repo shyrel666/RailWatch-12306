@@ -1,6 +1,7 @@
 """Offline M4/M5 renderer smoke with synthetic draft and order evidence."""
 
 import json
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,17 +27,22 @@ OUTPUT = ROOT / "build" / "qa" / "m4-m5"
 def main():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     # Alternate deadline options are only rendered once automatic alternate is enabled.
-    config = {**default_config(), "date_range": "单日", "train_code": "G101", "seat_keyword": "二等座",
-              "passengers": "张三", "auto_alternate": True}
+    config = {**default_config(), "date_range": "单日", "train_code": "K101", "seat_keyword": "硬卧，软卧",
+              "passengers": "张三", "auto_alternate": True, "alternate_accept_new_trains": True,
+              "alternate_new_train_windows": [{"date": default_config()["date"], "start_hour": 8, "end_hour": 22}]}
     runtime = {"app_display_name": "RailWatch 12306", "app_version": "0.4.2", "pages": [],
                "state": state_to_payload(RailWatchState.initial()), "date_policy": {"presale_window_days": 15},
                "seat_capabilities": public_seat_capabilities(), "data_dir": "离线演示目录",
                "data_dir_writable": True, "chrome_version": "本地夹具", "core_available": True}
-    summary = {"intent_id": "demo-intent", "order_id": "E123", "kind": "alternate", "train_code": "G101",
-               "date": config["date"], "from_station": "北京", "to_station": "上海", "seat": "二等座",
+    summary = {"intent_id": "demo-intent", "order_id": "E123", "kind": "alternate", "train_code": "K101",
+               "date": config["date"], "from_station": "北京", "to_station": "上海", "seat": "硬卧",
+               "choices": [{"train_code": "K101", "date": config["date"], "from_station": "北京", "to_station": "上海", "seat": seat}
+                           for seat in ("硬卧", "软卧")],
                "status": "active", "official_status": "active", "official_verified_at": 1790200000,
                "updated_at": 1790200001, "last_checked_at": 1790200000, "observing": False,
-               "recovery_required": True}
+               "recovery_required": True, "deadline": "开车前1小时", "new_train_windows": config["alternate_new_train_windows"],
+               "review": {"success_rate": 40, "success_rate_status": "available", "success_rate_observed_at": time.time(),
+                          "prepay_amount": "661.00", "amount_observed_at": time.time()}}
     script = """
       const config=CONFIG, runtime=RUNTIME, summary=SUMMARY;
       window.railwatch={
@@ -48,6 +54,8 @@ def main():
           if(name==='loadTripChoices')return {recent_routes:[{from_station:'北京',to_station:'上海'}],
             favorites:[{from_station:'北京',to_station:'上海',trains:['G101','G103']}]};
           if(name==='searchStations')return {items:[],warning:null};
+          if(name==='readAlternateOptions')return {snapshot:{source:'official_page',from_station:'北京',to_station:'上海',
+            dates:[config.date],observed_at:Date.now()/1000,deadline_options:['开车前20分钟','开车前1小时','开车前3天']},warning:null};
           if(name==='loadPreferences')return {theme:'light',close_to_tray:false,notification_settings:{}};
           if(name==='savePreferences')return {theme:payload.theme||'light',close_to_tray:false,notification_settings:{}};
           if(name==='orderHistory')return {items:[summary],next_cursor:null};
@@ -83,28 +91,46 @@ def main():
                 driver.set_window_size(width, height)
                 driver.get(f"http://127.0.0.1:{server.server_port}/")
                 wait = WebDriverWait(driver, 12)
-                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
+                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 7
+                           and not d.find_elements("id", "startup-splash"))
                 driver.find_element("css selector", '[aria-label="行程设置"]').click()
                 wait.until(lambda d: "恢复草稿" in d.find_element("tag name", "body").text)
-                assert "本路线收藏" in driver.find_element("tag name", "body").text
+                assert driver.find_elements("xpath", "//button[normalize-space(.)='收藏']")
+                seat_buttons = {button.text: button for button in driver.find_elements("css selector", '[aria-label="席别"] button')}
+                # Seats without automation carry a "仅提醒" mark; automated seats show the bare name.
+                for seat in ("二等座", "一等座", "硬座", "软座", "硬卧", "软卧"):
+                    assert seat in seat_buttons
+                assert any(text.startswith("商务座") and "仅提醒" in text for text in seat_buttons)
                 driver.save_screenshot(str(OUTPUT / f"trip-{width}.png"))
-                driver.find_element("css selector", "#trip-automation summary").click()
-                deadline = driver.find_element("css selector", '[aria-label="候补截止"]')
+                driver.find_element("css selector", "#trip-automation button[aria-haspopup='dialog']").click()
+                wait.until(lambda d: any(e.is_displayed() for e in d.find_elements("css selector", ".automation-dialog")))
+                assert "卧铺候补的上／中／下铺由官网分配" in driver.find_element("tag name", "body").text
+                deadline = driver.find_element("css selector", '[aria-label="截止兑现时间"]')
                 deadline.click()
                 option = wait.until(lambda d: d.find_element("xpath", "//div[contains(@class,'ant-select-item-option-content') and text()='开车前20分钟']"))
+                wait.until(lambda d: d.execute_script("return [...document.querySelectorAll('.ant-select-dropdown')].some(e=>e.getClientRects().length&&getComputedStyle(e).opacity==='1')"))
                 driver.save_screenshot(str(OUTPUT / f"deadline-options-{width}.png"))
                 option.click()
-                assert deadline.get_attribute("value") == "开车前20分钟"
+                wait.until(lambda d: not any(item.is_displayed() for item in d.find_elements(
+                    "css selector", ".ant-select-dropdown")))
+                assert "开车前20分钟" in driver.find_element("css selector", ".alternate-settings").text
+                assert deadline.get_attribute("readonly")
+                driver.execute_script("document.querySelector('.alternate-window').scrollIntoView({block:'center'})")
+                driver.save_screenshot(str(OUTPUT / f"new-trains-{width}.png"))
+                driver.find_element("css selector", ".automation-dialog .ant-modal-footer .ant-btn-primary").click()
+                wait.until(lambda d: not any(e.is_displayed() for e in d.find_elements("css selector", ".automation-dialog")))
                 driver.find_element("css selector", '[aria-label="订单中心"]').click()
                 wait.until(lambda d: "E123" in d.find_element("tag name", "body").text)
                 assert "当前未持续核对" in driver.find_element("tag name", "body").text
+                review = driver.find_element("css selector", ".order-history-item .alternate-review").text
+                assert "预估成功率\n40%" in review and "预付款\n661.00 元" in review
                 assert driver.execute_script("return document.querySelector('.page-surface').scrollWidth <= document.querySelector('.page-surface').clientWidth + 1")
                 driver.save_screenshot(str(OUTPUT / f"orders-{width}.png"))
     finally:
         if driver:
             driver.quit()
         server.shutdown()
-    print("M4/M5 offline UI smoke passed: draft recovery, route favorites, order history, two window sizes.")
+    print("Offline UI smoke passed: draft recovery, route favorites, official cutoff options, new-train windows, official rate/amount, order history, two window sizes.")
 
 
 if __name__ == "__main__":

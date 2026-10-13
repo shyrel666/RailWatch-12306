@@ -74,15 +74,18 @@ def main():
                 wait = WebDriverWait(driver, 15)
                 wait.until(lambda d: d.find_elements("css selector", ".sale-calendar-time") and d.find_element("css selector", ".sale-calendar-time").text == "10:00")
                 assert "00:00:10" in driver.find_element("css selector", ".sale-calendar").text
-                assert driver.execute_script("return getComputedStyle(document.querySelector('.sale-calendar-footnote')).textAlign") == "center"
+                assert "不代表当前有余票" in driver.execute_script("return document.querySelector('.sale-calendar .hint').getAttribute('aria-label')")
                 driver.set_window_size(1440, 1200)
                 wait.until(lambda d: d.find_elements("css selector", '[aria-label="折叠侧栏"]'))
                 driver.find_element("css selector", '[aria-label="折叠侧栏"]').click()
                 driver.refresh()
-                wait.until(lambda d: d.find_elements("css selector", '[aria-label="展开侧栏"]'))
+                # Each reload shows the startup splash, which keeps the app hidden until it fades.
+                wait.until(lambda d: d.find_elements("css selector", '[aria-label="展开侧栏"]')
+                           and not d.find_elements("id", "startup-splash"))
                 driver.find_element("css selector", '[aria-label="展开侧栏"]').click()
                 driver.refresh()
-                wait.until(lambda d: d.find_elements("css selector", '[aria-label="折叠侧栏"]'))
+                wait.until(lambda d: d.find_elements("css selector", '[aria-label="折叠侧栏"]')
+                           and not d.find_elements("id", "startup-splash"))
                 driver.set_window_size(1180, 1200)
                 assert driver.find_elements("css selector", '[aria-label="折叠侧栏"]')
                 driver.execute_script("""
@@ -110,14 +113,13 @@ def main():
                 for width in (1440, 1180, 800):
                     driver.set_window_size(width, 1200)
                     for theme in ("light", "dark"):
-                        button = driver.find_element("css selector", ".theme-toggle")
-                        desired = "明亮" if theme == "light" else "深色"
+                        option = f'.theme-switch [data-mode="{theme}"]'
                         for _ in range(3):
-                            if button.text == desired:
+                            wait.until(lambda d: d.find_element("css selector", option).is_enabled() and not d.execute_script("return !!document.documentElement.dataset.themeTransition"))
+                            if driver.find_element("css selector", option).get_attribute("aria-checked") == "true":
                                 break
-                            button.click()
-                            wait.until(lambda d: d.find_element("css selector", ".theme-toggle").is_enabled() and not d.execute_script("return !!document.documentElement.dataset.themeTransition"))
-                        wait.until(lambda d: d.find_element("css selector", ".theme-toggle").text == desired)
+                            driver.find_element("css selector", option).click()
+                        wait.until(lambda d: d.find_element("css selector", option).get_attribute("aria-checked") == "true")
                         card = driver.find_element("css selector", ".sale-calendar")
                         driver.execute_script("arguments[0].scrollIntoView({block:'end'})", card)
                         overflow = driver.execute_script("return [...document.querySelectorAll('.sale-calendar, .sale-calendar-body, .sale-calendar-dates, .sale-calendar-detail, .sale-calendar-day')].some(e=>e.scrollWidth>e.clientWidth+1)")
@@ -147,16 +149,18 @@ def main():
                     return animation;
                   };
                 """)
-                driver.find_element("css selector", ".theme-toggle").click()
+                # Dark to "system" under an emulated light scheme is a visible switch.
+                driver.find_element("css selector", '.theme-switch [data-mode="system"]').click()
                 wait.until(lambda d: d.execute_script("return !!window.reviewAnimation"))
                 driver.save_screenshot(str(OUTPUT / "theme-transition.png"))
                 driver.execute_script("window.reviewAnimation.play()")
-                wait.until(lambda d: d.find_element("css selector", ".theme-toggle").is_enabled())
+                wait.until(lambda d: d.find_element("css selector", '.theme-switch [data-mode="system"]').is_enabled())
                 driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}, {"name": "prefers-color-scheme", "value": "light"}]})
                 count = driver.execute_script("return window.themeMetrics.length")
-                for _ in range(2):
-                    driver.find_element("css selector", ".theme-toggle").click()
-                    wait.until(lambda d: d.find_element("css selector", ".theme-toggle").is_enabled())
+                for mode in ("light", "dark"):
+                    driver.find_element("css selector", f'.theme-switch [data-mode="{mode}"]').click()
+                    wait.until(lambda d: d.find_element("css selector", f'.theme-switch [data-mode="{mode}"]').is_enabled()
+                               and d.find_element("css selector", f'.theme-switch [data-mode="{mode}"]').get_attribute("aria-checked") == "true")
                 assert driver.execute_script("return window.themeMetrics.length") == count
                 (OUTPUT / "report.json").write_text(json.dumps({"checks": checks, "errors": errors, "themeMetrics": metrics}, ensure_ascii=False, indent=2), encoding="utf-8")
                 print(json.dumps({"checks": len(checks), "errors": errors, "output": str(OUTPUT)}))

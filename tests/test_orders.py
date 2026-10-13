@@ -216,6 +216,33 @@ class OrderEvidenceTests(unittest.TestCase):
 
 
 class JournalTests(unittest.TestCase):
+    def test_alternate_confirmation_requires_submission_and_cannot_repeat_after_restart(self):
+        selected = intent("alternate")
+        self.journal.begin("first", selected, CONFIG)
+        with self.assertRaises(RuntimeError):
+            self.journal.mark("first", "alternate_confirm_attempt", selected.intent_id)
+        self.journal.mark("first", "alternate_submit", selected.intent_id)
+        self.journal.mark("first", "alternate_confirm_attempt", selected.intent_id)
+        restarted = OrderJournal(self.path)
+        self.assertTrue(restarted.alternate_confirmation_started(selected.intent_id))
+        with self.assertRaises(RuntimeError):
+            restarted.mark("resume", "alternate_confirm_attempt", selected.intent_id)
+
+    def test_only_a_confirmation_click_refused_before_dispatch_can_be_retried(self):
+        selected = intent("alternate")
+        self.journal.begin("first", selected, CONFIG)
+        self.journal.mark("first", "alternate_submit", selected.intent_id)
+        with self.assertRaises(RuntimeError):
+            self.journal.mark("first", "alternate_confirm_rejected", selected.intent_id)
+        self.journal.mark("first", "alternate_confirm_attempt", selected.intent_id)
+        self.journal.mark("first", "alternate_confirm_rejected", selected.intent_id)
+        self.assertFalse(self.journal.alternate_confirmation_started(selected.intent_id))
+        self.journal.mark("first", "alternate_confirm_attempt", selected.intent_id)
+        restarted = OrderJournal(self.path)
+        self.assertTrue(restarted.alternate_confirmation_started(selected.intent_id))
+        with self.assertRaises(RuntimeError):
+            restarted.mark("resume", "alternate_confirm_attempt", selected.intent_id)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -23,14 +23,18 @@ from railwatch_state import RailWatchState
 
 def main():
     version = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+    output_dir = ROOT / "docs/images"
+    output_dir.mkdir(parents=True, exist_ok=True)
     now = time.time()
     config = {**default_config(), "date_range": "单日", "train_code": "G101,G103",
               "seat_keyword": "二等座,一等座", "passengers": "演示乘客"}
-    state = state_to_payload(RailWatchState.initial())
+    state = {**state_to_payload(RailWatchState.initial()),
+             "environment_ready": True, "login_ready": True, "query_ready": True}
     runtime = {"app_display_name": "RailWatch 12306", "app_version": version, "state": state,
                "date_policy": {"presale_window_days": 15}, "seat_capabilities": public_seat_capabilities(),
                "data_dir": "离线演示目录", "data_dir_writable": True, "chrome_version": "离线演示",
-               "core_available": True}
+               "core_available": True, "network_ok": True, "network_label": "正常",
+               "railway_ok": True, "railway_label": "可访问"}
     summary = {"intent_id": "demo-order", "order_id": "DEMO123", "kind": "alternate",
                "train_code": "G101", "date": config["date"], "from_station": "北京", "to_station": "上海",
                "seat": "二等座", "status": "active", "official_status": "active",
@@ -60,6 +64,14 @@ def main():
         if(name==='savePreferences') {theme=payload.theme||theme;return {theme,notification_settings:{}};}
         if(name==='searchStations') return {items:[{name:payload.query,code:'DEMO',pinyin:''}],warning:null};
         if(name==='orderHistory') return {items:orders,next_cursor:null};
+        if(name==='queryPulse') return {run_id:'demo-last-run',started_at:now-1800,target_at:null,
+          trip:{from_station:'北京',to_station:'上海',date:config.date},recorded:24,active:false,
+          items:Array.from({length:24},(_,i)=>({at:now-1800+i*45,date:config.date,
+            status:i===8?'timeout':'ok',duration_ms:i===8?4200:850+(i*173)%1600,hit:i===23}))};
+        if(name==='runReviews') return {next_cursor:null,items:Array.from({length:14},(_,day)=>
+          Array.from({length:day%3+1},(_,i)=>({run_id:`demo-run-${day}-${i}`,
+            started_at:now-day*86400-i*3600,target_at:null,
+            conclusion:['已命中','待支付','已结束'][(day+i)%3]}))).flat()};
         if(name==='stationSaleTimes') return {station:payload.station,status:'available',checked_at:now,
           expires_at:now+3600,retry_at:now+60,warning:null,source_url:'https://kyfw.12306.cn/index/view/infos/sale_time.html',
           schedules:[{station_name:payload.station,station_code:'DEMO',sale_time:'13:30',start_date:'2010-01-01',stop_date:'2099-12-31'}]};
@@ -95,13 +107,15 @@ def main():
                 driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": bootstrap})
                 driver.get(f"http://127.0.0.1:{server.server_port}/")
                 wait = WebDriverWait(driver, 15)
-                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
+                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 7
+                           and not d.find_elements("id", "startup-splash"))
 
                 def capture(name):
                     driver.execute_script("document.querySelector('.page-surface').scrollTop=0")
                     time.sleep(0.3)
                     assert driver.execute_script("return document.documentElement.scrollWidth<=innerWidth")
-                    driver.save_screenshot(str(ROOT / "docs/images" / f"{name}-v{version}.png"))
+                    assert f"v{version}" in driver.find_element("tag name", "body").text
+                    driver.save_screenshot(str(output_dir / f"{name}-v{version}.png"))
 
                 capture("dashboard")
                 driver.find_element("css selector", '[aria-label="行程设置"]').click()
@@ -111,7 +125,7 @@ def main():
                 wait.until(lambda d: "DEMO123" in d.find_element("tag name", "body").text)
                 capture("order-center")
                 driver.find_element("css selector", '[aria-label="购票监控"]').click()
-                driver.find_element("css selector", '[aria-label*="主题"]').click()
+                driver.find_element("css selector", '.theme-switch [data-mode="dark"]').click()
                 wait.until(lambda d: d.execute_script("return document.documentElement.dataset.theme") == "dark")
                 active = {**state, "monitoring": True, "current_config": config,
                           "task": {"run_id": "readme-demo", "status": "backoff", "sequence": 1,

@@ -3,7 +3,9 @@ import { describe, expect, test, vi } from "vitest";
 import {
   CHANNEL_FILE_MISSING_MESSAGE,
   createUpdateManager,
+  INSTALLER_UNAVAILABLE,
   mapUpdateInfoToCheckSuccess,
+  NETWORK_ERROR_MESSAGE,
   shouldEnableAutoUpdate,
   type UpdaterLike,
 } from "../updateManager";
@@ -212,6 +214,81 @@ describe("updateManager", () => {
     expect(result).toMatchObject({ ok: false, code: "no-assets", error: CHANNEL_FILE_MISSING_MESSAGE });
     expect(manager.getState().error).toBe(CHANNEL_FILE_MISSING_MESSAGE);
     expect(updater.checkForUpdates).toHaveBeenCalledOnce();
+  });
+
+  test("forwards transfer figures and the installer size for the progress display", () => {
+    const updater = createMockUpdater();
+    const manager = createUpdateManager({ currentVersion: "0.7.0", updater, enabled: true });
+
+    updater.emit("update-available", { version: "0.7.1", files: [{ size: 98_100_000 }] });
+    expect(manager.getState().packageSize).toBe(98_100_000);
+    updater.emit("download-progress", { percent: 42.4, transferred: 41_590_000, total: 98_100_000, bytesPerSecond: 2_300_000 });
+    expect(manager.getState()).toMatchObject({
+      phase: "downloading", downloadPercent: 42.4, downloadTransferred: 41_590_000, downloadTotal: 98_100_000,
+      downloadSpeed: 2_300_000, packageSize: 98_100_000,
+    });
+    updater.emit("download-progress", { percent: Number.NaN, transferred: -1, total: 0 });
+    expect(manager.getState()).toMatchObject({
+      downloadPercent: undefined, downloadTransferred: undefined, downloadTotal: undefined, downloadSpeed: undefined,
+    });
+    updater.emit("update-downloaded", { version: "0.7.1" });
+    expect(manager.getState()).toMatchObject({ phase: "downloaded", packageSize: 98_100_000 });
+  });
+
+  test("a declined or failed installer launch keeps the downloaded update retryable", async () => {
+    const updater = createMockUpdater();
+    updater.launchInstaller = vi.fn(async () => { throw new Error("安装程序提权启动失败或已取消（1）。"); });
+    const manager = createUpdateManager({ currentVersion: "0.7.0", updater, enabled: true });
+    updater.emit("update-downloaded", { version: "0.7.1" });
+
+    expect(await manager.installUpdate()).toBe(false);
+    expect(manager.getState()).toMatchObject({ phase: "downloaded", error: "安装程序提权启动失败或已取消（1）。" });
+    updater.launchInstaller = vi.fn(async () => undefined);
+    expect(await manager.installUpdate()).toBe(true);
+  });
+
+  test("a missing installer asks for a new check instead of another install attempt", async () => {
+    const updater = createMockUpdater();
+    const missing = Object.assign(new Error("已下载的安装程序不可用，请重新检查更新。"), { code: INSTALLER_UNAVAILABLE });
+    updater.launchInstaller = vi.fn(async () => { throw missing; });
+    const manager = createUpdateManager({ currentVersion: "0.7.0", updater, enabled: true });
+    updater.emit("update-downloaded", { version: "0.7.1" });
+
+    expect(await manager.installUpdate()).toBe(false);
+    expect(manager.getState()).toMatchObject({ phase: "error", error: missing.message, result: { ok: false } });
+    expect(await manager.installUpdate()).toBe(false);
+    expect(updater.launchInstaller).toHaveBeenCalledOnce();
+  });
+
+  test("connection failures read as a network problem instead of a raw Chromium code", async () => {
+    const updater = createMockUpdater();
+    updater.checkForUpdates = vi.fn(async () => { throw new Error("net::ERR_CONNECTION_TIMED_OUT"); });
+    const manager = createUpdateManager({ currentVersion: "0.7.0", updater, enabled: true });
+
+    expect(await manager.checkForUpdates()).toMatchObject({ ok: false, code: "network", error: NETWORK_ERROR_MESSAGE });
+    expect(manager.getState().error).toBe(NETWORK_ERROR_MESSAGE);
+  });
+
+  test("a failed automatic download is reported through the error event, not as an unhandled rejection", async () => {
+    const updater = createMockUpdater();
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      updater.checkForUpdates = vi.fn(async () => {
+        updater.emit("update-available", { version: "0.7.1" });
+        setImmediate(() => updater.emit("error", new Error("net::ERR_CONNECTION_RESET")));
+        // electron-updater returns the automatic download's promise and leaves it unobserved.
+        return { downloadPromise: Promise.reject(new Error("net::ERR_CONNECTION_RESET")) };
+      });
+      const manager = createUpdateManager({ currentVersion: "0.7.0", updater, enabled: true });
+
+      expect(await manager.checkForUpdates()).toMatchObject({ ok: true, hasUpdate: true });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(manager.getState()).toMatchObject({ phase: "error", error: NETWORK_ERROR_MESSAGE });
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 
   test("an updater without acknowledged installation never invokes quitAndInstall", async () => {

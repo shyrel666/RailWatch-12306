@@ -84,7 +84,9 @@ export const defaultConfig: RailWatchConfig = {
   keep_alive: true,
   passengers: "",
   auto_alternate: false,
-  alternate_deadline: "开车前60分钟",
+  alternate_deadline: "开车前1小时",
+  alternate_accept_new_trains: false,
+  alternate_new_train_windows: [],
   date_range: "±1天",
   smart_rate: true,
   timer_enabled: false,
@@ -119,6 +121,7 @@ export type RailWatchStore = {
   configSaveError: string | null;
   draftRead: TripDraftReadResult;
   tripInitialized: boolean;
+  pendingTripEdits: Partial<RailWatchConfig>;
   editRevision: number;
   draftRevision: number;
   draftSaveState: "idle" | "editing" | "saving" | "saved" | "error";
@@ -209,16 +212,21 @@ export function createRailWatchStore() {
     configSaveError: null,
     draftRead: { status: "missing", draft: null, warning: null },
     tripInitialized: false,
+    pendingTripEdits: {},
     editRevision: 0,
     draftRevision: 0,
     draftSaveState: "idle",
     draftSavedAt: null,
     draftError: null,
-    initializeTrip: (config, savedAt, draft) => set({ config: { ...defaultConfig, ...config },
+    initializeTrip: (config, savedAt, draft) => set(state => {
+      const preserveEdits = !state.tripInitialized && state.editRevision > 0;
+      return { config: { ...defaultConfig, ...config, ...(preserveEdits ? state.pendingTripEdits : {}) },
       savedConfig: { ...defaultConfig, ...config }, savedAt, configSaveError: null, draftRead: draft, tripInitialized: true,
-      editRevision: 0, draftRevision: draft.status === "available" ? draft.draft.revision : 0,
-      draftSaveState: "idle", draftSavedAt: draft.status === "available" ? draft.draft.saved_at : null,
-      draftError: draft.status === "invalid" ? draft.warning : null }),
+      pendingTripEdits: {}, editRevision: preserveEdits ? state.editRevision : 0,
+      draftRevision: draft.status === "available" ? draft.draft.revision : 0,
+      draftSaveState: preserveEdits ? "editing" : "idle", draftSavedAt: draft.status === "available" ? draft.draft.saved_at : null,
+      draftError: draft.status === "invalid" ? draft.warning : null };
+    }),
     applyDraft: () => {
       const draft = get().draftRead;
       if (draft.status !== "available") return;
@@ -365,6 +373,7 @@ export function createRailWatchStore() {
       if (tripFingerprint(config) === tripFingerprint(get().config)) return;
       const changed = queryFamily(config) !== queryFamily(get().config);
       set({ config, editRevision: get().editRevision + 1, draftSaveState: "editing", draftError: null,
+        ...(!get().tripInitialized ? { pendingTripEdits: { ...(get().editRevision ? get().pendingTripEdits : {}), ...patch } } : {}),
         ...(!get().status.monitoring && changed ? { queryViews: {}, results: [], queryConfig: null, activeQuery: null,
         manualQueryId: null, manualQueryPending: false,
         manualQueryError: get().manualQueryPending ? "查询条件已改变，本次查询结果已作废" : null } : {}) });

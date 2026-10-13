@@ -651,6 +651,39 @@ class RailWatchBridge:
         warning = None if items else "官方常用乘车人列表中没有可读取的乘客，请先在 12306 添加乘车人。"
         return {"items": items, "warning": warning}
 
+    def read_alternate_options(self, refresh=False, from_station=None, to_station=None) -> dict:
+        if type(refresh) is not bool:
+            raise ValueError("refresh须为布尔值")
+        if any(value is not None and (not isinstance(value, str) or len(value) > 40) for value in (from_station, to_station)):
+            raise ValueError("行程车站无效")
+        if not refresh:
+            return {"snapshot": self.order_journal.latest_alternate_options(), "warning": None}
+        return self._refresh_alternate_options((from_station, to_station))
+
+    @idle_browser_command
+    def _refresh_alternate_options(self, trip_route=None) -> dict:
+        """Read current form controls only; never navigate or prepare an order.
+
+        trip_route names the stations configured in the trip being edited, so a
+        city-level route can find options read from one of its actual stations.
+        """
+        from railwatch_alternate_options import canonical_deadline, trip_route_fields
+        from railwatch_order_page import normalized_date
+        cached = self.order_journal.latest_alternate_options()
+        if self.driver is None or not driver_session_alive(self.driver):
+            return {"snapshot": cached, "warning": "受控浏览器中没有打开的官网候补表单。运行时会自动读取实际选项。"}
+        page = OrderPage(self.driver)
+        data, snap = page.alternate_options(), page.snapshot()
+        cards = snap.get("details", [])
+        if not data or len(cards) != 1 or not data.get("deadline_options"):
+            return {"snapshot": cached, "warning": "当前页面未提供完整候补截止选项；请在官网候补表单上同步。"}
+        cached = {"source": "official_page", "observed_at": time.time(),
+                  "from_station": cards[0].get("from"), "to_station": cards[0].get("to"), **trip_route_fields(trip_route),
+                  "dates": [normalized_date(cards[0].get("date", ""))],
+                  "deadline_options": list(dict.fromkeys(canonical_deadline(value) for value in data["deadline_options"]))}
+        self.order_journal.mark("", "alternate_options", detail=cached)
+        return {"snapshot": cached, "warning": None}
+
     def _ensure_matching_chromedriver(self, force: bool = False) -> None:
         """Chrome 会自动升级，本地 ChromeDriver 可能落后于已安装 Chrome；发现大版本不匹配时自动补齐。
 
@@ -947,6 +980,11 @@ class RailWatchBridge:
             item["conclusion"] = "进行中" if item["run_id"] == active else run_conclusion(outcomes[item["run_id"]])
         return page
 
+    def query_pulse(self, limit=60):
+        # A running task shows its own queries, even before the first one is recorded.
+        active = self._task.run_id if self._task and self._task.active else None
+        return {**self.order_journal.query_pulse(limit, active), "active": active is not None}
+
     @idle_browser_command
     def analyze_query(self, raw_config: dict, request_id: Optional[str] = None) -> dict:
         if request_id is not None and (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id)):
@@ -1011,9 +1049,10 @@ class RailWatchBridge:
             if expected_dates is not None and (not isinstance(expected_dates, list) or actual_dates != expected_dates):
                 raise ValueError("执行日期已变化，请重新核对启动摘要。")
             task = MonitorTask(config, target, started_at=requested_at)
-            self._task = task
             from railwatch_rehearsal import public_trip
             self.order_journal.mark(task.run_id, "target_sale", detail={"target_at": target, "trip": public_trip(config)})
+            # Publish ownership only after the required startup record succeeds.
+            self._task = task
             self.state = replace(self.state.with_safety(config["auto_submit"], config["auto_alternate"]).with_monitoring(True), human_action={})
             self._transition(task, "preparing")
             task.thread = threading.Thread(target=lambda: self._run_task_worker(task, lambda: self._monitor_worker(deepcopy(config), task)), name=f"railwatch-monitor-{task.run_id[:8]}", daemon=True)
@@ -1057,7 +1096,7 @@ class RailWatchBridge:
         detail["summary"]["check_failures"] = self._order_check_failures if detail["summary"]["observing"] else 0
         return detail
 
-    def continue_order(self, intent_id: Optional[str] = None) -> dict:
+    def continue_order(self, intent_id: Optional[str] = None, alternate_deadline=None) -> dict:
         """Resume only the saved intent; never replay an uncertain submission."""
         with self._task_lock:
             if self._admission_closed or self.is_monitoring or self._browser_busy:
@@ -1067,6 +1106,11 @@ class RailWatchBridge:
                 raise ValueError("没有待处理订单")
             if intent_id is not None and (not isinstance(intent_id, str) or pending["intent"]["intent_id"] != intent_id):
                 raise ValueError("待核对订单已变化，请刷新历史后重试。")
+            if alternate_deadline is not None:
+                if not intent_id:
+                    raise ValueError("重选截止兑现时间须指定原订单")
+                self.order_journal.revise_alternate_deadline(intent_id, alternate_deadline)
+                pending = self.order_journal.pending()
             task = MonitorTask(pending["config"])
             self._task = task
             self._transition(task, "reconciling", message="正在核对原订单")
@@ -1086,10 +1130,19 @@ class RailWatchBridge:
                 driver.set_script_timeout(3)
                 with guard_browser(driver, task, lambda: self._transition(task)):
                     page = OrderPage(driver, task.cancel.is_set, lambda seconds: self._task_wait(task, seconds),
-                                     lambda stage, detail=None: self.order_journal.mark(task.run_id, stage, intent.intent_id, detail), log=self.log)
+                                     lambda stage, detail=None: self.order_journal.mark(task.run_id, stage, intent.intent_id, detail), log=self.log,
+                                     trip_route=(task.config.get("from_station_cn", ""), task.config.get("to_station_cn", "")))
                     known_id = pending["result"].get("order_id", "")
+                    page.verified_alternate_signature = pending["result"].get("review", {}).get("form_signature", "")
                     result = page.result(intent, submitted=True, known_id=known_id)
-                    if result.status == "unknown" and page.snapshot().get("formReady") and self.order_journal.claim_resume(task.run_id, intent.intent_id):
+                    snap = page.snapshot()
+                    if (intent.kind == "alternate" and not known_id and result.status in ("unknown", "verification")
+                            and self.order_journal.submission_started(intent.intent_id)
+                            and not self.order_journal.alternate_confirmation_started(intent.intent_id)
+                            and page.alternate_confirmation(intent, snap) is not None):
+                        result = page.wait_result(intent, submitted=True, confirm_alternate=True)
+                    elif (result.status in ("unknown", "verification") and (snap.get("formReady") or intent.kind == "alternate" and (snap.get("alternateCart") or snap.get("quietCar")))
+                          and self.order_journal.claim_resume(task.run_id, intent.intent_id)):
                         try:
                             if intent.kind == "alternate" and len(intent.combinations) > 1:
                                 from railwatch_alternate_editor import AlternateEditor
@@ -1118,6 +1171,7 @@ class RailWatchBridge:
         payload = {**result.payload(), "stage": stage, "label": STAGES[stage],
                    "intent": {"intent_id": intent.intent_id, "kind": intent.kind, "train_code": intent.train_code,
                               "date": intent.date, "seat": intent.seat,
+                              "deadline": intent.deadline, "new_train_windows": [asdict(item) for item in intent.new_train_windows],
                               "choices": [asdict(choice) for choice in intent.combinations] if intent.kind == "alternate" else []},
                    "updated_at": time.time(), "recovery_required": result.status in ("unknown", "verification")}
         self.state = replace(self.state, order=payload, status_message=STAGES[stage])
@@ -1197,6 +1251,10 @@ class RailWatchBridge:
                     result = self.order_journal.record(intent, result)
                     self.order_journal.mark(task.run_id, result.status, intent.intent_id)
                     self._handle_order(intent, result)
+                elif probe and intent.kind == "alternate" and result.review:
+                    result = self.order_journal.refresh_review(intent, result)
+                    self.state = replace(self.state, order={**self.state.order, "review": result.review, "updated_at": time.time()})
+                    self.emit_state()
                 previous = result
                 if result.status in ("unknown", "verification"):
                     self._handle_human_action({"message": result.reason or "请在官方页面核对原订单后继续。"})
@@ -1449,9 +1507,20 @@ class RailWatchBridge:
                         incoming.pop(field)
                     elif field in incoming and incoming[field] is None:
                         incoming[field] = ""
-                merged = merge_notification_settings({**current, **incoming})
+                candidate = {**current, **incoming}
+                if candidate.get("sound_tone") == "custom" and not candidate.get("sound_custom_file"):
+                    raise ValueError("请先导入自定义提示音。")
+                if (incoming.get("sound_tone") == "custom" or incoming.get("sound_custom_file")):
+                    directory = os.path.join(self.data_dir, "notification-sounds")
+                    audio_path = os.path.join(directory, candidate["sound_custom_file"])
+                    if (not os.path.isfile(audio_path) or
+                            os.path.dirname(os.path.realpath(audio_path)) != os.path.realpath(directory)):
+                        raise ValueError("自定义提示音文件不存在，请重新导入。")
+                merged = merge_notification_settings(candidate)
                 self._save_notification_settings(merged)
                 self.notification_service.update_settings(merged)
+                if "sound_custom_file" in incoming:
+                    self._prune_notification_sounds(merged["sound_custom_file"])
             # Each file commits atomically, not as a cross-file transaction.
             # Commit secrets first so encryption failure cannot alter the theme.
             save_ui_preferences(self.data_dir, ui_patch)
@@ -1475,6 +1544,20 @@ class RailWatchBridge:
 
     def _notification_settings_path(self) -> str:
         return os.path.join(self.data_dir, NOTIFICATION_SETTINGS_FILE)
+
+    def _prune_notification_sounds(self, keep: str) -> None:
+        """Imported clips are content-addressed; keep only the one the saved settings name."""
+        directory = os.path.join(self.data_dir, "notification-sounds")
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return
+        for name in names:
+            if name != keep and re.fullmatch(r"[a-f0-9]{64}\.(wav|mp3|ogg|m4a)", name):
+                try:
+                    os.remove(os.path.join(directory, name))
+                except OSError:
+                    pass  # Still open for playback or already gone; the next save retries.
 
     def _load_notification_settings(self) -> dict:
         path = self._notification_settings_path()
@@ -1719,7 +1802,9 @@ class RailWatchBridge:
                         return
                     monitor.run()
                     pending = self.order_journal.pending()
-                    if pending and not task.cancel.is_set() and pending["result"]["status"] == "pending_payment":
+                    if pending and not task.cancel.is_set() and (
+                            pending["result"]["status"] == "pending_payment"
+                            or pending["result"]["status"] == "active" and task.config.get("order_watch_enabled", True)):
                         self._observe_order(task, driver, OrderIntent.from_dict(pending["intent"]), OrderResult(**pending["result"]))
         except TaskCancelled:
             pass
@@ -1791,11 +1876,13 @@ class RailWatchBridge:
     def _send_keep_alive(self) -> None:
         if not self.driver:
             return
+        started = time.monotonic()
+        failure = ""
         try:
             self.driver.set_script_timeout(3)
             result = self.driver.execute_async_script(LOGIN_CHECK_JS)
-        except Exception:
-            result = "unknown"
+        except Exception as exc:
+            result, failure = "unknown", type(exc).__name__
         if result not in ("ok", "expired"):
             result = "unknown"
         self._keep_alive_unknown_count = self._keep_alive_unknown_count + 1 if result == "unknown" else 0
@@ -1808,7 +1895,9 @@ class RailWatchBridge:
             self.state = replace(self.state, login_ready=True)
             self._check_device_id_consistency()
         else:
-            self.log("暂时无法确认登录状态，将在下次保活时重试。", "WARN")
+            # Duration and exception type only, so slow links can be told apart from errors.
+            self.log(f"暂时无法确认登录状态（耗时 {time.monotonic() - started:.1f} 秒"
+                     f"{'，' + failure if failure else ''}），将在下次保活时重试。", "WARN")
 
     def _wait_for_target_timestamp(self, wait_until: float, config: dict) -> bool:
         wall, mono = time.time(), time.monotonic()
@@ -2028,7 +2117,7 @@ $targets.Count
         try:
             from anti_detect import inject_automation_hygiene
             if inject_automation_hygiene(driver):
-                self.log("已安装浏览器环境稳定脚本（仅清除自动化特征，不伪造指纹）。")
+                self.log("已安装浏览器环境稳定脚本。")
             else:
                 self.log("浏览器环境稳定脚本未注入，不影响主流程。", "WARN")
         except Exception as hygiene_exc:
@@ -2157,6 +2246,8 @@ $targets.Count
             passenger_selections=config.get("passenger_selections", []),
             auto_alternate=config["auto_alternate"],
             alternate_deadline=config["alternate_deadline"],
+            alternate_accept_new_trains=config.get("alternate_accept_new_trains", False),
+            alternate_new_train_windows=config.get("alternate_new_train_windows", []),
             alternate_mode=config["alternate_mode"],
             alternate_max_combinations=config["alternate_max_combinations"],
             order_watch_enabled=config["order_watch_enabled"],

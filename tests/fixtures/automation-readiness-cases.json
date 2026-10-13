@@ -9,20 +9,26 @@
   },
   "capabilities": [
     { "name": "二等座", "query": true, "regular": true, "alternate": true },
-    { "name": "一等座", "query": true, "regular": true, "alternate": false },
+    { "name": "一等座", "query": true, "regular": true, "alternate": true },
     { "name": "商务座", "query": true, "regular": false, "alternate": false },
     { "name": "特等座", "query": true, "regular": false, "alternate": false },
     { "name": "无座", "query": true, "regular": false, "alternate": false },
-    { "name": "硬座", "query": true, "regular": true, "alternate": false },
-    { "name": "软座", "query": true, "regular": true, "alternate": false },
-    { "name": "硬卧", "query": true, "regular": true, "alternate": false },
-    { "name": "软卧", "query": true, "regular": true, "alternate": false },
+    { "name": "硬座", "query": true, "regular": true, "alternate": true },
+    { "name": "软座", "query": true, "regular": true, "alternate": true },
+    { "name": "硬卧", "query": true, "regular": true, "alternate": true },
+    { "name": "软卧", "query": true, "regular": true, "alternate": true },
     { "name": "高级软卧", "query": true, "regular": false, "alternate": false },
     { "name": "动卧", "query": true, "regular": false, "alternate": false }
   ],
   "valid": [
     {},
     { "auto_submit": false, "auto_alternate": true },
+    { "auto_alternate": true, "seat_keyword": "一等座" },
+    { "auto_alternate": true, "seat_keyword": "硬座" },
+    { "auto_alternate": true, "seat_keyword": "软座" },
+    { "auto_alternate": true, "seat_keyword": "硬卧" },
+    { "auto_alternate": true, "seat_keyword": "软卧" },
+    { "auto_submit": false, "auto_alternate": true, "seat_keyword": "一等座，硬座，软座，硬卧，软卧" },
     { "passenger_selections": [{ "name": "测试甲", "ticket_type": "adult", "identity_hint": "" }] }
   ],
   "invalid": [
@@ -42,6 +48,10 @@
     { "patch": { "seat_keyword": "不限" }, "expected": "明确席别" },
     { "patch": { "seat_keyword": "二等座，不限" }, "expected": "明确席别" },
     { "patch": { "seat_keyword": "商务座" }, "expected": "席别 商务座" },
-    { "patch": { "auto_alternate": true, "seat_keyword": "一等座" }, "expected": "席别 一等座" }
+    { "patch": { "auto_alternate": true, "seat_keyword": "无座" }, "expected": "席别 无座" },
+    { "patch": { "auto_submit": false, "auto_alternate": true, "seat_keyword": "商务座" }, "expected": "席别 商务座" },
+    { "patch": { "auto_submit": false, "auto_alternate": true, "seat_keyword": "特等座" }, "expected": "席别 特等座" },
+    { "patch": { "auto_submit": false, "auto_alternate": true, "seat_keyword": "高级软卧" }, "expected": "席别 高级软卧" },
+    { "patch": { "auto_submit": false, "auto_alternate": true, "seat_keyword": "动卧" }, "expected": "席别 动卧" }
   ]
 }

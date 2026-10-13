@@ -1,6 +1,7 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Drawer, Tooltip } from "antd";
 import {
+  ChartGantt,
   Gauge,
   Info,
   MonitorPlay,
@@ -22,6 +23,7 @@ import {
 } from "../lib/formatSystemStatus";
 import { useClock } from "../lib/useClock";
 import { useSidebarPreference } from "../lib/useSidebarPreference";
+import { AppUpdateContext, useAppUpdate } from "../lib/useAppUpdate";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { RailWatchPage, RailWatchStatus, RuntimeInfo } from "../types";
 import { BrandWordmark } from "./BrandWordmark";
@@ -33,17 +35,10 @@ export const RAILWATCH_PAGES: { name: RailWatchPage; icon: LucideIcon }[] = [
   { name: "行程设置", icon: TrainFront },
   { name: "购票监控", icon: MonitorPlay },
   { name: "订单中心", icon: ReceiptText },
+  { name: "运行复盘", icon: ChartGantt },
   { name: "系统设置", icon: Settings },
   { name: "关于", icon: Info },
 ];
-const descriptions: Record<RailWatchPage, string> = {
-  仪表盘: "行程与运行概况",
-  行程设置: "路线、乘客与查询策略",
-  购票监控: "余票查询与任务控制",
-  订单中心: "订单记录与状态核对",
-  系统设置: "环境、通知与应用偏好",
-  关于: "版本与应用信息",
-};
 
 export function SidebarNav({
   activePage,
@@ -92,14 +87,13 @@ export function SidebarNav({
         <img alt={collapsed ? appName : ""} src={appIconUrl} />
         <BrandWordmark label={appName || "RailWatch 12306"} />
       </div>
-      <div className="nav-caption">工作空间</div>
       <nav className="nav" aria-label="工作空间">
-        {items(0, 4)}
+        {items(0, 5)}
       </nav>
       <div className="sidebar-spacer" />
       {signals}
       <nav className="nav nav-bottom" aria-label="应用">
-        {items(4, 6)}
+        {items(5, 7)}
       </nav>
       <div className="sidebar-foot">
         {footer}
@@ -142,6 +136,8 @@ export function ShellLayout({
   onToggleEventPanel: () => void;
 }) {
   const { collapsed, toggle: toggleSidebar } = useSidebarPreference();
+  const update = useAppUpdate(runtime.app_version);
+  const logAlert = useUnseenLogAlert(eventPanelVisible);
   const pageSection = useRailWatchStore((state) => state.pageSection);
   const logTriggerRef = useRef<HTMLButtonElement>(null);
   const contentRef = useRef<HTMLElement>(null);
@@ -183,6 +179,7 @@ export function ShellLayout({
     }
   }, [activePage, pageSection]);
   return (
+    <AppUpdateContext.Provider value={update}>
     <div
       className={
         "app-shell" +
@@ -216,21 +213,29 @@ export function ShellLayout({
         <header className="page-header">
           <div className="page-heading">
             <h1>{activePage}</h1>
-            <p>{descriptions[activePage]}</p>
           </div>
-          <div className="header-actions">
+          <div className="header-actions" role="group" aria-label="时间与常用工具">
             <HeaderClock />
+            <span className="header-divider" aria-hidden="true" />
             <ThemeControl />
             <button
               ref={logTriggerRef}
-              className="quiet-button"
+              className="header-log-toggle"
               aria-label={eventPanelVisible ? "隐藏事件日志" : "显示事件日志"}
+              aria-describedby={logAlert ? "header-log-alert" : undefined}
               aria-expanded={eventPanelVisible}
+              aria-haspopup="dialog"
+              title={eventPanelVisible ? "隐藏事件日志" : "显示事件日志"}
               onClick={onToggleEventPanel}
               type="button"
             >
-              <ScrollText size={16} />
-              事件日志
+              <ScrollText size={16} aria-hidden="true" />
+              <span className="header-log-label">事件日志</span>
+              {logAlert ? (
+                <i className={"header-log-alert " + logAlert} id="header-log-alert">
+                  <span className="sr-only">{logAlert === "error" ? "有新的错误" : "有新的警告"}</span>
+                </i>
+              ) : null}
             </button>
           </div>
         </header>
@@ -260,7 +265,25 @@ export function ShellLayout({
         {eventPanel}
       </Drawer>
     </div>
+    </AppUpdateContext.Provider>
   );
+}
+
+// Warnings and errors that arrived while the drawer was closed; opening it marks them seen.
+function useUnseenLogAlert(visible: boolean) {
+  const logs = useRailWatchStore((state) => state.logs);
+  const latest = logs.at(-1)?.id ?? 0;
+  const [seen, setSeen] = useState(0);
+  useEffect(() => {
+    if (visible) setSeen(latest);
+  }, [visible, latest]);
+  if (visible) return null;
+  let alert: "warn" | "error" | null = null;
+  for (let index = logs.length - 1; index >= 0 && (logs[index].id ?? 0) > seen; index -= 1) {
+    if (logs[index].level === "ERROR") return "error";
+    if (logs[index].level === "WARN") alert = "warn";
+  }
+  return alert;
 }
 
 function HeaderClock() {
@@ -270,10 +293,12 @@ function HeaderClock() {
     <time
       className="header-clock"
       aria-label="系统时钟"
-      title={`${clock.date} ${clock.weekday}`}
+      title={`北京时间 ${clock.date} ${clock.weekday}`}
       dateTime={new Date(now).toISOString()}
     >
-      <span>北京时间</span>
+      <span>
+        北京时间 · {Number(clock.date.slice(5, 7))}月{Number(clock.day)}日 {clock.weekday}
+      </span>
       <strong>{clock.time}</strong>
     </time>
   );

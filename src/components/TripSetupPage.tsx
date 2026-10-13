@@ -1,19 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, AutoComplete, Button, Input, InputNumber, Select, Switch } from "antd";
+import { Alert, Button, ConfigProvider, Input, InputNumber, Select, Switch } from "antd";
+import { AutomationSection } from "./AutomationSettings";
 import { DATE_STRATEGIES, DATE_SCAN_BUDGET, dateStrategy, dateStrategySummary } from "../lib/dateStrategy";
-import { ORDER_POLICY } from "../lib/orderPolicy";
 import { automationConfigIssue } from "../lib/automationReadiness";
 import {
   ArrowLeftRight,
   BarChart3,
   Building2,
   CalendarDays,
-  ChevronDown,
-  CircleHelp,
   FolderOpen,
   Plus,
+  RefreshCw,
   Save,
+  Star,
   TrainFront,
+  UserRoundSearch,
   X,
 } from "lucide-react";
 import { useRailWatchStore } from "../store/useRailWatchStore";
@@ -29,7 +30,7 @@ import type { PassengerCandidates, RailWatchConfig, StationSearchResult, Station
 import type { CommandRunner, ConfirmDialog } from "./componentTypes";
 import { PreferenceSection } from "./PreferenceSection";
 import { TimerSettings } from "./TimerSettings";
-import { RiskToggle } from "./DisplayPrimitives";
+import { Hint } from "./DisplayPrimitives";
 import {
   PRIORITIES, REQUEST_MODES, delayPreview, isStrategyCustomized, modeDefaults,
   priorityDefaults, queryPriority, requestMode as getRequestMode,
@@ -64,21 +65,24 @@ function StationField({ label, value, onChange, runCommand }: {
   }, [value, runCommand]);
   return <div className="trip-field">
     <label htmlFor={`station-${label}`}>{label}</label>
-    <span className="trip-input-shell"><Building2 size={15} />
-      <Input id={`station-${label}`} aria-label={label} bordered={false} value={value}
-        onFocus={() => setFocused(true)} onBlur={() => window.setTimeout(() => setFocused(false), 150)}
-        onChange={event => onChange(event.target.value)} />
-    </span>
-    {focused && items.length > 0 ? <div className="station-suggestions" role="listbox" aria-label={`${label}联想`}>
-      {items.map(item => <button type="button" role="option" aria-selected={value === item.name}
-        key={`${item.name}-${item.code}`} onMouseDown={event => event.preventDefault()}
-        onClick={() => { onChange(item.name); setFocused(false); }}>
-        {item.name}<small>{item.pinyin || item.code}</small>
-      </button>)}
-    </div> : null}
+    {/* The suggestion list floats over the form so typing never shifts the neighbouring field. */}
+    <div className="station-combobox">
+      <span className="trip-input-shell"><Building2 size={15} />
+        <Input id={`station-${label}`} aria-label={label} bordered={false} value={value}
+          onFocus={() => setFocused(true)} onBlur={() => window.setTimeout(() => setFocused(false), 150)}
+          onChange={event => onChange(event.target.value)} />
+      </span>
+      {focused && items.length > 0 ? <div className="station-suggestions" role="listbox" aria-label={`${label}联想`}>
+        {items.map(item => <button type="button" role="option" aria-selected={value === item.name}
+          key={`${item.name}-${item.code}`} onMouseDown={event => event.preventDefault()}
+          onClick={() => { onChange(item.name); setFocused(false); }}>
+          {item.name}<small>{item.pinyin || item.code}</small>
+        </button>)}
+      </div> : null}
+    </div>
     {warning ? <small className="trip-date-hint" role="status">{warning}</small> : null}
     {!focused && searched && !warning && value.trim() && !items.some(item => item.name === value.trim())
-      ? <small className="trip-date-hint" role="status">请从联想中选择完整站名；未匹配时请核对站码数据。</small> : null}
+      ? <small className="trip-date-hint" role="status">请从联想中选择完整站名</small> : null}
   </div>;
 }
 
@@ -194,7 +198,6 @@ export function TripSetupPage({
   const configSaveError = useRailWatchStore(state => state.configSaveError);
   const draftRead = useRailWatchStore(state => state.draftRead);
   const draftSaveState = useRailWatchStore(state => state.draftSaveState);
-  const draftSavedAt = useRailWatchStore(state => state.draftSavedAt);
   const draftError = useRailWatchStore(state => state.draftError);
   const applyDraft = useRailWatchStore(state => state.applyDraft);
   const dismissDraft = useRailWatchStore(state => state.dismissDraft);
@@ -261,7 +264,7 @@ export function TripSetupPage({
     item.to_station === config.to_station_cn.trim());
   const setRoute = (from: string, to: string) => {
     if ((from !== config.from_station_cn || to !== config.to_station_cn) && selectedTrains.length) {
-      setTrainNotice("路线已变化；现有目标车次会保留，请核对后再执行。此路线收藏不会自动应用。");
+      setTrainNotice("路线已变化，现有目标车次会保留，请核对。");
     }
     update({ from_station_cn: from, to_station_cn: to });
   };
@@ -277,23 +280,6 @@ export function TripSetupPage({
       from_station: config.from_station_cn.trim(), to_station: config.to_station_cn.trim(), trains: selectedTrains,
     }, "当前路线的车次收藏已保存");
     if (result) setChoices(result);
-  };
-
-  const guardedAutomation = async (
-    key: "auto_submit" | "auto_alternate",
-    checked: boolean,
-  ) => {
-    if (!checked) {
-      update({ [key]: false });
-      return;
-    }
-    const accepted = await confirm(
-      key === "auto_submit" ? "启用自动提交" : "启用自动候补",
-      key === "auto_submit"
-        ? "启用后将按设置的车次、日期、乘车人和席别自动提交订单，并自动点击官方弹窗的确认按钮；核验与支付仍需人工完成。"
-        : "自动候补可在无票时自动提交候补订单。请确认是否继续。",
-    );
-    update({ [key]: accepted });
   };
 
   const swapStations = () => {
@@ -411,37 +397,40 @@ export function TripSetupPage({
       <section className="trip-setup-card">
         <header className="trip-setup-head">
           <div className="trip-save-status" role="status">
-            <span>{formalDirty ? "有未正式保存的修改" : "当前编辑与上次正式保存一致"}</span>
-            <span>上次正式保存：{formatSavedAt(savedAt)}（北京时间）</span>
-            <span>草稿：{draftSaveState === "editing" ? "编辑中" : draftSaveState === "saving" ? "保存中" :
-              draftSaveState === "saved" ? `已保存 ${formatSavedAt(draftSavedAt)}` : draftSaveState === "error" ? "保存失败" :
-              draftRead.status === "available" ? `发现可恢复草稿 ${formatSavedAt(draftRead.draft.saved_at)}` : "尚未保存"}</span>
-            {monitoring ? <span>运行中的行程保持不变，修改将在下次运行生效</span> : null}
-            {!tripInitialized ? <span role="alert">已保存的行程尚未加载，暂不能保存配置，以免覆盖原配置。</span> : null}
-            {configSaveError ? <span role="alert">正式保存失败：{configSaveError}</span> : null}
-            {draftError ? <span role="alert">草稿：{draftError}</span> : null}
+            <i className={"lamp " + (formalDirty ? "wait" : "go")} aria-hidden="true" />
+            <strong>{formalDirty ? "有未保存的修改" : "已保存"}</strong>
+            {savedAt !== null ? <span className="mono">{formatSavedAt(savedAt)}</span> : null}
+            {formalDirty && draftSaveState === "saving" ? <span>草稿保存中…</span> : null}
+            {formalDirty && draftSaveState === "saved" ? <span>草稿已自动保存</span> : null}
+            {monitoring ? <span>修改将在下次运行生效</span> : null}
+            {!tripInitialized ? <span role="alert">已保存的行程尚未加载，加载完成前暂不可编辑。</span> : null}
+            {configSaveError ? <span role="alert">保存失败：{configSaveError}</span> : null}
+            {draftError ? <span role="alert">草稿保存失败：{draftError}</span> : null}
           </div>
           <Button
             className="trip-load-button"
             icon={<FolderOpen size={15} />}
             loading={busy === "loadConfig"}
+            disabled={!tripInitialized}
             onClick={() => void loadConfig()}
           >
             恢复上次保存
           </Button>
         </header>
         {draftRead.status === "available" ? <div className="trip-draft-recovery" role="group" aria-label="恢复行程草稿">
-          <span>发现上次未正式保存的行程草稿（{formatSavedAt(draftRead.draft.saved_at)}）。恢复后不会启动监控。</span>
-          <button type="button" onClick={applyDraft}>恢复草稿</button>
-          <button type="button" onClick={dismissDraft}>使用已保存配置</button>
+          <span>发现未保存的草稿 · <span className="mono">{formatSavedAt(draftRead.draft.saved_at)}</span></span>
+          <Button size="small" type="primary" onClick={applyDraft}>恢复草稿</Button>
+          <Button size="small" type="text" onClick={dismissDraft}>使用已保存配置</Button>
         </div> : null}
         {draftRead.status === "invalid" ? <div className="trip-draft-recovery" role="alert">{draftRead.warning}</div> : null}
 
-        <div className="trip-setup-form-scroll">
+        {/* Edits made before the saved trip loads would be based on defaults
+            (e.g. adding a passenger would drop the saved ones), so wait for it. */}
+        <ConfigProvider componentDisabled={!tripInitialized}>
+        <fieldset className="trip-setup-form-scroll" disabled={!tripInitialized}>
           <PreferenceSection
             id="trip-basics"
             title="路线与乘客"
-            description="确定你的目的地与同行人"
             defaultOpen
           >
             {automationIssue ? <Alert type="warning" showIcon message="自动化配置待完善" description={automationIssue} /> : null}
@@ -462,15 +451,18 @@ export function TripSetupPage({
             {config.from_station_cn.trim() && config.from_station_cn.trim() === config.to_station_cn.trim()
               ? <small className="trip-date-hint" role="alert">出发站和到达站不能相同</small> : null}
             {trainNotice ? <small className="trip-date-hint" role="status">{trainNotice}</small> : null}
-            <button type="button" className="trip-station-refresh" onClick={() => void runCommand("refreshStations", {}, "站码数据已更新").then(result => {
-              if (result) setStationRevision(value => value + 1);
-            })}>更新站码数据</button>
-            {choices.recent_routes.length ? <div className="trip-route-choices" aria-label="最近路线">
-              <span>最近路线：</span>{choices.recent_routes.map(route => <button type="button"
-                key={`${route.from_station}-${route.to_station}`} onClick={() => setRoute(route.from_station, route.to_station)}>
-                {route.from_station} → {route.to_station}
-              </button>)}
-            </div> : null}
+            <div className="trip-route-bar">
+              {choices.recent_routes.length ? <div className="trip-route-choices" aria-label="最近路线">
+                <span>最近</span>{choices.recent_routes.map(route => <button type="button"
+                  key={`${route.from_station}-${route.to_station}`} onClick={() => setRoute(route.from_station, route.to_station)}>
+                  {route.from_station} → {route.to_station}
+                </button>)}
+              </div> : null}
+              <Button size="small" className="trip-station-refresh" icon={<RefreshCw size={13} />}
+                loading={busy === "refreshStations"} onClick={() => void runCommand("refreshStations", {}, "站码数据已更新").then(result => {
+                  if (result) setStationRevision(value => value + 1);
+                })}>更新站码数据</Button>
+            </div>
 
             <div className="trip-form-row trip-form-row--split">
               <label className="trip-field">
@@ -491,11 +483,11 @@ export function TripSetupPage({
                     {tripDateStatus.warning}
                   </small>
                 ) : null}
-                <small className="trip-date-hint">
-                  {rangeStatus.invalid
-                    ? "请输入有效日期"
-                    : `实际执行日期：${rangeStatus.valid.join("、") || "无"}${rangeStatus.skipped.length ? `；跳过：${rangeStatus.skipped.join("、")}` : ""}`}
-                </small>
+                {rangeStatus.invalid ? <small className="trip-date-hint">请输入有效日期</small>
+                  : config.date_range !== "单日" || rangeStatus.skipped.length ? <small className="trip-date-hint">
+                    实际查询 {rangeStatus.valid.map(date => date.slice(5)).join("、") || "无"}
+                    {rangeStatus.skipped.length ? ` · 跳过 ${rangeStatus.skipped.map(date => date.slice(5)).join("、")}` : ""}
+                  </small> : null}
               </label>
               <div className="trip-field">
                 <span>日期范围</span>
@@ -512,8 +504,9 @@ export function TripSetupPage({
             </div>
 
             <div className="trip-form-row trip-form-row--split">
-              <label className="trip-field">
-                <span>车次（可多选）</span>
+              <div className="trip-field">
+                <span className="trip-field-label-with-help">车次
+                  <Hint text="可填写多个车次，按顺序优先。留空则查询本路线全部车次，可在查询结果中勾选加入。" /></span>
                 <span className="trip-input-with-action">
                   <span className="trip-input-shell">
                     <TrainFront size={15} />
@@ -527,48 +520,49 @@ export function TripSetupPage({
                       }
                     />
                   </span>
-                  <Button className="trip-inline-button" onClick={() => void saveFavorites()} type="default">
-                    保存为本路线收藏
+                  <Button className="trip-inline-button" icon={<Star size={14} />} onClick={() => void saveFavorites()} type="default">
+                    收藏
                   </Button>
                 </span>
                 {currentFavorite?.trains.length ? <span className="trip-route-choices">
-                  本路线收藏：<button type="button" onClick={() => update({ train_code: currentFavorite.trains.join(", ") })}>
+                  <span>收藏</span><button type="button" onClick={() => update({ train_code: currentFavorite.trains.join(", ") })}>
                     应用 {currentFavorite.trains.join("、")}
                   </button>
                 </span> : null}
-                {selectedTrains.length ? <span className="trip-train-order" aria-label="车次优先顺序">
+                {selectedTrains.length > 1 ? <span className="trip-train-order" aria-label="车次优先顺序">
                   {selectedTrains.map((code, index) => <span key={code}>
-                    {index + 1}. {code}
+                    <em>{index + 1}</em>{code}
                     <button type="button" aria-label={`上移 ${code}`} disabled={index === 0} onClick={() => moveTrain(index, -1)}>↑</button>
                     <button type="button" aria-label={`下移 ${code}`} disabled={index === selectedTrains.length - 1} onClick={() => moveTrain(index, 1)}>↓</button>
                   </span>)}
                 </span> : null}
-                <small className="field-help">查询本路线全部车次后，可在结果页按日期和实际区间选择目标。</small>
-              </label>
+              </div>
               <div className="trip-field">
-                <span>多日期策略</span>
+                <span className="trip-field-label-with-help">多日期策略
+                  <Hint label="多日期策略" text={dateStrategySummary(config)} /></span>
                 <Select aria-label="多日期策略" className="trip-select" value={dateStrategy(config)}
                   disabled={dateRange === "单日"}
                   options={Object.entries(DATE_STRATEGIES).map(([value, policy]) => ({ value, label: policy.label }))}
                   onChange={value => update({ date_strategy: value })} />
-                <small className="field-help">{dateStrategySummary(config)}</small>
                 {dateStrategy(config) === "inventory_first" && dateRange !== "单日" ? <label className="trip-field">
                   <span>跨日期扫描预算（秒）</span>
                   <InputNumber aria-label="跨日期扫描预算（秒）" className="trip-select"
                     min={DATE_SCAN_BUDGET.min_budget_seconds} max={DATE_SCAN_BUDGET.max_budget_seconds} precision={0}
                     value={config.date_scan_budget_seconds ?? DATE_SCAN_BUDGET.scan_budget_seconds}
                     onChange={value => { if (value !== null) update({ date_scan_budget_seconds: value }); }} />
-                  <small className="field-help">扫描结束后仍会重新确认候补；{config.alternate_mode === "multiple" ? "按自动化设置添加并核对备选组合。" : "仅提交一个已核对的组合。"}</small>
                 </label> : null}
               </div>
             </div>
 
             <div className="trip-form-row">
               <div className="trip-field">
-                <span>席别（可多选）</span>
+                <span className="trip-field-label-with-help">席别
+                  <Hint text="可多选，按选择顺序优先。标记「仅提醒」的席别只查询和通知，由你在官网购买；卧铺铺位由官网分配。" /></span>
                 <div aria-label="席别" className="chip-group" role="group">
-                  {[{ name: "不限", query: true, regular: false, alternate: false }, ...seatCapabilities.filter(seat => seat.query)].map((capability) => {
+                  {[{ name: "不限", query: true, regular: true, alternate: true }, ...seatCapabilities.filter(seat => seat.query)].map((capability) => {
                     const seat = capability.name;
+                    const limit = !capability.regular && !capability.alternate ? "仅提醒"
+                      : !capability.alternate ? "不可候补" : !capability.regular ? "仅候补" : "";
                     return (
                     <button
                       aria-pressed={selectedSeats.includes(seat)}
@@ -581,13 +575,13 @@ export function TripSetupPage({
                       onClick={() => toggleSeat(seat)}
                       type="button"
                     >
-                      {seat}{seat !== "不限" ? <small>{capability.regular ? "可自动提交" : "查询／人工"}{capability.alternate ? " · 可自动候补" : ""}</small> : null}
+                      {seat}{limit ? <small>{limit}</small> : null}
                     </button>
                   );})}
                 </div>
-                {!seatCapabilities.length ? <small className="field-help">席别能力尚未加载，请检查运行时状态。</small> : null}
+                {!seatCapabilities.length ? <small className="field-help">席别信息尚未加载，请检查运行环境。</small> : null}
                 {selectedSeats.length > 1 ? <span className="trip-train-order" aria-label="席别优先顺序">
-                  {selectedSeats.map((seat, index) => <span key={seat}>{index + 1}. {seat}
+                  {selectedSeats.map((seat, index) => <span key={seat}><em>{index + 1}</em>{seat}
                     <button type="button" aria-label={`上移席别 ${seat}`} disabled={index === 0} onClick={() => {
                       const next = [...selectedSeats]; [next[index - 1], next[index]] = [next[index], next[index - 1]];
                       update({ seat_keyword: next.join("，") });
@@ -603,7 +597,8 @@ export function TripSetupPage({
 
             <div className="trip-form-row trip-form-row--split">
               <div className="trip-field">
-                <span>乘客</span>
+                <span className="trip-field-label-with-help">乘客
+                  <Hint text="自动交易仅支持成人票：普通订单勾选后回读确认票种，候补须在官方乘客列表中标为成人。学生、儿童票请在官网办理。" /></span>
                 <div className="passenger-strip">
                   {passengerNames.map((name, index) => (
                     <span className="passenger-tag" key={`${name}-${index}`}>
@@ -618,7 +613,7 @@ export function TripSetupPage({
                     </span>
                   ))}
                   <span className="passenger-add">
-                    <input
+                    <Input
                       aria-label="添加乘客"
                       placeholder="姓名"
                       value={passengerDraft}
@@ -632,23 +627,18 @@ export function TripSetupPage({
                         }
                       }}
                     />
-                    <button
-                      aria-label="添加乘客"
-                      onClick={addPassenger}
-                      type="button"
-                    >
-                      <Plus size={14} />
+                    <Button type="text" aria-label="添加乘客" icon={<Plus size={14} />} onClick={addPassenger}>
                       添加乘客
-                    </button>
+                    </Button>
+                    <Button className="trip-station-refresh" icon={<UserRoundSearch size={14} />}
+                      disabled={readingPassengers || !!busy || monitoring}
+                      aria-busy={readingPassengers} onClick={() => void readPassengers()}>
+                      {readingPassengers ? "正在读取官方乘客…" : "从官方页面读取乘客"}
+                    </Button>
                   </span>
                 </div>
                 {passengerError ? <small className="trip-date-hint" role="alert">{passengerError}</small> : null}
-                <small className="field-help">姓名不代表票种。普通订单按完整姓名勾选后，须回读确认为成人票才会提交；候补须在乘客列表明确标为成人。学生、儿童请在官方页面处理。</small>
-                <button type="button" className="trip-station-refresh" disabled={readingPassengers || !!busy || monitoring}
-                  aria-busy={readingPassengers} onClick={() => void readPassengers()}>
-                  {readingPassengers ? "正在读取官方乘客…" : "从官方页面读取乘客"}
-                </button>
-                <small className="field-help">{monitoring ? "监控运行中，请停止监控后读取乘客。" : "自动打开官方乘车人列表，读取后返回原页面。"}</small>
+                {monitoring ? <small className="field-help">监控运行中，请停止监控后读取乘客。</small> : null}
                 {passengerCandidates?.warning ? <small className="field-help" role="status">{passengerCandidates.warning}</small> : null}
                 {passengerCandidates?.items.length ? <div className="trip-route-choices" aria-label="官方页面乘客候选">
                   {passengerCandidates.items.map((candidate, index) => <button type="button" key={`${candidate.name}-${candidate.identity_hint}-${index}`}
@@ -664,15 +654,14 @@ export function TripSetupPage({
             <PreferenceSection
               id="trip-query"
               title="查询策略"
-              description="调整查询频率、优先级与座位偏好"
+              description={`${PRIORITIES[priority].label} · 每 ${config.interval} 秒`}
               defaultOpen={window.matchMedia("(min-width: 1400px)").matches}
             >
               <div className="trip-form-row trip-form-row--split">
-                {" "}
                 <div className="trip-field">
                   <span className="trip-field-label-with-help">
                     优先级
-                    <CircleHelp aria-hidden size={13} />
+                    <Hint text="速度优先缩短查询等待，适合起售时刻；成功率优先查询更稳、等待更长，适合长时间监控。选择后会套用推荐参数。" />
                   </span>
                   <SegmentedControl
                     ariaLabel="优先级"
@@ -680,13 +669,8 @@ export function TripSetupPage({
                     value={PRIORITIES[priority].label}
                     onChange={handlePriorityChange}
                   />
-                  <small className="field-help">
-                    {customized ? "已自定义；再次选择优先级可恢复推荐参数。" : "已应用推荐参数，可继续手动调整。"}
-                    {priority === "speed"
-                      ? "速度优先缩短查询等待，适合关注起售后的及时响应。"
-                      : "成功率优先侧重稳定查询和较长等待，适合持续监控；不代表购票成功率保证。"}
-                  </small>
-                </div>{" "}
+                  {customized ? <small className="field-help">已自定义 · 重新选择优先级可恢复推荐参数</small> : null}
+                </div>
                 <label className="trip-field">
                   <span>座位偏好</span>
                   <Select
@@ -699,7 +683,7 @@ export function TripSetupPage({
                     onChange={(value) => update({ seat_prefer: value })}
                   />
                 </label>
-              </div>{" "}
+              </div>
               <div className="trip-form-row trip-form-row--quad">
                 <div className="trip-field">
                   <span>查询间隔</span>
@@ -729,17 +713,16 @@ export function TripSetupPage({
                 <div className="trip-field">
                   <span className="trip-field-label-with-help">
                     随机延迟
-                    <CircleHelp aria-hidden size={13} />
+                    <Hint label="随机延迟" text={preview.detail} />
                   </span>
                   <div className="trip-readonly-pill">
                     {preview.label} 秒
                   </div>
-                  <small className="field-help">{preview.detail}</small>
                 </div>
                 <div className="trip-field">
                   <span className="trip-field-label-with-help">
                     请求模式
-                    <CircleHelp aria-hidden size={13} />
+                    <Hint text="查询间隔与超时的预设。快速、均衡、保守依次放缓节奏，查询更稳。" />
                   </span>
                   <Select
                     aria-label="请求模式"
@@ -755,113 +738,32 @@ export function TripSetupPage({
                 </div>
               </div>
               <div className="trip-advanced-switches">
-                {" "}
-                <label className="switch-row">
+                <span className="switch-row">
                   <Switch
                     aria-label="保持会话"
                     checked={config.keep_alive}
                     onChange={(checked) => update({ keep_alive: checked })}
                   />
                   <span>保持会话</span>
-                </label>
-                <label className="switch-row">
+                  <Hint text="定期检查登录状态，临近起售时暂停检查。登录失效后仍需重新登录。" />
+                </span>
+                <span className="switch-row">
                   <Switch
                     aria-label="智能轮询"
                     checked={config.smart_rate}
                     onChange={(checked) => update({ smart_rate: checked })}
                   />
                   <span>智能轮询</span>
-                </label>
+                  <Hint text="遇到超时或限频时自动放慢查询，不影响首次查询。" />
+                </span>
               </div>
-              <p className="field-help">保持会话会定期检查登录，临近起售暂停检查；登录失效仍需重新登录。智能轮询在超时或限频时放慢查询，不延迟首次查询。</p>
             </PreferenceSection>
+            <AutomationSection config={config} update={update} runCommand={runCommand} confirm={confirm}
+              busy={busy} />
             <TimerSettings config={config} update={update} windowDays={windowDays} />
-            <PreferenceSection
-              id="trip-automation"
-              title="自动化"
-              description={
-                config.auto_submit || config.auto_alternate
-                  ? "已启用 · 核验与支付需人工完成"
-                  : "自动提交与自动候补默认关闭"
-              }
-            >
-              <div className="trip-automation-toggles">
-                <RiskToggle
-                  checked={config.auto_submit}
-                  title={config.auto_submit ? "自动提交已启用" : "自动提交关闭"}
-                  description="开启后按设置的目标自动提交订单并确认，无需人工点击确认；核验与支付需人工完成。"
-                  onChange={(checked) =>
-                    void guardedAutomation("auto_submit", checked)
-                  }
-                />
-                <RiskToggle
-                  checked={config.auto_alternate}
-                  title={
-                    config.auto_alternate ? "候补排队已启用" : "候补排队关闭"
-                  }
-                  description="按配置提交已核对的候补组合；人工支付预付款后才生效。实验性功能，需核对官方订单。"
-                  onChange={(checked) =>
-                    void guardedAutomation("auto_alternate", checked)
-                  }
-                />
-              </div>
-              {config.auto_alternate ? <div className="trip-automation-group">
-                <div className="trip-automation-grid">
-                  <label className="trip-field">
-                    <span>候补组合</span>
-                    <Select aria-label="候补组合" className="trip-select" value={config.alternate_mode ?? "single"}
-                      options={[{ value: "single", label: "首个可用组合" }, { value: "multiple", label: "多个已配置组合" }]}
-                      onChange={value => update({ alternate_mode: value })} />
-                  </label>
-                  <label className="trip-field">
-                    <span>候补截止</span>
-                    <AutoComplete
-                      aria-label="候补截止"
-                      className="trip-select"
-                      placeholder="选择或输入完整日期时间"
-                      options={["开车前20分钟", "开车前1小时", "开车前2小时", "开车前3小时", "开车前6小时", "开车前12小时", "开车前1天"].map(value => ({ value }))}
-                      suffixIcon={<ChevronDown size={14} style={{ pointerEvents: "none" }} />}
-                      value={config.alternate_deadline === "开车前60分钟" ? "开车前1小时" : config.alternate_deadline}
-                      onChange={value => update({ alternate_deadline: value })}
-                    />
-                  </label>
-                </div>
-                <p className="trip-automation-help">
-                  可选择常用截止时间，也可输入完整日期时间（如 2026-10-01 18:00）；提交时以官方页面实际提供的选项为准。
-                </p>
-                {config.alternate_mode === "multiple" ? <>
-                  <div className="trip-automation-grid">
-                    <label className="trip-field">
-                      <span>候补组合上限</span>
-                      <InputNumber aria-label="候补组合上限" className="trip-select" min={1} max={ORDER_POLICY.max_combinations} precision={0}
-                        value={config.alternate_max_combinations ?? ORDER_POLICY.alternate_max_combinations}
-                        onChange={value => { if (value !== null) update({ alternate_max_combinations: value }); }} />
-                    </label>
-                  </div>
-                  <p className="trip-automation-help">最多{ORDER_POLICY.max_dates}个日期。按配置的日期、车次和席别选择页面可用组合；统一核对并提交一个候补订单，实际清单可在订单中心查看。</p>
-                </> : null}
-              </div> : null}
-              {config.auto_submit || config.auto_alternate ? <div className="trip-automation-group trip-automation-watch">
-                <div className="trip-automation-grid trip-automation-watch-controls">
-                  <label className="switch-row">
-                    <Switch aria-label="持续订单核对" checked={config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled}
-                      onChange={value => update({ order_watch_enabled: value })} />
-                    <span>持续订单核对</span>
-                  </label>
-                  {(config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled) ? <label className="trip-field">
-                    <span>订单核对间隔（秒）</span>
-                    <InputNumber aria-label="订单核对间隔（秒）" className="trip-select" precision={0}
-                      min={ORDER_POLICY.min_watch_interval_seconds} max={ORDER_POLICY.max_watch_interval_seconds}
-                      value={config.order_watch_interval_seconds ?? ORDER_POLICY.order_watch_interval_seconds}
-                      onChange={value => { if (value !== null) update({ order_watch_interval_seconds: value }); }} />
-                  </label> : null}
-                </div>
-                {(config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled) ?
-                  <p className="trip-automation-help">取得订单号后在独立标签页核对，保留付款页面。候补生效后持续等待兑现；异常时放慢，可在订单中心停止。退出或重启后需点击继续核对。</p> : null}
-              </div> : null}
-            </PreferenceSection>
           </div>
-        </div>
+        </fieldset>
+        </ConfigProvider>
         <footer className="trip-setup-footer">
           <Button
             icon={<Save size={15} />}
@@ -881,7 +783,7 @@ export function TripSetupPage({
           </Button>
           <Button loading={busy === "analyzeQuery"}
             onClick={() => void runCommand("analyzeQuery", { config: { ...config, train_code: "" } })}>
-            查询本路线全部车次
+            查询全部车次
           </Button>
         </footer>
       </section>

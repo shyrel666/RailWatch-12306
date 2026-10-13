@@ -424,6 +424,44 @@ class BrowserQueryTests(unittest.TestCase):
         monitor = TicketMonitor(self.driver, {"seat_keyword":"二等座", "auto_alternate":True}, log_callback=lambda _:None)
         self.assertIsNone(monitor._find_hit_row())
 
+    def test_live_waitlist_cell_is_selected_and_clicked_only_for_its_seat(self):
+        self.driver.execute_script("""window.waitlistClicks=[];
+          document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td>G101</td><td id="ZE_a" role="button" tabindex="0" '+
+          'hbdata="fixture" hbid="fixture" onclick="window.waitlistClicks.push(this.id)">候补</td>'+
+          '<td id="ZY_a" role="button" hbdata="fixture" hbid="fixture" '+
+          'onclick="window.waitlistClicks.push(this.id)">候补</td></tr>';""")
+        monitor = TicketMonitor(self.driver, {"train_code":"G101", "seat_keyword":"二等座",
+            "auto_alternate":True}, log_callback=lambda _:None)
+        monitor._row_snapshot = monitor.row_parser.snapshot_rows(monitor.target_seats)
+        self.assertTrue(monitor._row_snapshot[0]["alternate_available"]["二等座"])
+        hit = monitor._find_hit_row()
+        self.assertEqual((hit[0], hit[1], hit[-1]), ("G101", "二等座", "alternate"))
+        hit[4].click()
+        self.assertEqual(self.driver.execute_script("return window.waitlistClicks"), ["ZE_a"])
+        # A stale batch flag cannot authorize a cell whose control disappeared.
+        self.driver.execute_script("document.getElementById('ZE_a').removeAttribute('onclick')")
+        self.assertIsNone(monitor._find_hit_row())
+
+    def test_waitlist_cell_requires_action_metadata_and_respects_disabled_controls(self):
+        changes = ["cell.removeAttribute('role')", "cell.removeAttribute('hbdata')",
+                   "cell.setAttribute('hbid','')", "cell.setAttribute('onclick','')",
+                   "cell.setAttribute('aria-disabled','true')", "cell.style.visibility='hidden'",
+                   "cell.parentElement.style.opacity='0'",
+                   "cell.innerHTML='<button disabled>候补</button>'", "cell.innerText='无'"]
+        for change in changes:
+            with self.subTest(change=change):
+                self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+                  '<tr id="ticket_a"><td>G101</td><td id="ZE_a" role="button" '+
+                  'hbdata="fixture" hbid="fixture" onclick="void 0">候补</td>'+
+                  '<td id="ZY_a"><a>候补</a></td></tr>';
+                  const cell=document.getElementById('ZE_a');""" + change)
+                monitor = TicketMonitor(self.driver, {"seat_keyword":"二等座", "auto_alternate":True},
+                                        log_callback=lambda _:None)
+                row = monitor.row_parser.snapshot_rows(monitor.target_seats)[0]
+                self.assertFalse(row["alternate_available"]["二等座"])
+                self.assertIsNone(monitor._find_alternate_button(row["element"], "二等座"))
+
     def test_advanced_sleeper_uses_its_own_inventory(self):
         self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
           '<tr id="ticket_a"><td>D101</td><td id="RW_a">有</td><td id="GR_a">无</td><td><a class="btn72">预订</a></td></tr>';""")

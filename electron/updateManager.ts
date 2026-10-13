@@ -20,6 +20,12 @@ export type UpdateRuntimeState = {
   latestVersion?: string;
   releaseNotes?: string;
   downloadPercent?: number;
+  /** Bytes received, bytes expected and average speed of the running download. */
+  downloadTransferred?: number;
+  downloadTotal?: number;
+  downloadSpeed?: number;
+  /** Installer size listed in the release metadata. */
+  packageSize?: number;
   error?: string;
   result?: UpdateCheckResult;
 };
@@ -29,7 +35,10 @@ export type UpdaterInfo = {
   releaseName?: string | null;
   releaseNotes?: string | null;
   releaseDate?: string;
+  files?: { size?: number }[];
 };
+
+type DownloadProgress = { percent?: number; transferred?: number; total?: number; bytesPerSecond?: number };
 
 export type UpdaterLike = EventEmitter & {
   autoDownload: boolean;
@@ -80,10 +89,27 @@ export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: Update
 }
 
 export const CHANNEL_FILE_MISSING_MESSAGE = "最新版本暂未提供本平台安装包，请稍后再检查。";
+export const NETWORK_ERROR_MESSAGE = "无法连接更新服务器（GitHub），请检查网络后重试。";
+/** Error code for a downloaded installer that is gone; only a fresh check can recover it. */
+export const INSTALLER_UNAVAILABLE = "ERR_RAILWATCH_INSTALLER_UNAVAILABLE";
+
+const NETWORK_ERROR = /net::ERR_|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENETUNREACH|socket hang up/i;
+
+function errorCode(error: unknown): unknown {
+  return (error as { code?: unknown } | null)?.code;
+}
 
 /** The latest release lacks this platform's metadata (e.g. a single-platform release). */
 function isChannelFileMissing(error: unknown): boolean {
-  return (error as { code?: unknown } | null)?.code === "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND";
+  return errorCode(error) === "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND";
+}
+
+function byteCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function packageSize(info: UpdaterInfo): number | undefined {
+  return byteCount(info.files?.[0]?.size) || undefined;
 }
 
 function failureCode(error: unknown): UpdateCheckFailure["code"] {
@@ -104,6 +130,9 @@ function formatUpdateError(error: unknown): string {
   }
   if (/404/i.test(message) && /releases\.atom|github\.com/i.test(message)) {
     return "无法访问更新源，请确认 GitHub Release 仓库地址和发布资产是否正确。";
+  }
+  if (NETWORK_ERROR.test(message)) {
+    return NETWORK_ERROR_MESSAGE;
   }
   return message;
 }
@@ -129,6 +158,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       currentVersion,
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
+      packageSize: packageSize(info),
       result: mapUpdateInfoToCheckSuccess(currentVersion, info, true, releaseUrl(info.version)),
     });
   });
@@ -153,11 +183,14 @@ export function createUpdateManager(options: UpdateManagerOptions) {
     });
   });
 
-  updater.on("download-progress", (progress: { percent?: number }) => {
+  updater.on("download-progress", (progress: DownloadProgress) => {
     publish({
       ...state,
       phase: "downloading",
-      downloadPercent: typeof progress.percent === "number" ? progress.percent : undefined,
+      downloadPercent: Number.isFinite(progress.percent) ? progress.percent : undefined,
+      downloadTransferred: byteCount(progress.transferred),
+      downloadTotal: byteCount(progress.total) || undefined,
+      downloadSpeed: byteCount(progress.bytesPerSecond),
     });
   });
 
@@ -168,6 +201,7 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
       downloadPercent: 100,
+      packageSize: packageSize(info) ?? state.packageSize,
       result: mapUpdateInfoToCheckSuccess(currentVersion, info, true, releaseUrl(info.version)),
     });
     onUpdateDownloaded?.(info);
@@ -196,7 +230,10 @@ export function createUpdateManager(options: UpdateManagerOptions) {
 
       publish({ ...state, phase: "checking", error: undefined });
       try {
-        await updater.checkForUpdates();
+        const outcome = await updater.checkForUpdates();
+        // The automatic download reports failures through the "error" event; its
+        // promise would otherwise reject unhandled in the main process.
+        void (outcome as { downloadPromise?: Promise<unknown> | null } | null)?.downloadPromise?.catch(() => undefined);
       } catch (error) {
         const failure = buildFailure(
           currentVersion,
@@ -260,7 +297,12 @@ export function createUpdateManager(options: UpdateManagerOptions) {
           return true;
         } catch (error) {
           const message = formatUpdateError(error);
-          publish({ ...state, phase: "error", error: message, result: buildFailure(currentVersion, message) });
+          // A declined UAC prompt or failed launch leaves the verified download in
+          // place, so installation stays retryable; a missing installer needs a new check.
+          const retryable = Boolean(updater.launchInstaller) && errorCode(error) !== INSTALLER_UNAVAILABLE;
+          publish(retryable
+            ? { ...state, error: message }
+            : { ...state, phase: "error", error: message, result: buildFailure(currentVersion, message) });
           installation = null;
           return false;
         }

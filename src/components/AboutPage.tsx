@@ -1,16 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { App as AntApp, Button, ConfigProvider } from "antd";
 import {
-  ArrowUpCircle,
   ArrowUpRight,
+  Download,
   Github,
-  HardDrive,
   History,
   MessageSquareWarning,
-  Package,
   Scale,
-  ShieldCheck,
-  Train,
   type LucideIcon,
 } from "lucide-react";
 import appIconUrl from "../../assets/images/icon.png";
@@ -18,30 +14,63 @@ import { formatAppVersion } from "../lib/formatSystemStatus";
 import { railwatchApi } from "../lib/railwatchApi";
 import { getBoardTheme } from "../lib/theme";
 import { useAppUpdate } from "../lib/useAppUpdate";
+import { getUpdateSignal } from "../lib/updateDisplay";
 import { useRailWatchStore } from "../store/useRailWatchStore";
-import type { AppInfo } from "../types";
+import type { AppInfo, UpdateRuntimeState } from "../types";
 import { BrandWordmark } from "./BrandWordmark";
+import { UpdateStatusControl } from "./UpdateStatusControl";
 
 const REPO_URL = "https://github.com/shyrel666/RailWatch-12306";
 
 const PROJECT_LINKS: { label: string; detail: string; url: string; icon: LucideIcon }[] = [
-  { label: "发布与下载", detail: "Windows 与 macOS 安装包", url: `${REPO_URL}/releases`, icon: Package },
+  { label: "发布与下载", detail: "Windows 与 macOS 安装包", url: `${REPO_URL}/releases`, icon: Download },
   { label: "问题反馈", detail: "报告问题或提出建议", url: `${REPO_URL}/issues`, icon: MessageSquareWarning },
   { label: "更新日志", detail: "每个版本的变化", url: `${REPO_URL}/blob/main/CHANGELOG.md`, icon: History },
   { label: "MIT 许可证", detail: "开源许可条款", url: `${REPO_URL}/blob/main/LICENSE`, icon: Scale },
 ];
 
-const NOTES: { icon: LucideIcon; title: string; text: string }[] = [
-  { icon: Train, title: "非官方工具", text: "不是 12306 官方产品。" },
-  { icon: ShieldCheck, title: "人工完成关键步骤", text: "登录核验和支付需在官方页面完成，发现余票不代表订单已创建。" },
-  { icon: HardDrive, title: "数据留在本机", text: "配置与订单记录只保存在本机。" },
+const NOTES: { title: string; text: string }[] = [
+  { title: "非官方工具", text: "不是 12306 官方产品，订单状态以官网为准。" },
+  { title: "支付由你完成", text: "登录核验与支付始终在官方页面进行。" },
+  { title: "数据留在本机", text: "配置与订单记录只保存在这台电脑。" },
 ];
+
+const PLATFORM_NAMES: Record<string, string> = { win32: "Windows", darwin: "macOS", linux: "Linux" };
+
+/** The stub's slim track mirrors the panel's route: amber while travelling, green on arrival. */
+function UpdateTrack({ state }: { state: UpdateRuntimeState }) {
+  const preparing = state.phase === "available" && state.installMode !== "manual";
+  if (state.phase !== "downloading" && state.phase !== "downloaded" && !preparing) return null;
+  const known = state.phase === "downloaded" || (state.phase === "downloading" && Number.isFinite(state.downloadPercent));
+  const percent = state.phase === "downloaded" ? 100 : Math.min(100, Math.max(0, state.downloadPercent ?? 0));
+  return (
+    <span
+      aria-hidden="true"
+      className={"about-update-track" + (state.phase === "downloaded" ? " arrived" : known ? "" : " scanning")}
+      style={{ "--update-progress": percent / 100 } as CSSProperties}
+    >
+      <i />
+    </span>
+  );
+}
+
+function environmentFields(info: AppInfo) {
+  const system = [PLATFORM_NAMES[info.platform] ?? info.platform, info.arch].filter(Boolean).join(" ");
+  return [
+    { label: "Electron", value: info.electronVersion },
+    { label: "Chromium", value: info.chromeVersion },
+    { label: "Node.js", value: info.nodeVersion },
+    { label: "系统", value: system },
+  ].filter((field) => field.value);
+}
 
 export function AboutPage() {
   const runtime = useRailWatchStore((state) => state.runtime);
   const { message } = AntApp.useApp();
-  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
-  const { statusLabel, hasDownloadedUpdate, hasManualDownload, isUpdating, handlePrimaryAction } = useAppUpdate(runtime.app_version);
+  const [appInfo, setAppInfo] = useState<AppInfo | "unavailable" | null>(null);
+  const update = useAppUpdate(runtime.app_version);
+  const { updateState, statusLabel } = update;
+  const signal = getUpdateSignal(updateState, update.isInstalling);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +81,11 @@ export function AboutPage() {
           setAppInfo(info);
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) {
+          setAppInfo("unavailable");
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -69,85 +102,85 @@ export function AboutPage() {
     }
   };
 
-  const environment = [
-    appInfo ? `Electron ${appInfo.electronVersion}` : null,
-    appInfo ? `Chromium ${appInfo.chromeVersion}` : null,
-    appInfo ? `Node.js ${appInfo.nodeVersion}` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
   return (
-    <div className="about-workspace">
+    <div className="about-page">
       <ConfigProvider theme={getBoardTheme()}>
-        <section className="departure-board about-board" aria-label="应用信息">
-          <div className="board-main">
+        <section className="departure-board about-ticket" aria-label="应用信息">
+          <div className="about-ticket-main">
             <div className="about-identity">
               <img alt="" className="about-icon" src={appIconUrl} />
-              <div>
+              <div className="about-identity-copy">
                 <BrandWordmark className="about-wordmark" label={runtime.app_display_name || "RailWatch 12306"} />
-                <p className="about-tagline">把行程准备、起售监控与订单跟踪，放在一个桌面工作台。</p>
+                <p className="about-tagline">本地运行的 12306 购票助手：起售监控、自动提交、自动候补与订单跟踪。</p>
               </div>
             </div>
-            <div className="board-display">
-              <span>当前版本</span>
-              <strong className="board-led">{formatAppVersion(runtime.app_version)}</strong>
-              <small className="about-update-note" role="status">{statusLabel}</small>
-            </div>
-          </div>
-          <div className="board-foot">
-            <dl className="board-facts">
-              <div>
-                <dt>运行环境</dt>
-                <dd className="about-env">{environment || "正在读取…"}</dd>
-              </div>
-            </dl>
-            <div className="board-actions">
-              <Button icon={<Github size={16} />} onClick={() => void openLink(REPO_URL)}>
+            <div className="about-ticket-footer">
+              {appInfo && appInfo !== "unavailable" ? (
+                <dl className="about-fields" aria-label="运行环境">
+                  {environmentFields(appInfo).map((field) => (
+                    <div key={field.label}>
+                      <dt>{field.label}</dt>
+                      <dd>{field.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <p className="about-fields-pending">{appInfo ? "运行环境暂不可用" : "正在读取运行环境…"}</p>
+              )}
+              <Button
+                className="about-repo"
+                icon={<Github size={16} aria-hidden="true" />}
+                onClick={() => void openLink(REPO_URL)}
+              >
                 GitHub 仓库
               </Button>
-              <Button
-                icon={<ArrowUpCircle size={16} />}
-                loading={isUpdating}
-                onClick={() => void handlePrimaryAction()}
-                type="primary"
-              >
-                {hasDownloadedUpdate ? "立即重启安装" : hasManualDownload ? "前往下载" : "检查更新"}
-              </Button>
             </div>
+          </div>
+          <div className="about-ticket-stub">
+            <span className="about-stub-caption">当前版本</span>
+            <strong className="board-led">{formatAppVersion(runtime.app_version)}</strong>
+            <p className="about-update-note" role="status">
+              <i className={"lamp " + signal.tone + (signal.live ? " live" : "")} aria-hidden="true" />
+              {statusLabel}
+            </p>
+            <UpdateTrack state={updateState} />
+            <UpdateStatusControl appVersion={runtime.app_version} variant="button" update={update} />
           </div>
         </section>
       </ConfigProvider>
 
-      <div className="about-grid">
-        <nav aria-label="项目与文档" className="about-card about-links">
-          <h2>项目与文档</h2>
-          {PROJECT_LINKS.map((link) => (
-            <button className="about-link" key={link.label} onClick={() => void openLink(link.url)} type="button">
-              <span className="about-link-icon"><link.icon size={16} aria-hidden="true" /></span>
-              <span className="about-link-copy">
-                <strong>{link.label}</strong>
-                <small>{link.detail}</small>
+      <nav aria-label="项目与文档" className="about-section">
+        <h2 className="about-section-title">项目与文档</h2>
+        <div className="about-links">
+          {PROJECT_LINKS.map(({ label, detail, url, icon: Icon }) => (
+            <button className="about-link" key={label} onClick={() => void openLink(url)} type="button">
+              <span className="about-link-icon">
+                <Icon size={18} aria-hidden="true" />
               </span>
-              <ArrowUpRight size={15} aria-hidden="true" />
+              <span className="about-link-copy">
+                <strong>{label}</strong>
+                <small>{detail}</small>
+              </span>
+              {label === "发布与下载" ? <Download className="about-link-arrow" size={16} aria-hidden="true" /> : <ArrowUpRight className="about-link-arrow" size={16} aria-hidden="true" />}
             </button>
           ))}
-        </nav>
-        <section className="about-card about-notes" aria-label="使用须知">
-          <h2>使用须知</h2>
-          <ul>
-            {NOTES.map((note) => (
-              <li key={note.title}>
-                <span className="about-note-icon"><note.icon size={16} aria-hidden="true" /></span>
-                <div>
-                  <strong>{note.title}</strong>
-                  <p>{note.text}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      </div>
+        </div>
+      </nav>
+
+      <section aria-label="使用须知" className="about-section">
+        <h2 className="about-section-title">使用须知</h2>
+        <ol className="about-notes">
+          {NOTES.map((note, index) => (
+            <li key={note.title}>
+              <span className="about-note-index" aria-hidden="true">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <strong>{note.title}</strong>
+              <p>{note.text}</p>
+            </li>
+          ))}
+        </ol>
+      </section>
     </div>
   );
 }

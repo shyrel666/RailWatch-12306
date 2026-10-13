@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from "react";
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -16,6 +17,7 @@ import {
 } from "../store/railwatchStore";
 import { EventPanel } from "./EventPanel";
 import { RAILWATCH_PAGES, ShellLayout, SidebarNav } from "./Shell";
+import { ThemeContext } from "./ThemeControl";
 afterEach(cleanup);
 beforeEach(() => localStorage.clear());
 
@@ -33,6 +35,7 @@ test("keeps page navigation while moving technical data out of the sidebar", asy
     "行程设置",
     "购票监控",
     "订单中心",
+    "运行复盘",
     "系统设置",
     "关于",
   ]);
@@ -119,4 +122,43 @@ test("opens logs on demand, closes with Escape, and keeps filter and feed state"
     screen.getByRole("tab", { name: /错误/ }).getAttribute("aria-selected"),
   ).toBe("true");
   expect(railwatchStore.getState().logs).toHaveLength(2);
+});
+test("the log button flags warnings and errors that arrived while it was closed", async () => {
+  railwatchStore.setState({
+    logs: [{ id: 1, time: "12:00:00", level: "WARN", message: "查询限频" }],
+    logPaused: false,
+  });
+  render(<Harness />);
+  const trigger = screen.getByRole("button", { name: "显示事件日志" });
+  expect(trigger.getAttribute("aria-describedby")).toBe("header-log-alert");
+  expect(document.getElementById("header-log-alert")?.textContent).toBe("有新的警告");
+  await userEvent.click(trigger);
+  await screen.findByRole("dialog");
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(trigger.getAttribute("aria-describedby")).toBeNull();
+  act(() => {
+    railwatchStore.getState().applyLog({ time: "12:01:00", level: "INFO", message: "后台仍在接收日志" });
+  });
+  expect(trigger.getAttribute("aria-describedby")).toBeNull();
+  act(() => {
+    railwatchStore.getState().applyLog({ time: "12:02:00", level: "ERROR", message: "网络连接中断" });
+  });
+  expect(document.getElementById("header-log-alert")?.textContent).toBe("有新的错误");
+});
+test("the header theme switch shows every mode and marks the current one", async () => {
+  const onChange = vi.fn();
+  render(
+    <ThemeContext.Provider value={{ mode: "light", disabled: false, onChange }}>
+      <ShellLayout activePage="仪表盘" darkMode={false} eventPanel={null} eventPanelVisible={false}
+        runtime={defaultRuntimeInfo} status={defaultStatus} onPageChange={vi.fn()} onToggleEventPanel={vi.fn()}>
+        <div />
+      </ShellLayout>
+    </ThemeContext.Provider>,
+  );
+  const group = screen.getByRole("radiogroup", { name: "外观主题" });
+  expect(within(group).getAllByRole("radio").map((radio) => [radio.getAttribute("aria-label"), radio.getAttribute("aria-checked")]))
+    .toEqual([["跟随系统", "false"], ["明亮", "true"], ["深色", "false"]]);
+  await userEvent.click(within(group).getByRole("radio", { name: "深色" }));
+  expect(onChange).toHaveBeenCalledWith("dark", expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
 });

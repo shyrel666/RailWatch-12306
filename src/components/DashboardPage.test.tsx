@@ -38,16 +38,64 @@ describe("DashboardPage", () => {
     expect(screen.getAllByLabelText("当前行程")).toHaveLength(1);
     expect(screen.queryByText("站点范围")).toBeNull();
     expect(screen.queryByText("请求模式")).toBeNull();
-    expect(screen.getByLabelText("自动化状态")).toBeTruthy();
+    expect(screen.queryByLabelText("自动化状态")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "检查环境" }));
     expect(railwatchStore.getState().activePage).toBe("系统设置");
     expect(railwatchStore.getState().pageSection).toBe("settings-environment");
   });
-  test("automation shortcut targets the actual trip controls", async () => {
+
+  test.each([
+    { environmentReady: false, title: "检查运行环境", label: "检查环境", section: "settings-environment", board: "等待环境检查" },
+    { environmentReady: true, title: "登录 12306", label: "前往登录", section: "settings-login", board: "等待登录" },
+  ])("a login check without a browser returns to $section", async ({ environmentReady, title, label, section, board }) => {
+    railwatchStore.setState({ status: {
+      ...defaultStatus,
+      phase: "error",
+      risk_level: "warning",
+      environment_ready: environmentReady,
+      status_message: "请先打开登录页。",
+      error_message: "请先打开登录页。",
+    } });
     render(<DashboardPage />);
-    await userEvent.click(screen.getByRole("button", { name: /配置自动化/ }));
+
+    expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    expect(within(screen.getByLabelText("当前行程")).getByText(board)).toBeTruthy();
+    expect(screen.queryByText("监控异常")).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看运行详情" })).toBeNull();
+    expect(screen.getByRole("region", { name: "下一步" }).textContent).toContain(
+      environmentReady ? "请先打开登录页。" : "请先检查运行环境",
+    );
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    expect(railwatchStore.getState().activePage).toBe("系统设置");
+    expect(railwatchStore.getState().pageSection).toBe(section);
+  });
+
+  test("runtime failures remain actionable even before the environment check", async () => {
+    railwatchStore.setState({ status: {
+      ...defaultStatus,
+      phase: "error",
+      risk_level: "critical",
+      error_message: "运行时中断",
+    } });
+    render(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "需要关注运行状态" })).toBeTruthy();
+    expect(within(screen.getByLabelText("当前行程")).getByText("监控异常")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "查看运行详情" }));
+    expect(railwatchStore.getState().activePage).toBe("购票监控");
+    expect(railwatchStore.getState().pageSection).toBe("monitor-controls");
+  });
+  test("trip edit targets the trip controls without an automation shortcut when enabled", async () => {
+    railwatchStore.setState({
+      config: { ...defaultConfig, auto_submit: true, auto_alternate: true },
+    });
+    render(<DashboardPage />);
+    expect(screen.queryByLabelText("自动化状态")).toBeNull();
+    expect(screen.queryByText("自动化已开启")).toBeNull();
+    expect(screen.queryByRole("button", { name: /配置自动化/ })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "编辑行程" }));
     expect(railwatchStore.getState().activePage).toBe("行程设置");
-    expect(railwatchStore.getState().pageSection).toBe("trip-automation");
+    expect(railwatchStore.getState().pageSection).toBe("trip-basics");
   });
   test("shows five workflow steps and keeps mutation controls on their pages", () => {
     render(<DashboardPage />);
@@ -77,9 +125,8 @@ describe("DashboardPage", () => {
     expect(screen.getByText("查询次数").parentElement?.textContent).toContain(
       "9",
     );
-    expect(screen.getByText("下次查询").parentElement?.textContent).toContain(
-      "—",
-    );
+    expect(within(screen.getByRole("region", { name: "查询脉搏" })).getByRole("status").textContent).toBe("监控中");
+    expect(screen.queryByText(/下次查询/)).toBeNull();
   });
   test("prioritizes pending payment over monitoring and environment flags", async () => {
     railwatchStore.setState({
@@ -181,7 +228,7 @@ describe("DashboardPage", () => {
     railwatchStore.getState().setRehearsalEnabled(true);
     const seats = [{ name: "二等座", query: true, regular: true, alternate: true },
       { name: "一等座", query: true, regular: true, alternate: false }];
-    for (const [seat, heading] of [["一等座", "确认你的出行安排"], ["二等座", "开售前先彩排一次"]]) {
+    for (const [seat, heading] of [["一等座", "完善你的行程"], ["二等座", "开售前先彩排一次"]]) {
       railwatchStore.setState({
         runtime: { ...defaultRuntimeInfo, state: { ...defaultStatus }, seat_capabilities: seats },
         status: { ...defaultStatus, environment_ready: true, login_ready: true, query_ready: true },

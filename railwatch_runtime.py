@@ -15,6 +15,9 @@ from railwatch_bridge import RailWatchBridge, dumps_json
 # These commands signal cancellation without browser/network work. Keep them
 # off the ordinary queue so slow lookups cannot postpone stopping a task.
 CONTROL_COMMANDS = frozenset({"stopMonitor", "cancelRehearsal", "systemResumed", "cancelShutdown"})
+# A cold station cache can require a slow download. Queue these lookups apart
+# from ordinary commands so waiting searches cannot block settings or history.
+STATION_COMMANDS = frozenset({"searchStations", "refreshStations"})
 
 
 def configure_stdio() -> None:
@@ -39,6 +42,7 @@ class RailWatchRuntime:
         self.writer = writer or self._stdout_writer
         self.bridge = bridge or RailWatchBridge(event_callback=self.emit_event)
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="railwatch-cmd")
+        self._station_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-stations")
         self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-control")
         self._shutdown_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-shutdown")
 
@@ -75,7 +79,8 @@ class RailWatchRuntime:
                 or not isinstance(payload, dict)):
             return self._protocol_error(request_id)
         executor = (self._control_executor if command in CONTROL_COMMANDS else
-                    self._shutdown_executor if command in ("prepareShutdown", "taskActivity") else self._executor)
+                    self._shutdown_executor if command in ("prepareShutdown", "taskActivity") else
+                    self._station_executor if command in STATION_COMMANDS else self._executor)
         return executor.submit(self._run_command, request_id, command, payload)
 
     def _run_command(self, request_id, command: str, payload: dict) -> None:
@@ -125,12 +130,15 @@ class RailWatchRuntime:
             "loadTripChoices": lambda: self.bridge.load_trip_choices(),
             "saveTrainFavorites": lambda: self.bridge.save_train_favorites(payload.get("from_station"), payload.get("to_station"), payload.get("trains")),
             "readPassengers": lambda: self.bridge.read_passengers(),
+            "readAlternateOptions": lambda: self.bridge.read_alternate_options(
+                payload.get("refresh", False), payload.get("from_station"), payload.get("to_station")),
             "checkEnvironment": lambda: self.bridge.check_environment(),
             "downloadChromeDriver": lambda: self.bridge.download_chromedriver(),
             "openLogin": lambda: self.bridge.open_login(),
             "checkLogin": lambda: self.bridge.check_login(),
             "runReviews": lambda: self.bridge.run_reviews(payload.get("limit", 20), payload.get("cursor")),
             "runReview": lambda: self.bridge.run_review(payload.get("run_id")),
+            "queryPulse": lambda: self.bridge.query_pulse(payload.get("limit", 60)),
             "rehearse": lambda: self.bridge.rehearse(payload.get("config") or payload, payload.get("options")),
             "cancelRehearsal": lambda: self.bridge.cancel_rehearsal(),
             "rehearsalHistory": lambda: self.bridge.rehearsal_history(payload.get("limit", 20)),
@@ -141,7 +149,7 @@ class RailWatchRuntime:
                 confirmed=bool(payload.get("confirmed", False)),
                 expected_dates=payload.get("expected_dates"),
             ),
-            "continueOrder": lambda: self.bridge.continue_order(payload.get("intent_id")),
+            "continueOrder": lambda: self.bridge.continue_order(payload.get("intent_id"), payload.get("alternate_deadline")),
             "orderHistory": lambda: self.bridge.order_history(payload.get("limit", 20), payload.get("cursor"), payload.get("status")),
             "orderDetail": lambda: self.bridge.order_detail(payload.get("intent_id")),
             "dismissOrder": lambda: self.bridge.dismiss_order(str(payload.get("intent_id", "")), confirmed=payload.get("confirmed") is True),
@@ -172,6 +180,7 @@ class RailWatchRuntime:
     def shutdown(self) -> None:
         self._control_executor.shutdown(wait=True)
         self._shutdown_executor.shutdown(wait=True)
+        self._station_executor.shutdown(wait=True)
         self._executor.shutdown(wait=True)
 
     def _stdout_writer(self, payload: dict) -> None:

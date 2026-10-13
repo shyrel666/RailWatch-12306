@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
 
-from railwatch_selectors import ACTION_READY_JS, QUERY_ROW_SELECTOR, QUERY_TABLE_ID, TABLE_HEADER_SELECTORS
+from railwatch_selectors import ALTERNATE_ACTION_JS, QUERY_ROW_SELECTOR, QUERY_TABLE_ID, TABLE_HEADER_SELECTORS
 from railwatch_seats import SEAT_CAPABILITIES
 from railwatch_config_contract import TRAIN_CODE_BODY
 
 TRAIN_CODE_PATTERN = re.compile(r"^\s*(" + TRAIN_CODE_BODY + r")(?=\s|$)", re.IGNORECASE)
 DISPLAY_SEATS = tuple(seat.name for seat in SEAT_CAPABILITIES if seat.query)
 
-BATCH_ROWS_JS = ACTION_READY_JS + r"""
+BATCH_ROWS_JS = ALTERNATE_ACTION_JS + r"""
 const table = document.getElementById('queryLeftTable');
 if (!table) return [];
 const seatPrefixes = arguments[0];
@@ -34,8 +34,7 @@ return [...table.querySelectorAll('tr[id^="ticket_"]')].filter(row => row.getCli
     seats[name] = cell ? cell.innerText.trim().replace(/\n/g,'') : null;
     // Waitlist actions must belong to the exact seat's prefixed cell.
     const alternateCell = prefix && row.querySelector('td[id^="'+prefix+'_"]');
-    alternate_available[name] = !!alternateCell && [...alternateCell.querySelectorAll('a,button,div')]
-      .some(el => el.innerText.trim() === '候补' && rwActionReady(el));
+    alternate_available[name] = !!rwAlternateAction(alternateCell);
   }
   const texts = selector => [...row.querySelectorAll(selector)].filter(el => el.getClientRects().length)
     .map(el => el.innerText.trim());

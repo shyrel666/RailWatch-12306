@@ -32,13 +32,13 @@ test("a released trip can switch to immediate mode without filling a time or lea
   expect(section.open).toBe(false);
   fireEvent.click(screen.getByRole("heading", { name: "定时启动" }));
   expect(section.open).toBe(true);
-  await screen.findByText("已进入预售期，建议立即开始监控，无需填写定时时间。");
+  await screen.findByText("已在预售期内，可直接开始监控。");
   fireEvent.click(screen.getByRole("button", { name: "改为立即开始" }));
   expect((screen.getByRole("radio", { name: "立即开始" }) as HTMLInputElement).checked).toBe(true);
   expect(screen.queryByLabelText("定时启动时间")).toBeNull();
   expect(screen.queryByText(/请选择开始时间/)).toBeNull();
   expect(screen.queryByRole("button", { name: "设为起售时间" })).toBeNull();
-  expect(screen.getByText("立即开始 · 点击开始监控后直接查询")).toBeTruthy();
+  expect(screen.getByText("立即开始", { selector: "p" })).toBeTruthy();
 });
 
 test("choosing scheduled mode fills a future release, but preserves a custom time across mode switches", async () => {
@@ -61,13 +61,13 @@ test("failed lookup still permits manual scheduling", async () => {
   await screen.findByText("起售时间暂不可用，请稍后刷新或前往官方核对。");
   expect(screen.queryByRole("button", { name: "设为起售时间" })).toBeNull();
   fireEvent.change(screen.getByLabelText("定时启动时间"), { target: { value: "2026-09-28T11:30" } });
-  expect(screen.getByText("定时开始 · 2026-09-28 11:30:00（北京时间）")).toBeTruthy();
+  expect(screen.getByText("定时开始 · 2026-09-28 11:30:00")).toBeTruthy();
 });
 
 test("a changed trip explains how to update an earlier applied release time", async () => {
   render(<TimerSettings config={{ ...config, date: "2026-10-12", sale_time_source: "12306",
     sale_at: "2026-09-27T10:00:00+08:00" }} update={vi.fn()} />);
-  await screen.findByText("当前设置与此行程的起售时间不同，请点击“设为起售时间”更新，或手动修改。");
+  await screen.findByText("与本行程的起售时间不一致，可点击「设为起售时间」更新。");
   expect(screen.getByRole("button", { name: "设为起售时间" })).toBeTruthy();
 });
 
@@ -86,7 +86,7 @@ test("applying the official time enables the timer, keeps Beijing time and still
   fireEvent.click(apply);
   expect(update).toHaveBeenLastCalledWith({ timer_enabled: true, sale_at: "2026-09-27T10:00:00+08:00",
     target_time: "10:00:00", sale_time_source: "12306", sale_time_checked_at: "2026-09-27T00:59:50.000Z" });
-  expect(screen.getByText("定时开始 · 2026-09-27 10:00:00（北京时间）")).toBeTruthy();
+  expect(screen.getByText("定时开始 · 2026-09-27 10:00:00")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("定时启动时间"), { target: { value: "2026-09-28T11:30" } });
   expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
     sale_at: "2026-09-28T11:30+08:00", sale_time_source: "manual",
@@ -105,7 +105,7 @@ test.each([
   vi.mocked(railwatchApi.command).mockResolvedValue(response);
   const update = vi.fn();
   render(<TimerSettings config={{ ...config, sale_at: "2026-09-28T12:00:00+08:00" }} update={update} />);
-  await screen.findByText("暂未查到明确起售时间。可刷新重试，或按官方公告手动设置。");
+  await screen.findByText("暂未查到起售时间，可刷新重试或手动设置。");
   expect(screen.queryByRole("button", { name: "设为起售时间" })).toBeNull();
   expect(update).not.toHaveBeenCalled();
   expect((screen.getByLabelText("定时启动时间") as HTMLInputElement).value).toBe("2026-09-28T12:00");
@@ -113,9 +113,9 @@ test.each([
 
 test("already released trips suggest starting directly and past manual timers report their behavior", async () => {
   render(<TimerSettings config={{ ...config, date: "2026-10-10", sale_at: "2026-09-26T10:00:00+08:00" }} update={vi.fn()} />);
-  await screen.findByText("已进入预售期，建议立即开始监控，无需填写定时时间。");
+  await screen.findByText("已在预售期内，可直接开始监控。");
   expect(screen.queryByRole("button", { name: "设为起售时间" })).toBeNull();
-  expect(screen.getByText("指定时间已到 · 点击开始监控后直接查询")).toBeTruthy();
+  expect(screen.getByText("定时时间已到 · 启动后立即查询")).toBeTruthy();
 });
 
 test("changing the station cannot apply a late response for the previous station", async () => {
@@ -125,7 +125,7 @@ test("changing the station cannot apply a late response for the previous station
   const update = vi.fn();
   const { rerender } = render(<TimerSettings config={config} update={update} />);
   rerender(<TimerSettings config={{ ...config, from_station_cn: "上海" }} update={update} />);
-  await screen.findByText("预计 2026-09-27 14:00:00 起售（北京时间）。");
+  await screen.findByText("预计 2026-09-27 14:00:00 起售");
   await act(async () => resolveOld(info()));
   fireEvent.click(screen.getByRole("button", { name: "设为起售时间" }));
   expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ sale_at: "2026-09-27T14:00:00+08:00" }));
@@ -134,7 +134,7 @@ test("changing the station cannot apply a late response for the previous station
 test("changing the trip date uses the current presale policy, and refreshing only reads data", async () => {
   const update = vi.fn<(patch: Partial<RailWatchConfig>) => void>();
   const { rerender } = render(<TimerSettings config={config} update={update} />);
-  await screen.findByText("预计 2026-09-27 10:00:00 起售（北京时间）。");
+  await screen.findByText("预计 2026-09-27 10:00:00 起售");
   rerender(<TimerSettings config={{ ...config, date: "2026-10-12" }} windowDays={10} update={update} />);
   fireEvent.click(screen.getByRole("button", { name: "设为起售时间" }));
   expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ sale_at: "2026-10-03T10:00:00+08:00" }));

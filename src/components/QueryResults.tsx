@@ -41,12 +41,8 @@ export function QueryResults({ views, rows, status, config, editableRoute, onSel
         <span className="st-result-count">{rows.length} 条</span>
       </div>
       {activeQuery ? <p className="query-context" role="status">当前查询日期：{activeQuery.conditions.date} · 查询中</p> : null}
-      {latest ? <p className="query-context">
-        {pending ? "手动查询中" : status.monitoring ? "监控运行中" : "当前未监控"}
-        {status.monitoring && status.task?.status === "querying" ? " · 正在查询，尚未完成" : ""}
-        {` · 最近完成查询日期：${latest.conditions.date}`}
-        {(status.task?.next_query_at ?? 0) > now && status.monitoring
-          ? ` · 等待下一次查询（${Math.ceil(status.task!.next_query_at! - now)} 秒）` : ""}
+      {latest && (pending || activeQuery || groups.length > 1) ? <p className="query-context">
+        {pending ? "手动查询中 · " : ""}最近完成查询日期：{latest.conditions.date}
       </p> : null}
       {error ? <p className="query-error" role="status">查询未完成：{error}。以下仅为上次保留结果。</p> : null}
       {editableRoute && groups.some(view => !queryRouteMatches(view.latest.conditions, editableRoute))
@@ -64,7 +60,7 @@ export function QueryResults({ views, rows, status, config, editableRoute, onSel
           <header>
             <strong>{attempt.conditions.date} · {attempt.conditions.from_station} → {attempt.conditions.to_station}</strong>
             <span>{queryFreshness(view, status, config, now, pending)}</span>
-            <span>最后成功查询：{timestamp(success?.fetched_at ?? null)}（北京时间）</span>
+            <span>最后成功查询：{timestamp(success?.fetched_at ?? null)}</span>
           </header>
           {attempt.error ? <p className="query-error">{attempt.error}</p> : null}
           {!success ? <p className="query-context">该日期尚无有效查询结果。</p> : success.rows.length === 0
@@ -93,14 +89,14 @@ export function QueryResults({ views, rows, status, config, editableRoute, onSel
         </article>;
       })}
       {!groups.length && rows.length > 0 ? <div className="st-dispatch-board">
-        <p className="query-context">兼容旧查询数据：席别状态及查询时间未知。</p>
+        <p className="query-context">席别状态及查询时间未知。</p>
         {rows.map((row, index) => <article className="dispatch-row" key={`${row.date}-${row.train}-${index}`}>
           <strong>{row.train}</strong><span>{row.date ?? "日期未知"} · 状态未知</span>
           <details><summary>原始信息</summary><p className="dispatch-raw">{row.raw}</p></details>
         </article>)}
       </div> : null}
       {!groups.length && !rows.length ? <div className="st-empty-results">
-        <Radar size={32} /><strong>暂无查询结果</strong><span>{pending ? "正在查询，请稍候" : "查询余票或启动监控后显示结果与采集时间"}</span>
+        <Radar size={32} /><strong>暂无查询结果</strong><span>{pending ? "正在查询，请稍候" : "查询余票或启动监控后显示"}</span>
       </div> : null}
     </section>
   );

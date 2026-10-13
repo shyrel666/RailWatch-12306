@@ -14,6 +14,7 @@ export const RAILWATCH_COMMANDS = [
   "loadTripChoices",
   "saveTrainFavorites",
   "readPassengers",
+  "readAlternateOptions",
   "checkEnvironment",
   "downloadChromeDriver",
   "openLogin",
@@ -24,6 +25,7 @@ export const RAILWATCH_COMMANDS = [
   "clearRehearsalHistory",
   "runReviews",
   "runReview",
+  "queryPulse",
   "analyzeQuery",
   "startMonitor",
   "stopMonitor",
@@ -130,6 +132,13 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
         `自动提交：${config.auto_submit ? "开" : "关"}；自动候补：${config.auto_alternate ? "开" : "关"}`,
         config.alternate_mode === "multiple" ? `候补清单：最多${config.alternate_max_combinations ?? 5}个已配置组合、3个日期，合并为一个订单`
           : "候补清单：首个可用组合",
+        ...(config.auto_alternate ? [
+          `截止兑现时间：${config.alternate_deadline || "未选择"}（提交前核对官网选项）`,
+          config.alternate_accept_new_trains ? `接受新增列车：开启；${Array.isArray(config.alternate_new_train_windows)
+            ? config.alternate_new_train_windows.filter(isRecord).map(w => `${w.date} ${w.start_hour}点–${w.end_hour}点`).join("；") : "未设置时段"}；区间包含同城站，席别同候补方案，票价不高于预付款`
+            : "接受新增列车：关闭",
+          "自动确认官网静音车厢提示和候补提交确认；待支付时通知你完成预付款。",
+        ] : []),
         config.order_watch_enabled === false ? "持续订单核对：关闭" : `持续订单核对：开启，生效后每${config.order_watch_interval_seconds ?? 60}秒核对；可停止`,
         "确认后按上述配置启动。核验和支付仍需在官方页面完成。",
       ].join("\n"),

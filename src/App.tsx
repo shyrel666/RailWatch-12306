@@ -4,12 +4,14 @@ import zhCN from "antd/locale/zh_CN";
 import { CircleHelp, Info, TriangleAlert } from "lucide-react";
 import { useExportLogDialog } from "./components/ExportLogDialog";
 import { useThemePreference } from "./lib/useThemePreference";
+import { finishStartupSplash } from "./lib/startupSplash";
 import { ThemeContext } from "./components/ThemeControl";
 import { AboutPage } from "./components/AboutPage";
 import { DashboardPage } from "./components/DashboardPage";
 import { EventPanel } from "./components/EventPanel";
 import { MonitorPage } from "./components/MonitorPage";
 import { OrderCenterPage } from "./components/OrderCenterPage";
+import { RunReviews } from "./components/RunReviews";
 import { SettingsPage } from "./components/SettingsPage";
 import { ShellLayout } from "./components/Shell";
 import { TripSetupPage } from "./components/TripSetupPage";
@@ -17,7 +19,6 @@ import { railwatchApi } from "./lib/railwatchApi";
 import { exportEventLog } from "./lib/exportEventLog";
 import {
   useConfirmationBridge,
-  useUpdateReadyPrompt,
   type ThemedDialog,
 } from "./lib/useThemedDialogs";
 import { railwatchStore, tripFingerprint } from "./store/railwatchStore";
@@ -55,6 +56,11 @@ function isStatusPayload(value: unknown): value is RailWatchStatus {
   );
 }
 
+function draftErrorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/^Error invoking remote method ['"]railwatch:command['"]:\s*(?:Error:\s*)?/, "");
+}
+
 export function RailWatchApp() {
   const appearance = useThemePreference();
   return (
@@ -68,6 +74,12 @@ export function RailWatchApp() {
 
 type RailWatchAppContentProps = {
   appearance: ReturnType<typeof useThemePreference>;
+};
+
+type DraftSnapshot = {
+  config: RailWatchConfig;
+  revision: number;
+  editRevision: number;
 };
 
 function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
@@ -85,14 +97,64 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   const { choosePath, dialog: exportDialog } = useExportLogDialog();
   const exportingRef = useRef(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [startupReady, setStartupReady] = useState(false);
+  useEffect(() => {
+    if (startupReady && appearance.ready) finishStartupSplash();
+  }, [startupReady, appearance.ready]);
+  const [autoCheckEnvironment, setAutoCheckEnvironment] = useState(false);
+  const prepareEnvironmentCheck = useCallback(() => setAutoCheckEnvironment(true), []);
+  const finishEnvironmentPreparation = useCallback(() => setAutoCheckEnvironment(false), []);
+  useEffect(() => {
+    if (activePage !== "系统设置") setAutoCheckEnvironment(false);
+  }, [activePage]);
   const editRevision = useRailWatchStore(state => state.editRevision);
   const tripInitialized = useRailWatchStore(state => state.tripInitialized);
   const savedConfig = useRailWatchStore(state => state.savedConfig);
   const draftRevisionBase = useRef(0);
   const draftWriteChain = useRef<Promise<void>>(Promise.resolve());
+  const latestDraft = useRef<DraftSnapshot | null>(null);
   const clearingDataRef = useRef(false);
   const tripLoadRef = useRef<Promise<void> | null>(null);
   const loadTripRef = useRef<() => Promise<void>>(async () => undefined);
+
+  // The ref resets when this component remounts while the store (and the disk
+  // draft) keep their revision, so always allocate above both.
+  const nextDraftRevision = useCallback(() => {
+    draftRevisionBase.current = Math.max(draftRevisionBase.current, railwatchStore.getState().draftRevision) + 1;
+    return draftRevisionBase.current;
+  }, []);
+
+  const stageCurrentDraft = useCallback(() => {
+    const state = railwatchStore.getState();
+    const snapshot = { config: structuredClone(state.config), revision: nextDraftRevision(), editRevision: state.editRevision };
+    latestDraft.current = snapshot;
+    railwatchApi.stageDraft({ config: snapshot.config, revision: snapshot.revision });
+    return snapshot;
+  }, [nextDraftRevision]);
+
+  const writeDraft = useCallback(async (queued: DraftSnapshot) => {
+    if (clearingDataRef.current || queued !== latestDraft.current) return;
+    let snapshot = queued;
+    try {
+      railwatchStore.getState().markDraftSaving(snapshot.editRevision);
+      let saved: TripDraft;
+      try {
+        saved = await railwatchApi.command<TripDraft>("saveTripDraft", { config: snapshot.config, revision: snapshot.revision });
+      } catch (error) {
+        const current = error instanceof Error ? /草稿修订号已过期（当前为 (\d+)）/.exec(error.message) : null;
+        if (!current) throw error;
+        // Edits may have arrived while this write was pending. Rebase the latest
+        // config for both the retry and Electron's exit flush, superseding queued snapshots.
+        draftRevisionBase.current = Math.max(draftRevisionBase.current, Number(current[1]));
+        snapshot = stageCurrentDraft();
+        railwatchStore.getState().markDraftSaving(snapshot.editRevision);
+        saved = await railwatchApi.command<TripDraft>("saveTripDraft", { config: snapshot.config, revision: snapshot.revision });
+      }
+      railwatchStore.getState().markDraftSaved(snapshot.editRevision, saved.revision, saved.saved_at);
+    } catch (error) {
+      railwatchStore.getState().markDraftError(snapshot.editRevision, draftErrorText(error));
+    }
+  }, [stageCurrentDraft]);
 
   useEffect(() => {
     let alive = true;
@@ -182,12 +244,14 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         case "runtimeError":
         case "runtimeExit":
         case "runtimeUnavailable":
+          finishStartupSplash();
           state.resetRehearsalProgress();
           state.applyState({
             ...state.status,
             monitoring: false,
             task: undefined,
             phase: "error",
+            risk_level: "critical",
             status_message: "运行时中断，请核对原订单",
             error_message: "运行时中断",
           });
@@ -272,7 +336,6 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   );
 
   useConfirmationBridge(showThemedDialog);
-  useUpdateReadyPrompt(showThemedDialog);
 
   const runCommand = useCallback(
     async <T,>(
@@ -288,6 +351,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       setBusy(command);
       const finishClear = async (value: unknown) => {
         if (command !== "clearLocalData" || !value || typeof value !== "object" || !("cleared" in value) || !value.cleared) return;
+        latestDraft.current = null;
         railwatchApi.stageDraft(null);
         try { localStorage.removeItem("railwatch.theme"); } catch { /* The preferences file is authoritative. */ }
         const result = value as { cleanup_pending?: boolean; warning?: string; remaining_paths?: string[] };
@@ -334,21 +398,25 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         }
         if (isStatusPayload(result)) {
           railwatchStore.getState().applyState(result);
+          if (
+            command === "checkEnvironment" &&
+            result.environment_ready &&
+            result.phase !== "error" &&
+            !result.error_message
+          ) {
+            message.success({
+              key: "environment-check",
+              content: "环境检查完成，运行环境已就绪。",
+              className: "railwatch-environment-success",
+              duration: 3,
+            });
+          }
         }
         if (command === "saveConfig" && result) {
           const saved = structuredClone((payload.config ?? railwatchStore.getState().config) as RailWatchConfig);
           railwatchStore.getState().markConfigSaved(saved, Date.now() / 1000);
-          const revision = ++draftRevisionBase.current;
-          railwatchApi.stageDraft({ config: saved, revision });
-          draftWriteChain.current = draftWriteChain.current.then(async () => {
-            try {
-              const draft = await railwatchApi.command<TripDraft>("saveTripDraft", { config: saved, revision });
-              railwatchStore.getState().markDraftSaved(railwatchStore.getState().editRevision, draft.revision, draft.saved_at);
-            } catch (error) {
-              railwatchStore.getState().markDraftError(railwatchStore.getState().editRevision,
-                error instanceof Error ? error.message : String(error));
-            }
-          });
+          const snapshot = stageCurrentDraft();
+          draftWriteChain.current = draftWriteChain.current.then(() => writeDraft(snapshot));
         }
         if (successText) {
           message.success(successText);
@@ -356,6 +424,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         await finishClear(result);
         return result as T;
       } catch (error) {
+        if (command === "getRuntimeInfo" || command === "loadTripState") finishStartupSplash();
         if (command === "saveConfig") railwatchStore.getState().markConfigSaveError(error instanceof Error ? error.message : String(error));
         if (queryRequestId) railwatchStore.getState().endManualQuery(queryRequestId, error instanceof Error ? error.message : String(error));
         const errorText = error instanceof Error ? error.message : String(error);
@@ -367,7 +436,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         if (command === "clearLocalData") clearingDataRef.current = false;
       }
     },
-    [confirm, message, showThemedDialog],
+    [confirm, message, showThemedDialog, stageCurrentDraft, writeDraft],
   );
 
   const saveTheme = async (
@@ -423,13 +492,18 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   }, [activePage, tripInitialized, loadTrip]);
 
   useEffect(() => {
+    let alive = true;
     const unsubscribe = railwatchApi.onEvent(applyEvent);
     void (async () => {
-      const runtimeInfo = await runCommand<RuntimeInfo>("getRuntimeInfo");
-      if (runtimeInfo) {
-        railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
+      try {
+        const runtimeInfo = await runCommand<RuntimeInfo>("getRuntimeInfo");
+        if (runtimeInfo) {
+          railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
+        }
+        await loadTrip();
+      } finally {
+        if (alive) setStartupReady(true);
       }
-      await loadTrip();
     })();
 
     const refreshRuntime = window.setInterval(() => {
@@ -445,6 +519,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     }, 30000);
 
     return () => {
+      alive = false;
       window.clearInterval(refreshRuntime);
       unsubscribe();
     };
@@ -452,25 +527,12 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
 
   useEffect(() => {
     if (!tripInitialized || editRevision === 0 || clearingDataRef.current) return;
-    const state = railwatchStore.getState();
-    const snapshot = structuredClone(state.config);
-    const revision = ++draftRevisionBase.current;
-    railwatchApi.stageDraft({ config: snapshot, revision });
+    const snapshot = stageCurrentDraft();
     const timer = window.setTimeout(() => {
-      draftWriteChain.current = draftWriteChain.current.then(async () => {
-        if (clearingDataRef.current) return;
-        const current = railwatchStore.getState();
-        current.markDraftSaving(editRevision);
-        try {
-          const saved = await railwatchApi.command<TripDraft>("saveTripDraft", { config: snapshot, revision });
-          railwatchStore.getState().markDraftSaved(editRevision, saved.revision, saved.saved_at);
-        } catch (error) {
-          railwatchStore.getState().markDraftError(editRevision, error instanceof Error ? error.message : String(error));
-        }
-      });
+      draftWriteChain.current = draftWriteChain.current.then(() => writeDraft(snapshot));
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [editRevision, tripInitialized, savedConfig]);
+  }, [editRevision, tripInitialized, savedConfig, stageCurrentDraft, writeDraft]);
 
   const content = useMemo(() => {
     if (activePage === "行程设置") {
@@ -484,14 +546,19 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     if (activePage === "订单中心") {
       return <OrderCenterPage busy={busy} runCommand={runCommand} />;
     }
+    if (activePage === "运行复盘") {
+      return <RunReviews />;
+    }
     if (activePage === "系统设置") {
-      return <SettingsPage busy={busy} runCommand={runCommand} />;
+      return <SettingsPage busy={busy} runCommand={runCommand}
+        autoCheckEnvironment={autoCheckEnvironment}
+        onEnvironmentCheckStart={finishEnvironmentPreparation} />;
     }
     if (activePage === "关于") {
       return <AboutPage />;
     }
-    return <DashboardPage />;
-  }, [activePage, busy, confirm, runCommand]);
+    return <DashboardPage onCheckEnvironment={prepareEnvironmentCheck} />;
+  }, [activePage, busy, confirm, runCommand, autoCheckEnvironment, finishEnvironmentPreparation, prepareEnvironmentCheck]);
 
   return (
     <ThemeContext.Provider

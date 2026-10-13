@@ -43,6 +43,7 @@ class QueryTimingTests(unittest.TestCase):
         self.assertEqual(steps, {"prepare": 100, "query": 400, "snapshot": 30, "decision": 20, "publish": 0})
         self.assertAlmostEqual(self.now, 6.55)
         self.assertEqual(self.details()[0]["status"], "ok")
+        self.assertIs(self.details()[0]["hit"], False)
 
     def test_selected_candidate_timing_finishes_before_order_work(self):
         self.monitor.auto_submit = True
@@ -53,6 +54,7 @@ class QueryTimingTests(unittest.TestCase):
         self.monitor._run_single_loop(1, 6)
         self.assertEqual(len(self.details()), 1)
         self.assertEqual(sum(s["duration_ms"] for s in self.details()[0]["steps"]), 550)
+        self.assertIs(self.details()[0]["hit"], True)
         self.assertAlmostEqual(self.now, 10.55)
 
     def test_diagnostic_write_failure_does_not_change_query_behavior(self):

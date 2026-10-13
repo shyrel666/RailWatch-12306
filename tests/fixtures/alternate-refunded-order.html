@@ -1,0 +1,49 @@
+<!doctype html><meta charset="utf-8"><title>Sanitized official refunded waitlist card</title>
+<!-- Structural fixture from the official lineUp_order.html "已处理订单" card observed
+     2026-10-11 for a paid-then-refunded waitlist (status 已退单). The passenger list
+     carries tuipiaoHide and stays collapsed until the official 展开 toggle is used.
+     All journey, identity and order values are invented. No network resources. -->
+<style>.tuipiaoHide{display:none}.slideDown{display:none}</style>
+<div class="order-item">
+  <div class="order-item-hd">
+    <div class="order-hd-info"><span class="txt-light">候补单号：</span> E123456 </div>
+    <div class="order-hd-info"><span class="txt-light dingpiaoDate" data-date="2026-09-01">下单日期：</span> 2026-09-01 </div>
+    <div class="pull-right txt-lighter" style="position:relative">
+      <span class="txt-lighter">已退单</span>
+      <a href="javascript:;" class="serial-number lsNumber txt-primary" data-title="R000">退款信息</a>
+    </div>
+  </div>
+  <div class="order-item-bd order-item-bd-houbu">
+    <h3 class="tit-houbu">车次信息</h3>
+    <div class="ticket-card-list">
+      <div class="ticket-card disabled">
+        <div class="ticket-date trainDate">2026年09月10日</div>
+        <div class="ticket-number">G101</div>
+        <div class="ticket-station">
+          <div class="ticket-station-start"><div class="ticket-station-name" title="北京"><i class="label-shi">始</i>北京</div><div class="ticket-station-time">08:00</div></div>
+          <div class="ticket-station-arw"></div>
+          <div class="ticket-station-end"><div class="ticket-station-name" title="上海"><i class="label-zhong">终</i>上海</div><div class="ticket-station-time">12:30</div></div>
+        </div>
+        <div class="ticket-info"><div class="ticket-info-txt"><span>二等座</span></div></div>
+      </div>
+    </div>
+    <div class="line-dashed"></div>
+    <h3 class="tit-houbu tuipiaoHide">旅客信息</h3>
+    <div class="passenger-card-list tuipiaoHide">
+      <div class="passenger-card">
+        <div class="passenger-name"><i class="ico-passenger"></i><strong class="mr" title="张三">张三</strong><span class="label-txt">成人票</span></div>
+        <div class="passenger-type">居民身份证</div>
+        <div class="passenger-num">1101**********0000</div>
+      </div>
+    </div>
+  </div>
+  <div class="order-toggle-btn">
+    <span class="order-toggle-slideDown">展开</span>
+    <span class="order-toggle-slideUp slideDown">收起</span>
+  </div>
+  <div class="order-item-ft-houbu">
+    <div class="pull-left mr-lg">总张数：<strong>1</strong></div>
+    <div class="pull-left">订单金额：<span class="txt-price"><i class="rmb">¥</i><span class="txt-mlg">19.5</span></span></div>
+  </div>
+</div>
+<script>window.orderActions=0;document.addEventListener('click',()=>orderActions++,true);</script>

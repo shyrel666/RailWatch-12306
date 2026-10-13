@@ -26,6 +26,7 @@ log_*.txt
 user_config.json
 device_profile.json
 station_codes_cache.json
+station_search_cache.json
 orders.sqlite3
 orders.sqlite3-*
 chrome_profile_12306/
@@ -41,3 +42,17 @@ assets/images/icon-imagegen.*
 .superpowers/brainstorm/
 .cursor/
 .DS_Store
+
+# Keep internal plans, test/acceptance records and historical docs local.
+# Only the current release notes and README screenshots belong in Git.
+# Update this allowlist and untrack the previous assets for each release.
+/docs/*
+!/docs/images/
+/docs/images/*
+!/docs/images/dashboard-v0.7.0.png
+!/docs/images/trip-setup-v0.7.0.png
+!/docs/images/monitor-v0.7.0.png
+!/docs/images/order-center-v0.7.0.png
+!/docs/releases/
+/docs/releases/*
+!/docs/releases/v0.7.0.md

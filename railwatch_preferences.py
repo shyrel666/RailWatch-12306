@@ -263,7 +263,8 @@ def save_trip_draft(data_dir: str, config: dict, revision: int) -> dict:
     with PREFERENCES_LOCK:
         existing = load_trip_draft(data_dir)
         if existing["status"] == "available" and revision <= existing["draft"]["revision"]:
-            raise ValueError("草稿修订号已过期，请重新加载最新草稿。")
+            # The renderer reads the current revision from this message to resync.
+            raise ValueError(f"草稿修订号已过期（当前为 {existing['draft']['revision']}），请重新加载最新草稿。")
         if existing["status"] == "invalid":
             backup = f"{path}.invalid-{time.time_ns()}"
             os.replace(path, backup)

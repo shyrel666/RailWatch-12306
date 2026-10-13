@@ -99,7 +99,8 @@ def main():
                 driver.set_window_size(1440, 1800)
                 driver.get(f"http://127.0.0.1:{server.server_port}/")
                 wait = WebDriverWait(driver, 10)
-                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
+                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 7
+                           and not d.find_elements("id", "startup-splash"))
                 driver.find_element("css selector", '[aria-label="购票监控"]').click()
                 start = wait.until(lambda d: d.find_element("xpath", "//button[span[text()='开始彩排']]"))
                 wait.until(lambda _: start.is_enabled())
@@ -122,7 +123,7 @@ def main():
                         # The dialog mask covers the shell: close, switch theme, reopen from the summary.
                         driver.find_element("css selector", f"{dialog_body} .ant-modal-footer .ant-btn-primary").click()
                         wait.until(dialog_hidden)
-                        driver.find_element("css selector", '[aria-label*="主题"]').click()
+                        driver.find_element("css selector", '[role="radiogroup"][aria-label="外观主题"] [role="radio"][aria-label="深色"]').click()
                         wait.until(lambda d: d.execute_script("return document.documentElement.dataset.theme") == "dark")
                         time.sleep(1)  # Let the existing theme reveal animation finish.
                         driver.find_element("xpath", "//button[span[text()='查看结果']]").click()
@@ -146,13 +147,20 @@ def main():
                 wait.until(lambda d: not d.find_elements("xpath", "//button[span[text()='查看结果']]"))
                 assert driver.execute_script("return commands.filter(c=>c==='clearRehearsalHistory').length") == 1
                 driver.set_window_size(1440, 1800)
-                driver.find_element("css selector", '[aria-label="订单中心"]').click()
-                wait.until(lambda d: d.find_element("css selector", '#order-run-reviews .run-reviews-toggle')).click()
-                wait.until(lambda d: d.find_element("xpath", "//button[span[text()='查看复盘']]" )).click()
+                driver.find_element("css selector", '.nav-item[aria-label="运行复盘"]').click()
+                card = wait.until(lambda d: d.find_element("css selector", ".rv-run"))
+                assert "查看复盘" not in card.text
+                # The timestamp is part of the full-card button.
+                card.find_element("tag name", "time").click()
+                wait.until(lambda _: card.get_attribute("aria-pressed") == "true")
+                assert driver.execute_script("""const card=arguments[0].getBoundingClientRect(),
+                  stamp=arguments[0].querySelector('time').getBoundingClientRect();
+                  return Math.abs((card.top+card.bottom-stamp.top-stamp.bottom)/2)<=1;""", card)
+                assert "记录即时与定时监控的执行阶段" not in driver.find_element("id", "run-reviews").text
                 wait.until(lambda d: d.find_element("css selector", '[aria-label="复盘详情"]'))
                 breakdown = driver.find_element("css selector", '[aria-label="下单分步耗时"]')
                 assert "6.00 秒" in breakdown.text and "不重复计入总耗时" in breakdown.text
-                driver.find_element("id", "order-run-reviews").screenshot(str(output / "review-dark.png"))
+                driver.find_element("id", "run-reviews").screenshot(str(output / "review-dark.png"))
                 driver.set_window_size(1180, 720)
                 assert driver.execute_script("return arguments[0].scrollWidth<=arguments[0].clientWidth+1", breakdown)
                 errors = [entry for entry in driver.get_log("browser") if entry["level"] == "SEVERE"]

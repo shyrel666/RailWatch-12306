@@ -64,38 +64,46 @@ export function useConfirmationBridge(showDialog: ThemedDialog): void {
 }
 
 /**
- * 更新包下载完成后，用主题化对话框替代原生的"是否立即重启安装"系统弹窗；
- * 每个版本只提示一次，用户选"稍后"仍可从状态栏的更新按钮安装。
+ * 更新包下载完成且当前没有活动任务或未完成订单时，打开更新面板。
+ * 每个版本只自动展示一次，安装由面板中的显式操作触发。
  */
-export function useUpdateReadyPrompt(showDialog: ThemedDialog): void {
-  const promptedVersionRef = useRef<string | null>(null);
+export function useUpdateReadyPrompt(showUpdate: (state: UpdateRuntimeState) => void, enabled = true): void {
+  const promptedVersionsRef = useRef(new Set<string>());
+  const showUpdateRef = useRef(showUpdate);
 
   useEffect(() => {
-    return railwatchApi.onUpdateState((state) => {
+    showUpdateRef.current = showUpdate;
+  }, [showUpdate]);
+
+  useEffect(() => {
+    let active = true;
+    let latestState: UpdateRuntimeState | undefined;
+    if (!enabled) return;
+    const checkingVersions = new Set<string>();
+    const unsubscribe = railwatchApi.onUpdateState((state) => {
       const payload = state as UpdateRuntimeState | undefined;
-      if (!payload || payload.phase !== "downloaded" || !payload.latestVersion) {
+      latestState = payload;
+      if (!active || !payload || payload.phase !== "downloaded" || !payload.latestVersion) {
         return;
       }
-      if (promptedVersionRef.current === payload.latestVersion) {
+      const version = payload.latestVersion;
+      if (promptedVersionsRef.current.has(version) || checkingVersions.has(version)) {
         return;
       }
+      checkingVersions.add(version);
       void railwatchApi.command<import("../types").TaskActivity>("taskActivity").then((activity) => {
-        if (activity.state !== "idle" || activity.unresolved_order || promptedVersionRef.current === payload.latestVersion) return;
-        promptedVersionRef.current = payload.latestVersion!;
-        return showDialog({
-        title: "发现新版本",
-        content: `RailWatch 12306 ${payload.latestVersion} 已下载完成。是否立即重启安装更新？`,
-        okText: "立即重启安装",
-        cancelText: "稍后",
-        }).then(async (accepted) => {
-          if (accepted) {
-            const result = await railwatchApi.installUpdate();
-            if (!result.ok) {
-              await showDialog({ title: "更新已推迟", content: result.error || "当前无法安装更新。", okText: "知道了", cancelText: "关闭" });
-            }
-          }
-        });
-      }).catch(() => undefined);
+        if (!active || activity.state !== "idle" || activity.unresolved_order ||
+          latestState?.phase !== "downloaded" || latestState.latestVersion !== version ||
+          promptedVersionsRef.current.has(version)) return;
+        promptedVersionsRef.current.add(version);
+        showUpdateRef.current(latestState);
+      }).catch(() => undefined).finally(() => {
+        checkingVersions.delete(version);
+      });
     });
-  }, [showDialog]);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [enabled]);
 }

@@ -102,7 +102,8 @@ def main():
                 driver.get(url)
                 driver.execute_script("localStorage.setItem('qa-theme',arguments[0])", theme)
                 driver.get(url)
-                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 6)
+                wait.until(lambda d: len(d.find_elements("css selector", ".nav .nav-item")) == 7
+                           and not d.find_elements("id", "startup-splash"))
                 driver.find_element("css selector", '[aria-label="行程设置"]').click()
                 select = wait.until(lambda d: d.find_element("css selector", '[aria-label="多日期策略"]'))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'})", select)
@@ -117,17 +118,21 @@ def main():
                 assert saved["date_strategy"] == "inventory_first"
                 assert not saved["auto_submit"] and not saved["auto_alternate"]
                 driver.get(url)
+                wait.until(lambda d: not d.find_elements("id", "startup-splash"))
                 wait.until(lambda d: d.find_element("css selector", '[aria-label="行程设置"]')).click()
                 budget = wait.until(lambda d: d.find_element("css selector", '[aria-label="跨日期扫描预算（秒）"]'))
                 assert budget.get_attribute("value") == "45"
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'})", budget)
                 driver.save_screenshot(str(output / f"trip-{width}-{theme}.png"))
-                driver.find_element("css selector", '[aria-label="订单中心"]').click()
-                toggle = wait.until(lambda d: d.find_element("css selector", '.run-reviews-toggle'))
-                if toggle.get_attribute("aria-expanded") != "true":
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'})", toggle)
-                    toggle.click()
-                click_text("查看复盘")
+                driver.find_element("css selector", '.nav-item[aria-label="运行复盘"]').click()
+                card = wait.until(lambda d: d.find_element("css selector", ".rv-run"))
+                assert "查看复盘" not in card.text
+                card.find_element("css selector", ".rv-run-trip").click()
+                wait.until(lambda _: card.get_attribute("aria-pressed") == "true")
+                assert driver.execute_script("""const card=arguments[0].getBoundingClientRect(),
+                  stamp=arguments[0].querySelector('time').getBoundingClientRect();
+                  return Math.abs((card.top+card.bottom-stamp.top-stamp.bottom)/2)<=1;""", card)
+                assert "记录即时与定时监控的执行阶段" not in driver.find_element("id", "run-reviews").text
                 stats = wait.until(lambda d: d.find_element("css selector", '[aria-label="查询分阶段统计"]'))
                 assert "25轮取得有效结果" in stats.text and "12.40 秒" in stats.text
                 assert len(stats.find_elements("css selector", "tbody tr")) == 7
@@ -140,7 +145,7 @@ def main():
         server.shutdown()
         server.server_close()
         thread.join()
-    print("Offline UI smoke passed: saved date policy and budget, automation unchanged, phase statistics, two sizes/themes.")
+    print("Offline UI smoke passed: saved date policy/budget, clickable review card with centered time, phase statistics, two sizes/themes.")
 
 
 if __name__ == "__main__":

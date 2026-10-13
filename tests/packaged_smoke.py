@@ -113,7 +113,7 @@ def main():
                     if "exceptionDetails" in result: raise RuntimeError(result["exceptionDetails"])
                     return result["result"].get("value")
                 for _ in range(100):
-                    if evaluate("typeof window.railwatch?.command === 'function' && document.querySelectorAll('.nav .nav-item').length === 6"):
+                    if evaluate("typeof window.railwatch?.command === 'function' && document.querySelectorAll('.nav .nav-item').length === 7"):
                         break
                     time.sleep(0.2)
                 else:

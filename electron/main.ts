@@ -14,7 +14,9 @@ import {
   isTrustedRailWatchUrl,
   recordExportPathGrant,
 } from "./ipcSecurity";
-import { cleanupUrgentAlert, registerAlertIpcHandlers, showUrgentAlert, stopUrgentAlertLoop, type AlertPreferences } from "./alertManager";
+import { cleanupUrgentAlert, previewAlertSound, registerAlertIpcHandlers, showUrgentAlert, stopAlertSoundPreview,
+  stopUrgentAlertLoop, updateUrgentAlertSound, validateImportedAlertSound, type AlertPreferences } from "./alertManager";
+import { isAlertSoundTone, prepareSoundImport, storeImportedSound } from "./alertSoundFiles";
 import { ConfirmationBridge, type ConfirmationRequestPayload } from "./confirmationBridge";
 import { RailWatchPythonRuntimeClient, RuntimeEvent } from "./pythonRuntime";
 import {
@@ -57,9 +59,12 @@ function applyAlertPreferences(value: unknown): void {
   alertPreferences = {
     desktop_urgent: settings.desktop_urgent !== false,
     sound_loop: settings.sound_loop !== false,
+    sound_tone: isAlertSoundTone(settings.sound_tone) ? settings.sound_tone : "beep",
+    sound_custom_file: typeof settings.sound_custom_file === "string" ? settings.sound_custom_file : "",
     window_attention: settings.window_attention !== false,
   };
   if (!alertPreferences.sound_loop) stopUrgentAlertLoop();
+  else updateUrgentAlertSound(alertPreferences);
 }
 const pythonRuntime = new RailWatchPythonRuntimeClient();
 const grantedExportPaths = new Set<string>();
@@ -288,6 +293,7 @@ function createWindow(): void {
     minHeight: 720,
     title: "RailWatch 12306",
     icon: appIconPath(),
+    show: false,
     backgroundColor: "#101113",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -320,11 +326,23 @@ function createWindow(): void {
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   allowedRendererUrl = devServerUrl || pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).toString();
   const window = mainWindow;
+  const notifyWindowShown = () => {
+    if (!window.isDestroyed() && window.isVisible()) {
+      window.webContents.send("railwatch:window-shown");
+    }
+  };
+  window.on("show", notifyWindowShown);
+  // Reloading an already visible window creates a fresh preload listener.
+  window.webContents.on("dom-ready", notifyWindowShown);
+  window.on("ready-to-show", () => {
+    if (!window.isDestroyed()) window.show();
+  });
   const rendererUrl = allowedRendererUrl;
   let loadErrorShown = false;
   const showLoadError = (error: unknown) => {
     if (window.isDestroyed() || loadErrorShown || (error as { errno?: number })?.errno === -3) return;
     loadErrorShown = true;
+    window.show();
     void dialog.showMessageBox({ type: "error", title: "页面加载失败", message: "RailWatch 页面未能加载。",
       detail: devServerUrl ? "开发服务可能尚未就绪，请启动服务后重试。" : "应用页面可能缺失，请重试或重新安装。",
       buttons: ["重试", "关闭窗口"], defaultId: 0, cancelId: 1,
@@ -493,6 +511,31 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
   }
   if (command === "savePreferences" || command === "loadPreferences") applyAlertPreferences(result);
   return result;
+});
+
+ipcMain.handle("railwatch:preview-alert-sound", async (event, selection: unknown) => {
+  assertTrustedSender(event.senderFrame?.url);
+  if (quitAllowed) throw new Error("应用正在退出。");
+  return previewAlertSound(selection);
+});
+
+ipcMain.on("railwatch:stop-sound-preview", (event) => {
+  if (isTrustedSender(event.senderFrame?.url)) stopAlertSoundPreview();
+});
+
+ipcMain.handle("railwatch:import-alert-sound", async (event) => {
+  assertTrustedSender(event.senderFrame?.url);
+  if (quitAllowed || !mainWindow || mainWindow.isDestroyed()) throw new Error("应用窗口不可用。");
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择自定义提示音", properties: ["openFile"],
+    filters: [{ name: "音频文件", extensions: ["wav", "mp3", "ogg", "m4a"] }],
+  });
+  if (result.canceled || !result.filePaths[0] || quitAllowed) return null;
+  const asset = await prepareSoundImport(result.filePaths[0]);
+  await validateImportedAlertSound(asset.audio);
+  if (quitAllowed) return null;
+  await storeImportedSound(asset);
+  return { file: asset.file, name: asset.name };
 });
 
 ipcMain.handle("railwatch:check-update", async (event) => {

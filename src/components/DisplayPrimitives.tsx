@@ -1,9 +1,21 @@
 import type { ReactNode } from "react";
-import { Switch } from "antd";
-import { CheckCircle2, CircleDot, Clock3, TriangleAlert } from "lucide-react";
+import { Switch, Tooltip } from "antd";
+import { CheckCircle2, CircleDot, CircleHelp, Clock3, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 export type Tone = "amber" | "blue" | "green" | "indigo" | "red" | "slate" | "teal";
+
+// Background detail lives behind a small help mark so the page itself stays
+// scannable; the full text is still the button's accessible name.
+export function Hint({ text, label }: { text: string; label?: string }) {
+  return (
+    <Tooltip title={text} placement="top">
+      <button type="button" className="hint" aria-label={label ? `${label}：${text}` : text}>
+        <CircleHelp size={13} aria-hidden="true" />
+      </button>
+    </Tooltip>
+  );
+}
 
 export function StatusBadge({ children, tone = "slate" }: { children: ReactNode; tone?: Tone }) {
   return <span className={`status-badge ${tone}`}>{children}</span>;
@@ -105,11 +117,13 @@ export function WorkflowStepper({ steps }: { steps: WorkflowStep[] }) {
 }
 
 export function RiskToggle({
+  ariaLabel,
   checked,
   description,
   onChange,
   title,
 }: {
+  ariaLabel?: string;
   checked: boolean;
   description: string;
   onChange: (checked: boolean) => void;
@@ -117,7 +131,7 @@ export function RiskToggle({
 }) {
   return (
     <label className={checked ? "risk-toggle active" : "risk-toggle"}>
-      <Switch checked={checked} onChange={onChange} />
+      <Switch aria-label={ariaLabel} checked={checked} onChange={onChange} />
       <span>
         <strong>{title}</strong>
         <small>{description}</small>

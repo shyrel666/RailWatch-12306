@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import { railwatchApi } from "../lib/railwatchApi";
@@ -41,4 +41,88 @@ test.each(["success", "queued"])("requires saving edits and reports %s delivery 
     expect(screen.getByText("部分测试通知仍在排队或发送，结果会继续更新。")).toBeTruthy();
     expect(screen.queryByText("测试已完成；各渠道结果见下方。")).toBeNull();
   }
+});
+
+function mockSoundPreferences() {
+  let settings: Record<string, unknown> = {
+    desktop_urgent: true, sound_loop: true, window_attention: true,
+    sound_tone: "beep", sound_custom_file: "", sound_custom_name: "",
+    event_channels: Object.fromEntries(["hit", "verification", "payment", "alternate_active", "alternate_fulfilled", "purchase_success"]
+      .map((event) => [event, []])),
+  };
+  return vi.spyOn(railwatchApi, "command").mockImplementation(async (name, payload = {}) => {
+    if (name === "savePreferences") settings = { ...settings, ...(payload.notification_settings as Record<string, unknown>) };
+    if (name === "loadPreferences" || name === "savePreferences") return { notification_settings: settings } as never;
+    return {} as never;
+  });
+}
+
+test("previews an unsaved preset once, stops on demand, and saves through the existing preferences command", async () => {
+  const command = mockSoundPreferences();
+  const preview = vi.spyOn(railwatchApi, "previewAlertSound").mockResolvedValue({ duration_ms: 5000 });
+  const stop = vi.spyOn(railwatchApi, "stopAlertSoundPreview").mockImplementation(() => undefined);
+  render(<NotificationSettingsPanel />);
+  const select = await screen.findByRole("combobox", { name: "提示音" });
+  expect(screen.getByText("经典哔声")).toBeTruthy();
+  await userEvent.click(select);
+  expect(screen.getAllByRole("option")).toHaveLength(5);
+  expect(screen.getByRole("option", { name: /经典哔声/ }).getAttribute("aria-selected")).toBe("true");
+  await userEvent.click(screen.getByRole("option", { name: /清脆双响/ }));
+  await userEvent.click(screen.getByRole("button", { name: "试听" }));
+  expect(preview).toHaveBeenCalledWith({ sound_tone: "double", sound_custom_file: "" });
+  expect(command).not.toHaveBeenCalledWith("testNotification");
+  expect(command.mock.calls.some(([name]) => name === "savePreferences")).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: "停止试听" }));
+  expect(stop).toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "保存通知设置" }));
+  await waitFor(() => expect(command).toHaveBeenCalledWith("savePreferences", { notification_settings: { sound_tone: "double" } }));
+});
+
+test("a cancelled import keeps the form intact and a selected file is saved with its friendly name", async () => {
+  const command = mockSoundPreferences();
+  const asset = { file: "a".repeat(64) + ".wav", name: "我的提示音.wav" };
+  vi.spyOn(railwatchApi, "importAlertSound").mockResolvedValueOnce(null).mockResolvedValueOnce(asset);
+  render(<NotificationSettingsPanel />);
+  await userEvent.click(await screen.findByRole("combobox", { name: "提示音" }));
+  await userEvent.click(screen.getByRole("option", { name: /自定义音频/ }));
+  expect((screen.getByRole("button", { name: "试听" }) as HTMLButtonElement).disabled).toBe(true);
+  await userEvent.click(screen.getByRole("button", { name: "保存通知设置" }));
+  expect(screen.getByRole("alert").textContent).toContain("先选择自定义音频");
+  await userEvent.click(screen.getByRole("button", { name: "选择音频" }));
+  expect(screen.getByText("未选择音频")).toBeTruthy();
+  // The cancelled import settles asynchronously; wait for its loading state to clear.
+  await userEvent.click(await screen.findByRole("button", { name: "选择音频" }));
+  expect(await screen.findByText(asset.name)).toBeTruthy();
+  expect((screen.getByRole("button", { name: "试听" }) as HTMLButtonElement).disabled).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: "保存通知设置" }));
+  await waitFor(() => expect(command).toHaveBeenCalledWith("savePreferences", {
+    notification_settings: { sound_tone: "custom", sound_custom_file: asset.file, sound_custom_name: asset.name },
+  }));
+});
+
+test("an audio import failure is shown without altering saved settings", async () => {
+  const command = mockSoundPreferences();
+  vi.spyOn(railwatchApi, "importAlertSound").mockRejectedValue(new Error("自定义提示音长度须在 15 秒以内。"));
+  render(<NotificationSettingsPanel />);
+  await userEvent.click(await screen.findByRole("combobox", { name: "提示音" }));
+  await userEvent.click(screen.getByRole("option", { name: /自定义音频/ }));
+  await userEvent.click(screen.getByRole("button", { name: "选择音频" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("15 秒以内");
+  expect(screen.getByText("未选择音频")).toBeTruthy();
+  expect(command.mock.calls.some(([name]) => name === "savePreferences")).toBe(false);
+});
+
+test("stopping an in-flight preview ignores a late response and unmounting releases preview audio", async () => {
+  mockSoundPreferences();
+  let complete!: (value: { duration_ms: number }) => void;
+  vi.spyOn(railwatchApi, "previewAlertSound").mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+  const stop = vi.spyOn(railwatchApi, "stopAlertSoundPreview").mockImplementation(() => undefined);
+  const view = render(<NotificationSettingsPanel />);
+  await userEvent.click(await screen.findByRole("button", { name: "试听" }));
+  await userEvent.click(screen.getByRole("button", { name: "停止试听" }));
+  await act(async () => complete({ duration_ms: 15000 }));
+  expect(screen.getByRole("button", { name: "试听" })).toBeTruthy();
+  const calls = stop.mock.calls.length;
+  view.unmount();
+  expect(stop).toHaveBeenCalledTimes(calls + 1);
 });

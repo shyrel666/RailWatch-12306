@@ -92,5 +92,5 @@ export function useThemePreference() {
       setSaving(false);
     }
   }
-  return { mode, darkMode, design, saveTheme, disabled: !ready || saving };
+  return { mode, darkMode, design, saveTheme, ready, disabled: !ready || saving };
 }

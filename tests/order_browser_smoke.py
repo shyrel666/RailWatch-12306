@@ -11,7 +11,7 @@ from selenium.webdriver.chrome.service import Service
 from railwatch_bridge import CHROMEDRIVER_PATH
 from railwatch_order_page import OrderPage, ConfirmationOutcome
 from railwatch_orders import OrderIntent, OrderJournal
-from railwatch_task import MonitorTask, guard_browser
+from railwatch_task import MonitorTask, TaskCancelled, guard_browser
 from selenium.webdriver.remote.command import Command
 from railwatch_submit_flow import SubmitFlow
 
@@ -36,12 +36,54 @@ class OrderBrowserTests(unittest.TestCase):
     def setUp(self):
         self.driver.get((Path(__file__).parent / "fixtures/orders.html").resolve().as_uri())
         self.page = OrderPage(self.driver, allow_fixture=True, poll_interval=0.05)
-        self.intent = OrderIntent("regular", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",), "18:00")
+        self.intent = OrderIntent("regular", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",), "开车前1小时")
 
     def load_unpaid_card(self):
         self.driver.get((Path(__file__).parent / "fixtures/regular-unpaid-order.html").resolve().as_uri())
         self.intent = OrderIntent("regular", "G9", "2026-10-12", "北京南", "上海虹桥", "二等座", ("张三",))
         self.js("window.orderActions=0;document.addEventListener('click',()=>window.orderActions++);")
+
+    def test_waitlist_checkout_binds_only_via_order_list_and_preserves_payment_tab(self):
+        self.driver.get((Path(__file__).parent / "fixtures/lineUp_payConfirm.html").resolve().as_uri())
+        selected = replace(self.intent, kind="alternate")
+        self.assertTrue(self.page.snapshot()["alternateCheckout"])
+        self.assertEqual(self.page.result(selected).status, "unknown")
+        original_tab, original_tabs = self.driver.current_window_handle, self.driver.window_handles
+        native_get = self.driver.get
+        def official_orders(url):
+            self.assertEqual(url, "https://kyfw.12306.cn/otn/view/lineUp_order.html")
+            native_get((Path(__file__).parent / "fixtures/candidate-unpaid-order.html").resolve().as_uri())
+        with patch.object(self.driver, "get", side_effect=official_orders):
+            result = self.page.wait_result(selected, submitted=True)
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertEqual(self.driver.current_window_handle, original_tab)
+        self.assertEqual(self.driver.window_handles, original_tabs)
+        self.assertTrue(self.page.snapshot()["alternateCheckout"])
+        self.assertEqual(self.js("return window.orderActions"), 0)
+
+    def test_waitlist_checkout_with_wrong_official_order_remains_unresolved(self):
+        self.driver.get((Path(__file__).parent / "fixtures/lineUp_payConfirm.html").resolve().as_uri())
+        original_tab, original_tabs = self.driver.current_window_handle, self.driver.window_handles
+        self.page.RECOVERY_TAB_TIMEOUT = .1
+        native_get = self.driver.get
+        def wrong_order(url):
+            native_get((Path(__file__).parent / "fixtures/candidate-unpaid-order.html").resolve().as_uri())
+            self.js("document.querySelector('p').innerText='G102 2026-09-10 北京 上海 二等座'")
+        with patch.object(self.driver, "get", side_effect=wrong_order):
+            result = self.page.reconcile(replace(self.intent, kind="alternate"), navigate=True)
+        self.assertEqual(result.status, "unknown")
+        self.assertFalse(result.order_id)
+        self.assertEqual(self.driver.current_window_handle, original_tab)
+        self.assertEqual(self.driver.window_handles, original_tabs)
+        self.assertEqual(self.js("return window.orderActions"), 0)
+
+    def test_quiet_car_requires_specific_handoff_and_keeps_original_page(self):
+        self.js("document.body.insertAdjacentHTML('beforeend','<div class=up-box id=content_defaultwarningAlert_id>选择该车次二等座可能候补到静音车厢，是否继续选择？</div>')")
+        with patch.object(self.driver, "get") as navigate:
+            result = self.page.reconcile(replace(self.intent, kind="alternate"), navigate=True)
+        self.assertEqual(result.status, "verification")
+        self.assertIn("静音车厢", result.reason)
+        navigate.assert_not_called()
 
     def test_unpaid_card_reads_scoped_button_identity_and_ticket_status_without_clicking(self):
         self.load_unpaid_card()
@@ -395,7 +437,6 @@ class OrderBrowserTests(unittest.TestCase):
 
     def test_wrong_candidate_seat_and_extra_choices_never_submit(self):
         for script in ["document.querySelector('.ticket-info-txt span').innerText='一等座'",
-                       "document.getElementById('addTrainInput').checked=true",
                        "document.getElementById('is_open').innerText='已开启'",
                        "document.getElementById('planList').innerHTML='<div class=group-ticket>G102</div>'"]:
             self.setUp()
@@ -403,6 +444,105 @@ class OrderBrowserTests(unittest.TestCase):
             result = self.page.alternate(self.driver.find_element("id", "candidate"), replace(self.intent, kind="alternate"))
             self.assertEqual(result.status, "verification")
             self.assertEqual(self.js("return fixture.alternateClicks"), 0)
+
+    def test_unrequested_added_train_setting_is_disabled_before_submission(self):
+        self.js("document.getElementById('addTrainInput').checked=true")
+        result = self.page.alternate(self.driver.find_element("id", "candidate"), replace(self.intent, kind="alternate"))
+        self.assertEqual(result.status, "pending_payment")
+        self.assertFalse(self.js("return document.getElementById('addTrainInput').checked"))
+
+    def install_alternate_confirmation(self, delay=0):
+        fixture = (Path(__file__).parent / "fixtures/alternate-confirmation.html").read_text(encoding="utf-8")
+        self.js("document.body.insertAdjacentHTML('beforeend',arguments[0])", fixture)
+        self.js("""
+          el('dafaultTime').innerText='开车前1小时';
+          const root=el('alternate-confirmation'), delay=arguments[0];
+          el('toPayBtn').onclick=e=>{
+            e.preventDefault();fixture.alternateClicks++;
+            setTimeout(()=>{
+              root.style.display='block';
+              if(fixture.onAlternateConfirmShown)fixture.onAlternateConfirmShown();
+            },delay);
+          };
+          root.querySelector('a.ok').onclick=e=>{
+            e.preventDefault();fixture.confirmClicks++;root.style.display='none';fixture.record();
+          };
+        """, delay)
+        self.intent = replace(self.intent, kind="alternate", deadline="开车前60分钟")
+
+    def test_official_alternate_confirmation_matches_deadline_and_confirms_once(self):
+        for delay in (0, 200):
+            with self.subTest(delay=delay):
+                self.setUp()
+                self.install_alternate_confirmation(delay)
+                stages = []
+                self.page.mark = lambda stage, detail=None: stages.append(stage)
+                result = self.page.alternate(self.driver.find_element("id", "candidate"), self.intent)
+                self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+                self.assertEqual(self.js("return [fixture.alternateClicks,fixture.confirmClicks]"), [1, 1])
+                self.assertEqual(stages.count("alternate_submit"), 1)
+                self.assertEqual(stages.count("alternate_confirm_attempt"), 1)
+
+    def test_changed_alternate_confirmation_or_form_requires_review(self):
+        for mutation in (
+            "document.querySelector('.dzp-confirm .txt-default').innerText='开车前2小时'",
+            "document.querySelector('.dzp-confirm .modal-tit').innerText='其他提示'",
+            "document.querySelector('.dzp-confirm .msg-info').append('额外条件')",
+            "document.querySelector('.dzp-confirm a.ok').setAttribute('aria-disabled','true')",
+            "el('alternate-confirmation').after(el('alternate-confirmation').cloneNode(true))",
+            "el('dialog').innerText='请完成人脸核验';show('dialog')",
+            "document.querySelector('.ticket-info-txt span').innerText='一等座'",
+            "el('is_open').innerText='已开启'",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.page.ALTERNATE_CONFIRMATION_GRACE = .3
+                self.install_alternate_confirmation()
+                self.js("fixture.onAlternateConfirmShown=()=>{" + mutation + "}")
+                result = self.page.alternate(self.driver.find_element("id", "candidate"), self.intent)
+                self.assertEqual(result.status, "verification")
+                self.assertEqual(self.js("return [fixture.alternateClicks,fixture.confirmClicks]"), [1, 0])
+
+    def test_covered_alternate_confirmation_is_retried_once_it_can_be_clicked(self):
+        self.install_alternate_confirmation()
+        # A transient mask makes chromedriver refuse the click before dispatch.
+        self.js("""fixture.onAlternateConfirmShown=()=>{
+          const mask=document.createElement('div');
+          mask.style.cssText='position:fixed;inset:0;z-index:99999;background:transparent';
+          document.body.append(mask);setTimeout(()=>mask.remove(),1200);
+        }""")
+        stages = []
+        self.page.mark = lambda stage, detail=None: stages.append(stage)
+        result = self.page.alternate(self.driver.find_element("id", "candidate"), self.intent)
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertEqual(self.js("return [fixture.alternateClicks,fixture.confirmClicks]"), [1, 1])
+        self.assertGreaterEqual(stages.count("alternate_confirm_rejected"), 1)
+        self.assertEqual(stages.count("alternate_confirm_attempt") - stages.count("alternate_confirm_rejected"), 1)
+
+    def test_delivered_alternate_confirmation_with_lost_ack_is_not_repeated(self):
+        self.install_alternate_confirmation()
+        confirmation = self.driver.find_element("css selector", ".dzp-confirm a.ok")
+        original = self.driver.execute
+        def lose_ack(command, params=None):
+            value = original(command, params)
+            if command == Command.CLICK_ELEMENT and params.get("id") == confirmation.id:
+                raise TimeoutError("The native click completed, but its acknowledgement was lost")
+            return value
+        with patch.object(self.driver, "execute", side_effect=lose_ack):
+            result = self.page.alternate(self.driver.find_element("id", "candidate"), self.intent)
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(self.js("return [fixture.alternateClicks,fixture.confirmClicks]"), [1, 1])
+
+    def test_stop_before_alternate_confirmation_preserves_submission_uncertainty(self):
+        self.install_alternate_confirmation()
+        def stop_at_confirmation(stage, detail=None):
+            if stage == "alternate_confirm_attempt":
+                raise TaskCancelled()
+        self.page.mark = stop_at_confirmation
+        result = self.page.alternate(self.driver.find_element("id", "candidate"), self.intent)
+        self.assertEqual(result.status, "unknown")
+        self.assertFalse(result.no_order)
+        self.assertEqual(self.js("return [fixture.alternateClicks,fixture.confirmClicks]"), [1, 0])
 
     def test_deadline_selection_failure_never_submits(self):
         result = self.page.alternate(self.driver.find_element("id", "candidate"), replace(self.intent, kind="alternate", deadline="19:30"))
@@ -738,6 +878,31 @@ class OrderBrowserTests(unittest.TestCase):
           card.querySelector('.pay_order').remove();document.body.append(other);""")
         self.assertEqual(self.page.result(self.intent, known_id='E123456').status, 'unknown')
         self.assertEqual(self.js('return paymentClicks'), 0)
+
+    def load_refunded_waitlist_card(self):
+        self.driver.get((Path(__file__).parent / 'fixtures/alternate-refunded-order.html').resolve().as_uri())
+        self.intent = replace(self.intent, kind='alternate')
+
+    def test_refunded_waitlist_reads_collapsed_passengers_without_expanding(self):
+        self.load_refunded_waitlist_card()
+        result = self.page.result(self.intent, submitted=True, known_id='E123456')
+        self.assertEqual((result.status, result.order_id), ('cancelled', 'E123456'))
+        self.assertTrue(result.evidence['matched'])
+        self.assertEqual(self.js('return orderActions'), 0)
+        self.assertEqual(self.page.result(replace(self.intent, passengers=('李四',)), submitted=True, known_id='E123456').status, 'unknown')
+        self.assertEqual(self.page.result(self.intent, submitted=True).status, 'unknown')
+
+    def test_collapsed_passenger_exception_is_scoped_to_official_waitlist_list(self):
+        for change in ("document.querySelector('.passenger-card-list').classList.remove('tuipiaoHide');"
+                       "document.querySelector('.passenger-card-list').style.display='none'",
+                       "document.querySelector('.order-item-hd .order-hd-info').textContent='订单号：E123456'",
+                       "document.body.append(Object.assign(document.createElement('div'),{className:'passenger-card-list tuipiaoHide',"
+                       "innerHTML:'<div class=passenger-name><strong title=张三>张三</strong></div>'}));"
+                       "document.querySelector('.order-item .passenger-card-list').remove()"):
+            with self.subTest(change=change):
+                self.load_refunded_waitlist_card()
+                self.js(change)
+                self.assertEqual(self.page.result(self.intent, submitted=True, known_id='E123456').status, 'unknown')
 
     def recover_on_local_tabs(self, kind='regular', target=1, state='已支付', order='E123456', known='E123456', mutate=''):
         self.driver.get('about:blank')

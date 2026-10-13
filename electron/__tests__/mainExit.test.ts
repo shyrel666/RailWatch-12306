@@ -7,6 +7,7 @@ const harness = vi.hoisted(() => ({
   ready: undefined as undefined | (() => void),
   windowListeners: new Map<string, (...args: any[]) => void>(),
   hide: vi.fn(), show: vi.fn(),
+  visible: false,
   ipcListeners: new Map<string, (...args: any[]) => void>(),
   ipcHandlers: new Map<string, (...args: any[]) => any>(),
   webListeners: new Map<string, (...args: any[]) => void>(),
@@ -16,6 +17,8 @@ const harness = vi.hoisted(() => ({
   installUpdate: vi.fn(), updateState: vi.fn(),
   setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn(), setAppUserModelId: vi.fn(),
   windowOptions: undefined as any, updaterOptions: undefined as any, autoUpdater: {} as Record<string, unknown>,
+  previewSound: vi.fn(), stopPreview: vi.fn(), updateSound: vi.fn(), validateSound: vi.fn(),
+  openAudio: vi.fn(), prepareAudio: vi.fn(), storeAudio: vi.fn(),
 }));
 vi.mock("electron", () => ({
   app: { requestSingleInstanceLock: () => true, quit: harness.quit,
@@ -32,11 +35,12 @@ vi.mock("electron", () => ({
     close = harness.closeWindow;
     reload = harness.reload;
     isDestroyed = () => false; isMinimized = () => false;
+    isVisible = () => harness.visible;
     focus = vi.fn();
   },
   Menu: { setApplicationMenu: harness.setApplicationMenu, buildFromTemplate: harness.buildFromTemplate },
   nativeImage: { createFromPath: () => ({ resize: () => "tray-image" }) },
-  dialog: { showMessageBox: harness.loadErrorDialog },
+  dialog: { showMessageBox: harness.loadErrorDialog, showOpenDialog: harness.openAudio },
   Tray: class { on = vi.fn(); setToolTip = vi.fn(); setContextMenu = vi.fn(); destroy = vi.fn(); },
   powerMonitor: { on: vi.fn() }, powerSaveBlocker: {}, shell: {},
 }));
@@ -50,7 +54,13 @@ vi.mock("../updateManager", () => ({ createUpdateManager: (options: unknown) => 
   return { installUpdate: harness.installUpdate, getState: harness.updateState };
 }, shouldEnableAutoUpdate: vi.fn() }));
 vi.mock("../alertManager", () => ({ cleanupUrgentAlert: harness.cleanupAlert,
-  registerAlertIpcHandlers: vi.fn(), showUrgentAlert: vi.fn(), stopUrgentAlertLoop: vi.fn() }));
+  registerAlertIpcHandlers: vi.fn(), showUrgentAlert: vi.fn(), stopUrgentAlertLoop: vi.fn(),
+  previewAlertSound: harness.previewSound, stopAlertSoundPreview: harness.stopPreview,
+  updateUrgentAlertSound: harness.updateSound, validateImportedAlertSound: harness.validateSound }));
+vi.mock("../alertSoundFiles", async (original) => ({
+  ...await original<typeof import("../alertSoundFiles")>(),
+  prepareSoundImport: harness.prepareAudio, storeImportedSound: harness.storeAudio,
+}));
 vi.mock("../confirmationBridge", () => ({
   ConfirmationBridge: class {
     constructor(options: { sendRequest: (request: any) => void }) { harness.sendRequest = options.sendRequest; }
@@ -74,6 +84,12 @@ beforeEach(async () => {
   harness.listeners.clear();
   harness.windowListeners.clear();
   harness.webListeners.clear();
+  harness.visible = false;
+  harness.show.mockImplementation(() => {
+    harness.visible = true;
+    harness.windowListeners.get("show")?.();
+  });
+  harness.hide.mockImplementation(() => { harness.visible = false; });
   harness.ipcListeners.clear();
   harness.ipcHandlers.clear();
   harness.request.mockImplementation(async command => command === "taskActivity"
@@ -84,7 +100,55 @@ beforeEach(async () => {
   harness.loadErrorDialog.mockResolvedValue({ response: 1 });
   harness.updateState.mockReturnValue({ phase: "downloaded" });
   harness.installUpdate.mockResolvedValue(true);
+  harness.openAudio.mockResolvedValue({ canceled: true, filePaths: [] });
+  harness.previewSound.mockResolvedValue({ duration_ms: 220 });
   await import("../main");
+});
+
+test("saved audio preferences update the urgent player without starting a preview", async () => {
+  harness.ready!();
+  const settings = { desktop_urgent: true, sound_loop: true, window_attention: true, sound_tone: "alarm" };
+  harness.request.mockResolvedValue({ notification_settings: settings });
+  await harness.ipcHandlers.get("railwatch:command")!({ senderFrame: { url: harness.rendererUrl } },
+    "savePreferences", { notification_settings: { sound_tone: "alarm" } });
+  expect(harness.updateSound).toHaveBeenCalledWith(expect.objectContaining({ sound_tone: "alarm" }));
+  expect(harness.previewSound).not.toHaveBeenCalled();
+});
+
+test("sound preview stays local and only a trusted renderer can play, stop or import audio", async () => {
+  harness.ready!();
+  const trusted = { senderFrame: { url: harness.rendererUrl } };
+  const untrusted = { senderFrame: { url: "https://untrusted.example" } };
+  const preview = harness.ipcHandlers.get("railwatch:preview-alert-sound")!;
+  const importSound = harness.ipcHandlers.get("railwatch:import-alert-sound")!;
+  await expect(preview(untrusted, { sound_tone: "beep" })).rejects.toThrow("untrusted");
+  await expect(importSound(untrusted)).rejects.toThrow("untrusted");
+  harness.ipcListeners.get("railwatch:stop-sound-preview")!(untrusted);
+  expect(harness.stopPreview).not.toHaveBeenCalled();
+  const requests = harness.request.mock.calls.length;
+  await expect(preview(trusted, { sound_tone: "chime" })).resolves.toEqual({ duration_ms: 220 });
+  expect(harness.request).toHaveBeenCalledTimes(requests);
+  expect(harness.previewSound).toHaveBeenCalledWith({ sound_tone: "chime" });
+  harness.ipcListeners.get("railwatch:stop-sound-preview")!(trusted);
+  expect(harness.stopPreview).toHaveBeenCalledOnce();
+  await expect(importSound(trusted)).resolves.toBeNull();
+  expect(harness.prepareAudio).not.toHaveBeenCalled();
+});
+
+test("custom audio is decoded before storing and a decoder error never imports the file", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const asset = { file: "a".repeat(64) + ".wav", name: "提示音.wav", audio: "base64-audio", data: Buffer.from("fixture") };
+  harness.openAudio.mockResolvedValue({ canceled: false, filePaths: ["C:/Audio/提示音.wav"] });
+  harness.prepareAudio.mockResolvedValue(asset);
+  const importSound = harness.ipcHandlers.get("railwatch:import-alert-sound")!;
+  await expect(importSound(event)).resolves.toEqual({ file: asset.file, name: asset.name });
+  expect(harness.validateSound).toHaveBeenCalledWith(asset.audio);
+  expect(harness.validateSound.mock.invocationCallOrder[0]).toBeLessThan(harness.storeAudio.mock.invocationCallOrder[0]);
+  harness.storeAudio.mockClear();
+  harness.validateSound.mockRejectedValue(new Error("音频无效"));
+  await expect(importSound(event)).rejects.toThrow("音频无效");
+  expect(harness.storeAudio).not.toHaveBeenCalled();
 });
 
 test("update installation keeps the runtime alive until launch acknowledgement", async () => {
@@ -243,12 +307,48 @@ test("untrusted fire-and-forget IPC is ignored without throwing", () => {
   }
 });
 
-test("load failures show one visible error despite duplicate main-frame events", async () => {
+test("the startup window stays hidden until its first renderer frame is ready", async () => {
+  harness.ready!();
+  expect(harness.windowOptions).toEqual(expect.objectContaining({ show: false }));
+  await new Promise(resolve => setImmediate(resolve));
+  expect(harness.show).not.toHaveBeenCalled();
+  harness.webListeners.get("dom-ready")!();
+  expect(harness.send).not.toHaveBeenCalledWith("railwatch:window-shown");
+
+  harness.windowListeners.get("ready-to-show")!();
+
+  expect(harness.show).toHaveBeenCalledOnce();
+  expect(harness.send).toHaveBeenCalledWith("railwatch:window-shown");
+});
+
+test("a visible window notifies a fresh preload after a renderer reload", () => {
+  harness.ready!();
+  harness.windowListeners.get("ready-to-show")!();
+  harness.send.mockClear();
+
+  harness.webListeners.get("dom-ready")!();
+
+  expect(harness.send).toHaveBeenCalledWith("railwatch:window-shown");
+});
+
+test("cancelled and subframe loads keep the startup window hidden", () => {
+  harness.ready!();
+  const failLoad = harness.webListeners.get("did-fail-load")!;
+  failLoad({}, -3, "cancelled", harness.rendererUrl, true);
+  failLoad({}, -6, "missing frame", harness.rendererUrl, false);
+
+  expect(harness.show).not.toHaveBeenCalled();
+  expect(harness.loadErrorDialog).not.toHaveBeenCalled();
+});
+
+test("load failures reveal the startup window and show one error despite duplicate main-frame events", async () => {
   harness.loadFailure = new Error("missing page");
   harness.ready!();
   harness.webListeners.get("did-fail-load")!({}, -6, "missing page", harness.rendererUrl, true);
   await new Promise(resolve => setImmediate(resolve));
+  expect(harness.show).toHaveBeenCalledOnce();
   expect(harness.loadErrorDialog).toHaveBeenCalledOnce();
+  expect(harness.show.mock.invocationCallOrder[0]).toBeLessThan(harness.loadErrorDialog.mock.invocationCallOrder[0]);
   expect(harness.closeWindow).toHaveBeenCalledOnce();
 });
 
@@ -294,9 +394,10 @@ test("renderer crash cancels pending decisions and reloads before showing anothe
   expect(harness.cancelConfirmations).toHaveBeenCalledOnce();
   harness.sendRequest!({ id: "recovery", title: "无法安全退出", message: "请选择" });
   expect(harness.reload).toHaveBeenCalledOnce();
-  expect(harness.send).not.toHaveBeenCalled();
+  const prompts = () => harness.send.mock.calls.filter(([channel]) => channel === "railwatch:confirm-request");
+  expect(prompts()).toHaveLength(0);
   harness.ipcListeners.get("railwatch:confirm-ready")!({ senderFrame: { url: harness.rendererUrl } });
-  expect(harness.send).toHaveBeenCalledOnce();
+  expect(prompts()).toHaveLength(1);
 });
 
 test("renderer recovery loads the latest staged revision before accepting new edits", async () => {

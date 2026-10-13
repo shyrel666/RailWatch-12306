@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
@@ -22,6 +22,7 @@ function resetStore() {
     manualQueryPending: false,
     manualQueryError: null,
     editRevision: 0,
+    tripInitialized: true,
     monitorLoops: 0,
     hits: [],
     notifications: [],
@@ -35,6 +36,16 @@ function resetStore() {
 describe("MonitorPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
+
+  test("automation still shows both flags without the removed adjustment link", () => {
+    railwatchStore.setState({ config: { ...defaultConfig, auto_submit: true, auto_alternate: false } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    const card = screen.getByRole("heading", { name: "自动化" }).closest<HTMLElement>(".st-automation-flags")!;
+    expect(within(card).getByText("自动提交").parentElement?.textContent).toContain("已开启");
+    expect(within(card).getByText("自动候补").parentElement?.textContent).toContain("关闭");
+    expect(within(card).queryByRole("button", { name: "调整自动化" })).toBeNull();
+    expect(screen.queryByText("调整自动化")).toBeNull();
+  });
 
   test("running date strategy comes from the launch snapshot", () => {
     railwatchStore.setState({ config: { ...defaultConfig, date_strategy: "inventory_first" },
@@ -109,6 +120,20 @@ describe("MonitorPage", () => {
     await user.click(screen.getByRole("button", { name: /将选中车次加入行程/ }));
     expect(railwatchStore.getState().config.train_code).toBe("G202, G101");
     expect(railwatchStore.getState().status.current_config.train_code).toBe("G101");
+  });
+
+  test("results cannot be added to the trip before the saved trip loads", async () => {
+    const snapshot = querySnapshot();
+    railwatchStore.setState({ config: { ...queryConfig, train_code: "" }, tripInitialized: false,
+      queryConfig, queryViews: { first: { owner: "manual", latest: snapshot, success: snapshot } }, results: snapshot.rows,
+    });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("checkbox", { name: /选择.*G101/ }));
+    await user.click(screen.getByRole("button", { name: /将选中车次加入行程/ }));
+    expect(screen.getByText(/已保存的行程尚未加载/)).toBeTruthy();
+    expect(railwatchStore.getState().config.train_code).toBe("");
+    expect(railwatchStore.getState().editRevision).toBe(0);
   });
 
   test("keeps monitor controls gated by query and monitoring state", async () => {

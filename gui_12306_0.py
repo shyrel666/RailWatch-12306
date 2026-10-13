@@ -30,6 +30,7 @@ from railwatch_dates import expand_travel_dates
 from railwatch_query import FillResult, fill_result, QueryExecutor, FILL_QUERY_FORM_JS, DISMISS_DIALOG_JS, query_snapshot, query_conditions
 from railwatch_row_parser import RowParser, TRAIN_CODE_PATTERN, DISPLAY_SEATS
 from railwatch_selectors import (
+    ALTERNATE_ACTION_JS,
     ALTERNATE_BUTTON_SELECTORS,
     BOOK_BUTTON_SELECTORS,
     QUERY_BUTTON_ID,
@@ -166,7 +167,9 @@ class QueryConfig:
     
     # 候补订单功能
     auto_alternate: bool = False  # 是否启用无票时自动候补
-    alternate_deadline: str = ""  # 候补截止时间，如 "18:00"
+    alternate_deadline: str = "开车前1小时"  # 只选择官方页面实际提供的截止项
+    alternate_accept_new_trains: bool = False
+    alternate_new_train_windows: List[dict] = field(default_factory=list)
     alternate_mode: str = "single"
     alternate_max_combinations: int = 5
     order_watch_enabled: bool = True
@@ -207,6 +210,8 @@ class QueryConfig:
             "passenger_selections": self.passenger_selections,
             "auto_alternate": self.auto_alternate,
             "alternate_deadline": self.alternate_deadline,
+            "alternate_accept_new_trains": self.alternate_accept_new_trains,
+            "alternate_new_train_windows": self.alternate_new_train_windows,
             "alternate_mode": self.alternate_mode,
             "alternate_max_combinations": self.alternate_max_combinations,
             "order_watch_enabled": self.order_watch_enabled,
@@ -245,7 +250,9 @@ class QueryConfig:
             passengers=data.get("passengers", ""),
             passenger_selections=data.get("passenger_selections", []),
             auto_alternate=data.get("auto_alternate", False),
-            alternate_deadline=data.get("alternate_deadline", ""),
+            alternate_deadline=data.get("alternate_deadline", "开车前1小时"),
+            alternate_accept_new_trains=data.get("alternate_accept_new_trains", False),
+            alternate_new_train_windows=data.get("alternate_new_train_windows", []),
             alternate_mode=data.get("alternate_mode", "single"),
             alternate_max_combinations=data.get("alternate_max_combinations", 5),
             order_watch_enabled=data.get("order_watch_enabled", True),
@@ -407,29 +414,36 @@ class StationCodeResolver:
         self.cache_path = os.path.join(base_dir, CACHE_FILE)
         self._name2code: Optional[Dict[str, str]] = None
         self._search_index: Optional[Tuple[List[dict], bool]] = None
+        self._load_lock = threading.RLock()
 
     def load(self) -> Dict[str, str]:
         """加载站点编码映射"""
-        if self._name2code is not None:
-            return self._name2code
-
-        # 优先读缓存
-        if os.path.exists(self.cache_path):
-            try:
-                with open(self.cache_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if not isinstance(loaded, dict) or not all(isinstance(name, str) and isinstance(code, str)
-                                                          for name, code in loaded.items()):
-                    raise ValueError("站码缓存格式无效")
-                self._name2code = loaded
-                self.log(f"✅ 站点编码缓存已加载：{len(self._name2code)} 条")
+        # Loaded codes are swapped in whole, so a running query never waits for a refresh.
+        names = self._name2code
+        if names is not None:
+            return names
+        # Queries and station search share one resolver, including its first download.
+        with self._load_lock:
+            if self._name2code is not None:
                 return self._name2code
-            except (json.JSONDecodeError, IOError, ValueError) as e:
-                self.log(f"⚠️ 缓存读取失败，将重新下载：{e}")
 
-        # 下载 station_name.js
-        self._name2code = self._download_and_parse()
-        return self._name2code
+            # 优先读缓存
+            if os.path.exists(self.cache_path):
+                try:
+                    with open(self.cache_path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if not isinstance(loaded, dict) or not all(isinstance(name, str) and isinstance(code, str)
+                                                              for name, code in loaded.items()):
+                        raise ValueError("站码缓存格式无效")
+                    self._name2code = loaded
+                    self.log(f"✅ 站点编码缓存已加载：{len(self._name2code)} 条")
+                    return self._name2code
+                except (json.JSONDecodeError, IOError, ValueError) as e:
+                    self.log(f"⚠️ 缓存读取失败，将重新下载：{e}")
+
+            # 下载 station_name.js
+            self._name2code = self._download_and_parse()
+            return self._name2code
     
     def _download_and_parse(self) -> Dict[str, str]:
         """下载并解析站点数据"""
@@ -516,10 +530,11 @@ class StationCodeResolver:
         if not needle:
             return {"items": [], "warning": None}
         try:
-            names = self.load()
+            with self._load_lock:
+                names = self.load()
+                records, old_cache = self._load_search_index(names)
         except Exception as exc:
             return {"items": [], "warning": f"站码缓存不可用，请检查网络后重试；仍可手动输入完整站名。原因：{exc}"}
-        records, old_cache = self._load_search_index(names)
         matches = [entry for entry in records if any(needle in str(entry.get(key, "")).lower()
                    for key in ("name", "pinyin", "initials"))]
         matches.sort(key=lambda entry: (0 if entry["name"].lower() == needle else
@@ -530,6 +545,7 @@ class StationCodeResolver:
 
     def refresh(self) -> dict:
         """Explicit user refresh; a failed download leaves the old cache intact."""
+        # Download without the load lock: queries keep using the current codes meanwhile.
         names = self._download_and_parse()
         self._name2code = names
         return {"count": len(names)}
@@ -737,7 +753,8 @@ class TicketMonitor(BaseHandler):
             find_alternate_button=self._find_alternate_button,
         )
         self.order_page = OrderPage(driver, self.should_stop, self._poll_wait, self._mark, log=self.log,
-                                    poll_interval=0.05 if cfg.get("timer_enabled") else 0.1)
+                                    poll_interval=0.05 if cfg.get("timer_enabled") else 0.1,
+                                    trip_route=(cfg.get("from_station_cn", ""), cfg.get("to_station_cn", "")))
         self.submit_flow.order_page = self.order_page
         self.alternate_flow.order_page = self.order_page
 
@@ -745,6 +762,10 @@ class TicketMonitor(BaseHandler):
         if self.order_journal:
             marker = self.order_journal.record_telemetry if stage in ("query_click", "query_result") else self.order_journal.mark
             marker(self.run_id, stage, getattr(self, "_intent_id", ""), detail)
+            if stage == "alternate_form" and self.on_order:
+                pending = self.order_journal.pending()
+                if pending and pending["intent"]["intent_id"] == getattr(self, "_intent_id", ""):
+                    self.on_order(OrderIntent.from_dict(pending["intent"]), OrderResult("submitting", review=detail or {}))
 
     def _execute_order(self, hit):
         self._timing_step("pre_submit")
@@ -1046,6 +1067,7 @@ class TicketMonitor(BaseHandler):
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:
         self._query_timing = PhaseTiming()
         self._query_timing.step("prepare")
+        self._query_hit = False
         self._date_revisit_ms = None
         self._snapshot_query_id = uuid.uuid4().hex
         self._query_invalidated = False
@@ -1078,6 +1100,7 @@ class TicketMonitor(BaseHandler):
                 self.order_journal.record_telemetry(self.run_id, "query_timing", detail={
                     "query_id": self._snapshot_query_id, "date": self._snapshot_config.get("date", ""),
                     "status": ("invalid" if self._query_invalidated else self.last_query.get("status", "unconfirmed")),
+                    "hit": getattr(self, "_query_hit", False),
                     "revisit_ms": self._date_revisit_ms, "steps": steps})
             except Exception:
                 pass  # Optional diagnostics cannot change query or order decisions.
@@ -1235,6 +1258,7 @@ class TicketMonitor(BaseHandler):
                 self._needs_navigation = True
                 self._sleep(interval)
                 return False
+            self._query_hit = True  # Diagnostics only: lets the dashboard mark the query that found the ticket.
             if action_type == "alternate" or (self.auto_submit and action_btn):
                 return self._execute_order(hit)
             self._finish_query_timing()
@@ -1372,10 +1396,7 @@ class TicketMonitor(BaseHandler):
             return None
         try:
             cell = row.find_element(By.CSS_SELECTOR, f"td[id^='{prefix}_']")
-            for button in cell.find_elements(By.CSS_SELECTOR, "a,button,div"):
-                if (button.text.strip() == "候补" and button.is_displayed() and button.is_enabled()
-                        and button.get_attribute("aria-disabled") != "true"):
-                    return button
+            return self.driver.execute_script(ALTERNATE_ACTION_JS + "return rwAlternateAction(arguments[0]);", cell)
         except NoSuchElementException:
             pass
         return None

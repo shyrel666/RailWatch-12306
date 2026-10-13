@@ -1,4 +1,4 @@
-export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "订单中心" | "系统设置" | "关于";
+export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "订单中心" | "运行复盘" | "系统设置" | "关于";
 
 export type AppInfo = {
   appVersion: string;
@@ -30,6 +30,8 @@ export type RailWatchConfig = {
   passenger_selections?: { name: string; ticket_type: "adult" | "student" | "child" | "unknown"; identity_hint: string }[];
   auto_alternate: boolean;
   alternate_deadline: string;
+  alternate_accept_new_trains?: boolean;
+  alternate_new_train_windows?: NewTrainWindow[];
   alternate_mode?: "single" | "multiple";
   alternate_max_combinations?: number;
   order_watch_enabled?: boolean;
@@ -50,9 +52,16 @@ export type RailWatchConfig = {
   query_jobs?: RailWatchConfig[];
 };
 
+export type NotificationSoundTone = "beep" | "chime" | "double" | "alarm" | "custom";
+export type NotificationSoundSelection = { sound_tone: NotificationSoundTone; sound_custom_file?: string };
+export type ImportedNotificationSound = { file: string; name: string };
+
 export type NotificationSettings = {
   desktop_urgent: boolean;
   sound_loop: boolean;
+  sound_tone?: NotificationSoundTone;
+  sound_custom_file?: string;
+  sound_custom_name?: string;
   window_attention?: boolean;
   server_chan_enabled: boolean;
   server_chan_key: string;
@@ -174,6 +183,7 @@ export type RailWatchStatus = {
 };
 
 export type OrderStage = {
+  review?: AlternateReview;
   status: string;
   stage?: string;
   label?: string;
@@ -186,15 +196,44 @@ export type OrderStage = {
   no_order?: boolean;
   next_check_at?: number | null;
   check_failures?: number;
-  intent?: { intent_id: string; kind: string; train_code: string; date: string; seat: string; choices?: AlternateChoice[] };
+  intent?: { intent_id: string; kind: string; train_code: string; date: string; seat: string; choices?: AlternateChoice[];
+    deadline?: string; new_train_windows?: NewTrainWindow[] };
 };
 
 export type AlternateChoice = { train_code: string; date: string; from_station: string; to_station: string; seat: string };
+export type NewTrainWindow = { date: string; start_hour: number; end_hour: number };
+export type AlternateReview = {
+  source?: "official_page";
+  observed_at?: number;
+  from_station?: string;
+  to_station?: string;
+  /** Stations configured in the trip the options were read for (may be city-level). */
+  trip_from_station?: string;
+  trip_to_station?: string;
+  dates?: string[];
+  choices?: AlternateChoice[];
+  deadline?: string;
+  deadline_options?: string[];
+  deadline_reselection?: boolean;
+  passenger_count?: number;
+  success_rate?: number | null;
+  success_rate_status?: "available" | "unavailable" | "loading" | "stale";
+  success_rate_observed_at?: number | null;
+  prepay_amount?: string;
+  amount_observed_at?: number;
+  standing?: string;
+  quiet_car?: boolean;
+  new_train_windows?: NewTrainWindow[];
+};
+export type AlternateOptionsResult = { snapshot: AlternateReview | null; warning: string | null };
 
 /** M5 read models. A missing official ID/time is null, not guessed from history. */
 export type OfficialOrderStatus = "pending_payment" | "active" | "fulfilled" | "cancelled" | "expired" | "failed";
 
 export type OrderHistorySummary = {
+  review?: AlternateReview;
+  deadline?: string;
+  new_train_windows?: NewTrainWindow[];
   choices?: AlternateChoice[];
   next_check_at?: number | null;
   check_failures?: number;
@@ -400,17 +439,14 @@ export type UpdateCheckSuccess = {
   publishedAt: string;
   releaseUrl: string;
   assets: UpdateAsset[];
-  cached?: boolean;
-  stale?: boolean;
-  warning?: string;
-  source?: "api" | "manifest" | "redirect" | "cache" | "stale-cache" | "updater";
+  source?: "updater";
 };
 
 export type UpdateCheckFailure = {
   ok: false;
   currentVersion: string;
   error: string;
-  code: "network" | "parse" | "no-assets" | "rate-limit" | "unknown";
+  code: "network" | "no-assets" | "unknown";
 };
 
 export type UpdateCheckResult = UpdateCheckSuccess | UpdateCheckFailure;
@@ -430,8 +466,15 @@ export type UpdateRuntimeState = {
   /** manual: macOS builds only check, then open the release page to download. */
   installMode?: "auto" | "manual";
   latestVersion?: string;
+  /** Release body as delivered by electron-updater: HTML for GitHub releases, Markdown otherwise. */
   releaseNotes?: string;
   downloadPercent?: number;
+  /** Bytes received, bytes expected and average speed of the running download. */
+  downloadTransferred?: number;
+  downloadTotal?: number;
+  downloadSpeed?: number;
+  /** Installer size listed in the release metadata. */
+  packageSize?: number;
   error?: string;
   result?: UpdateCheckResult;
 };
@@ -449,5 +492,17 @@ export type ConfirmRequestPayload = {
 export type ExportLocation = { name: string; path: string };
 export type ExportLocations = { directory: string; fileName: string; shortcuts: ExportLocation[] };
 export type ExportDirectory = { directory: string; parent: string; folders: ExportLocation[]; files: string[] };
+
+/** Latest query timings of one run, oldest first. `hit` is null for records written before it was tracked. */
+export type QueryPulseItem = { at: number; date: string; status: string; duration_ms: number | null; hit: boolean | null };
+export type QueryPulse = {
+  run_id: string | null;
+  started_at: number | null;
+  target_at: number | null;
+  trip: { from_station?: string; to_station?: string; date?: string };
+  recorded: number;
+  items: QueryPulseItem[];
+  active: boolean;
+};
 
 export type { RehearsalCheck, RehearsalReport, RunReviewSummary, RunReviewDetail } from "./lib/rehearsal";

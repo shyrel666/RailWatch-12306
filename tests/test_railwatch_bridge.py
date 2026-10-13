@@ -8,6 +8,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 
+def temp_data_dir(test):
+    """A data directory removed after the test, unlike a bare mkdtemp()."""
+    directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    test.addCleanup(directory.cleanup)
+    return directory.name
+
+
 class RailWatchBridgeContractTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "DPAPI is available on Windows")
     def test_legacy_secret_migration_failure_preserves_settings_and_allows_startup(self):
@@ -119,7 +126,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertFalse(config["timer_enabled"])
         self.assertFalse(config["auto_submit"])
         self.assertFalse(config["auto_alternate"])
-        self.assertEqual(config["alternate_deadline"], "开车前60分钟")
+        self.assertEqual(config["alternate_deadline"], "开车前1小时")
 
     def test_validate_config_matches_renderer_form_shape(self):
         from railwatch_bridge import validate_config
@@ -222,7 +229,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
     def test_start_monitor_requires_confirmation_when_dangerous_automation_enabled(self):
         from railwatch_bridge import RailWatchBridge
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
 
         result = bridge.start_monitor(
             {
@@ -276,7 +283,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 self.opened_url = url
 
         driver = FakeDriver()
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge._ensure_driver = lambda: driver
 
         state = bridge.open_login()
@@ -293,7 +300,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             def execute_async_script(self, script):
                 return "ok"
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.driver = FakeDriver()
 
         state = bridge.check_login()
@@ -304,7 +311,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
     def test_check_login_rejects_missing_browser_session(self):
         from railwatch_bridge import RailWatchBridge
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
 
         state = bridge.check_login()
 
@@ -324,7 +331,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             def execute_async_script(self, script):
                 return "ok"
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.driver = PromiseStyleDriver()
 
         state = bridge.check_login()
@@ -413,7 +420,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
     def test_bridge_caps_in_memory_logs(self):
         from railwatch_bridge import MAX_LOG_ENTRIES, RailWatchBridge
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
 
         for index in range(MAX_LOG_ENTRIES + 5):
             bridge.log(f"event-{index}")
@@ -435,7 +442,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
     def test_close_browser_rejects_while_monitoring(self):
         from railwatch_bridge import RailWatchBridge
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.is_monitoring = True
         bridge.driver = object()
 
@@ -468,7 +475,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             def execute_script(self, script):
                 self.keep_alive_calls += 1
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.driver = FakeDriver()
         bridge.is_monitoring = True
 
@@ -506,7 +513,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 return True
 
         prewarm_calls = []
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.is_monitoring = True
         bridge.server_time_sync.sync = lambda force=False: 0
         bridge._wait_for_target_time = lambda config: True
@@ -554,7 +561,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             def fill_query_form(self, from_cn, to_cn, date, timeout=10):
                 return True
 
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.is_monitoring = True
         bridge.server_time_sync.sync = lambda force=False: 0
         bridge._wait_for_target_time = lambda config: order.append("wait") or True
@@ -583,7 +590,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
         fills = []
         driver = Driver()
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge._param_filler = lambda from_cn, to_cn, date: fills.append((from_cn, to_cn, date)) or True
 
         bridge._prewarm_query_page(
@@ -598,7 +605,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         fills = []
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge._param_filler = lambda from_cn, to_cn, date: fills.append((from_cn, to_cn, date)) or True
 
         bridge._fill_query_page_from_config({"date": "2026-06-10"})
@@ -614,7 +621,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             def execute_async_script(self, script): return "expired"
 
         events = []
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
         bridge.driver = FakeDriver()
         bridge.notification_service = Mock()
 
@@ -732,7 +739,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 return True
 
         tracker = FakeDeviceIdTracker()
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.driver = FakeDriver()
         bridge.device_id_protector = tracker
 
@@ -756,7 +763,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 return True
 
         tracker = FakeDeviceIdTracker()
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         bridge.driver = FakeDriver()
         bridge.device_id_protector = tracker
 
@@ -768,7 +775,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         events = []
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
 
         bridge._handle_progress({"loop": 3, "date": "2026-06-10", "rows": [{"train": "G7", "raw": "G7 有"}]})
 
@@ -781,7 +788,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         events = []
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
 
         bridge._handle_hit(
             {
@@ -804,7 +811,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         from railwatch_bridge import RailWatchBridge
 
         events = []
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=events.append)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
 
         bridge._handle_human_action({"train_code": "G101", "title": "需要人工操作", "message": "请完成核验"})
 
@@ -929,7 +936,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
     def test_browser_uses_persistent_profile_bounded_transport_and_hygiene_only(self):
         from railwatch_bridge import RailWatchBridge
         driver = Mock()
-        bridge = RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
         options = Mock(arguments=[], experimental_options={})
         options.add_argument.side_effect = options.arguments.append
 
@@ -1008,7 +1015,7 @@ class StaleBrowserSessionTests(unittest.TestCase):
     def _bridge(self):
         from railwatch_bridge import RailWatchBridge
 
-        return RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        return RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
 
     def test_session_probe_only_treats_lost_sessions_as_dead(self):
         from railwatch_bridge import driver_session_alive, is_session_lost
@@ -1183,7 +1190,7 @@ class StaleBrowserSessionTests(unittest.TestCase):
 class DriverLaunchRecoveryTests(unittest.TestCase):
     def make_bridge(self):
         from railwatch_bridge import RailWatchBridge
-        return RailWatchBridge(data_dir=tempfile.mkdtemp(), event_callback=lambda event: None)
+        return RailWatchBridge(data_dir=temp_data_dir(self), event_callback=lambda event: None)
 
     def test_profile_locked_start_signature(self):
         from railwatch_bridge import RailWatchBridge

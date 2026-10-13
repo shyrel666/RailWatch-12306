@@ -6,9 +6,11 @@ from urllib.parse import urlparse
 from railwatch_alternate_plan import AlternateChoice, AlternatePlan
 from railwatch_policies import rate_bounds
 from railwatch_selectors import ACTION_READY_JS
+from railwatch_seats import alternate_seat_codes
 
 
 EDITOR_JS = ACTION_READY_JS + r"""
+const seatCodes=arguments[0];
 const root=document.querySelector('#popup');
 const shown=e=>!!(e && e.getClientRects().length && getComputedStyle(e).visibility==='visible');
 const text=e=>(e?.innerText||'').replace(/\s+/g,' ').trim();
@@ -38,10 +40,13 @@ for(const item of root.querySelectorAll('.ticket-result-item')){
       const ownDate=/^\d{8}$/.test(dated)?dated.slice(0,4)+'-'+dated.slice(4,6)+'-'+dated.slice(6):dated;
       rows.push({train,date:parts.length>1?ownDate:date,from:parts.length>1?parts[8]:stations[0],
         to:parts.length>1?parts[9]:stations[1],seat,button,
-        selected:button.classList.contains('is-active'),
+        selected:button.classList.contains('is-active'),supported:!!seatCodes[seat],
         enabled:rwActionReady(button)&&button.classList.contains('hbbtn')&&!button.classList.contains('btn-disabled'),
-        identity_ok:parts.length===1||([11,12].includes(parts.length)&&parts[2]===train
-          &&parts[8]===stations[0]&&parts[9]===stations[1]&&(seat!=='二等座'||parts[4]==='O'))});
+        // The immutable primary choice has no data-info. Clickable choices
+        // must carry the official seat code matching their visible label.
+        identity_ok:!!seatCodes[seat]&&(!button.hasAttribute('data-info')&&button.classList.contains('is-active')
+          &&button.classList.contains('btn-disabled')||[11,12].includes(parts.length)&&parts[2]===train
+          &&parts[8]===stations[0]&&parts[9]===stations[1]&&parts[4]===seatCodes[seat])});
     }
   }
 }
@@ -61,7 +66,7 @@ class AlternateEditor:
         self.last_query = None
 
     def read(self):
-        data = self.page.driver.execute_script(EDITOR_JS)
+        data = self.page.driver.execute_script(EDITOR_JS, alternate_seat_codes())
         origin = urlparse(data.get("url", ""))
         trusted = (origin.scheme == "https" and origin.hostname == "kyfw.12306.cn"
                    and origin.path == "/otn/view/lineUp_toPay.html") or (self.page.allow_fixture and origin.scheme == "file")
@@ -123,6 +128,10 @@ class AlternateEditor:
     def entries(data):
         entries = []
         for row in data.get("rows", []):
+            if not row.get("supported"):
+                if row.get("selected"):
+                    raise ValueError("已选候补席别尚未通过自动化验证")
+                continue
             try:
                 choice = AlternateChoice.from_detail(row)
             except (KeyError, TypeError, ValueError):
@@ -130,7 +139,7 @@ class AlternateEditor:
                     raise ValueError("已选候补组合无法完整读取") from None
                 continue
             if not row.get("identity_ok") or choice.date != data.get("date"):
-                raise ValueError("候补备选结果日期或车次已经变化")
+                raise ValueError("候补备选结果的日期、车次或席别身份无法确认")
             entries.append((choice, row))
         return entries
 

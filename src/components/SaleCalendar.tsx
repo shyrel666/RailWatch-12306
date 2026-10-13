@@ -5,6 +5,7 @@ import { beijingTimestamp, calendarDays, countdown, presaleDays, SALE_TIME_SOURC
 import { todayIso, isoDaysFromToday, getTripDateStatus } from "../lib/tripDate";
 import { useStationSaleTimes } from "../lib/useStationSaleTimes";
 import { railwatchApi } from "../lib/railwatchApi";
+import { Hint } from "./DisplayPrimitives";
 
 type Props = { station: string; tripDate: string; windowDays?: number; now: number };
 export function SaleCalendar({ station: rawStation, tripDate, windowDays, now }: Props) {
@@ -25,13 +26,12 @@ export function SaleCalendar({ station: rawStation, tripDate, windowDays, now }:
   return (
     <section className="sale-calendar" aria-label="购票日历与起售时间">
       <div className="section-heading">
-        <h2><CalendarDays size={16} /> 购票日历与起售时间</h2>
-        <span className="subtle-label">北京时间 · 含今天 {days} 天</span>
+        <h2><CalendarDays size={16} /> 购票日历
+          <Hint text="按预售规则与车站起售时刻推算，不代表当前有余票；实际安排以 12306 及车站公告为准。倒计时使用电脑系统时钟。" /></h2>
+        <span className="subtle-label">预售期 <strong className="mono">{today.slice(5)} — {frontier.slice(5)}</strong> · {days} 天</span>
       </div>
       <div className="sale-calendar-body">
         <div className="sale-calendar-dates">
-          <p className="sale-calendar-range">当前预售窗口 <strong>{today.slice(5)} — {frontier.slice(5)}</strong></p>
-          <p className="sale-calendar-caption">最远日期需等出发站起售；点击日期查看开售安排。</p>
           <div className="sale-calendar-grid" role="group" aria-label="乘车日期">
             {dates.map(date => {
               const day = saleDay(date, now, days, info);
@@ -60,13 +60,12 @@ export function SaleCalendar({ station: rawStation, tripDate, windowDays, now }:
           {detail.saleAt !== null && detail.saleAt > now && detail.state !== "expired" && <p className="sale-calendar-countdown">
             距起售 <strong>{countdown(detail.saleAt, now)}</strong>
           </p>}
-          {!station ? <p>在行程设置中填写完整出发站名后，可查询起售时间。</p>
+          {!station ? <p>在行程设置中填写出发站后显示起售时间。</p>
             : loading && !info ? <p>正在核对官方起售时间…</p>
               : issue ? <p className="sale-calendar-warning" role="status">{issue}</p>
-                : !detail.time ? <p>暂无适用于该开售日期的明确起售时刻，请前往官方核对。</p> : null}
+                : !detail.time ? <p>暂无该日的明确起售时刻，请前往官方核对。</p> : null}
           <div className="sale-calendar-source">
-            <span>来源：12306 起售时间查询</span>
-            <span>{info?.checked_at != null ? `获取于 ${beijingTimestamp(info.checked_at * 1000)}` : "尚未取得官方数据"}</span>
+            <span>{info?.checked_at != null ? `12306 · 获取于 ${beijingTimestamp(info.checked_at * 1000)}` : "尚未取得官方数据"}</span>
             <Button type="text" size="small" onClick={() => {
               setLinkError(false);
               void railwatchApi.openExternal(SALE_TIME_SOURCE)
@@ -76,7 +75,6 @@ export function SaleCalendar({ station: rawStation, tripDate, windowDays, now }:
           </div>
         </aside>
       </div>
-      <p className="sale-calendar-footnote">按预售规则与车站起售时刻计算，不代表当前有余票；实际发售安排以 12306 及车站公告为准。倒计时使用电脑系统时钟。</p>
     </section>
   );
 }

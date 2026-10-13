@@ -1,4 +1,4 @@
-import type { AppInfo, BridgeEvent, ConfirmRequestPayload, UpdateCheckResult, UpdateRuntimeState } from "../types";
+import type { AppInfo, BridgeEvent, ConfirmRequestPayload, NotificationSoundSelection, UpdateCheckResult, UpdateRuntimeState } from "../types";
 
 const missingElectronMessage = "Electron bridge is not available.";
 
@@ -32,6 +32,19 @@ export const railwatchApi = {
   },
   stopUrgentAlert() {
     window.railwatch?.stopUrgentAlert();
+  },
+  previewAlertSound(selection: NotificationSoundSelection) {
+    if (!window.railwatch) return Promise.reject(new Error("请在桌面应用中试听提示音。"));
+    if (!window.railwatch.previewAlertSound) return Promise.reject(new Error("请重启桌面应用后使用提示音试听。"));
+    return window.railwatch.previewAlertSound(selection);
+  },
+  stopAlertSoundPreview() {
+    window.railwatch?.stopAlertSoundPreview?.();
+  },
+  importAlertSound() {
+    if (!window.railwatch) return Promise.reject(new Error("请在桌面应用中导入提示音。"));
+    if (!window.railwatch.importAlertSound) return Promise.reject(new Error("请重启桌面应用后导入提示音。"));
+    return window.railwatch.importAlertSound();
   },
   onConfirmRequest(callback: (request: ConfirmRequestPayload) => void) {
     if (!window.railwatch) {

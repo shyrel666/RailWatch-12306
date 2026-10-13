@@ -2,7 +2,13 @@ import { contextBridge, ipcRenderer } from "electron";
 import { isRailWatchCommand } from "./ipcSecurity";
 import type { ConfirmationRequestPayload } from "./confirmationBridge";
 
+// Remember the show event even when the renderer's modules are still loading.
+const windowShown = new Promise<void>((resolve) => {
+  ipcRenderer.once("railwatch:window-shown", () => resolve());
+});
+
 contextBridge.exposeInMainWorld("railwatch", {
+  whenWindowShown: () => windowShown,
   command: <T>(command: string, payload: Record<string, unknown> = {}) => {
     if (!isRailWatchCommand(command)) {
       return Promise.reject(new Error(`Unsupported RailWatch command: ${command}`));
@@ -20,6 +26,9 @@ contextBridge.exposeInMainWorld("railwatch", {
   getExportLocations: (defaultPath?: string) => ipcRenderer.invoke("railwatch:export-locations", defaultPath),
   listExportDirectory: (directory: string) => ipcRenderer.invoke("railwatch:export-directory", directory),
   prepareLogExport: (directory: string, fileName: string) => ipcRenderer.invoke("railwatch:prepare-log-export", directory, fileName),
+  previewAlertSound: (selection: { sound_tone: string; sound_custom_file?: string }) => ipcRenderer.invoke("railwatch:preview-alert-sound", selection),
+  stopAlertSoundPreview: () => ipcRenderer.send("railwatch:stop-sound-preview"),
+  importAlertSound: () => ipcRenderer.invoke("railwatch:import-alert-sound"),
   stopUrgentAlert: () => {
     ipcRenderer.send("railwatch:stop-alert");
   },
