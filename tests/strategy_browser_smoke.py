@@ -48,11 +48,31 @@ class StrategyBrowserTests(unittest.TestCase):
         cls.driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": ["*12306.cn*"]})
         script = """
         const initial = __INITIAL__;
+        const now = () => Date.now() / 1000;
+        const loadConfig = () => JSON.parse(localStorage.getItem('test-config') || JSON.stringify(initial));
         window.railwatch = {
+          whenWindowShown: async () => {},
           command: async (command, payload) => {
-            if (command === 'loadConfig') return JSON.parse(localStorage.getItem('test-config') || JSON.stringify(initial));
-            if (command === 'saveConfig') { localStorage.setItem('test-config', JSON.stringify(payload.config)); return payload.config; }
+            if (command === 'loadConfig') return loadConfig();
+            if (command === 'saveConfig') {
+              localStorage.setItem('test-config', JSON.stringify(payload.config));
+              localStorage.setItem('test-saved-at', String(now()));
+              return payload.config;
+            }
+            if (command === 'loadTripState') return {saved_config:loadConfig(),
+              saved_at:Number(localStorage.getItem('test-saved-at')) || null,
+              draft:{status:'missing', draft:null, warning:null}};
+            if (command === 'saveTripDraft') return {schema_version:1, revision:payload.revision, saved_at:now(), config:payload.config};
+            if (command === 'loadTripChoices') return {recent_routes:[], favorites:[]};
+            if (command === 'searchStations') return {items:[], warning:null};
+            if (command === 'stationSaleTimes') return {station:payload.station, status:'available',
+              schedules:[{station_name:payload.station, station_code:'BJP', sale_time:'10:00', start_date:'2010-01-01', stop_date:'2099-12-31'}],
+              checked_at:now(), expires_at:now() + 3600, retry_at:now() + 60, source_url:'', warning:null};
+            if (command === 'readAlternateOptions') return {snapshot:null, warning:null};
+            if (command === 'rehearsalHistory') return {items:[]};
             if (command === 'loadPreferences') return {theme:'light'};
+            if (command === 'savePreferences') return {theme:'light', ...payload};
+            if (command === 'taskActivity') return {state:'idle', run_id:null, operation:null, unresolved_order:false, checked_at:now()};
             if (command === 'getRuntimeInfo') return {
               app_display_name:'RailWatch 12306', app_version:'0.3.2', data_dir:'本地测试',
               core_available:true, state:{phase:'idle', hits:[], monitoring:false, environment_ready:true,
@@ -60,12 +80,23 @@ class StrategyBrowserTests(unittest.TestCase):
             };
             return {};
           },
+          stageDraft: () => {},
           onEvent: () => () => {},
+          onConfirmRequest: () => () => {},
+          respondConfirmation: () => {},
           onUpdateState: () => () => {},
           stopUrgentAlert: () => {},
+          checkUpdate: async () => ({ok:false, currentVersion:'0.3.2', error:'离线测试', code:'network'}),
           getUpdateState: async () => ({phase:'not-available', currentVersion:'0.3.2'}),
+          installUpdate: async () => ({ok:false}),
           getAppInfo: async () => ({appVersion:'0.3.2', platform:'win32'}),
-          openExternal: async () => ({ok:true})
+          openExternal: async () => ({ok:true}),
+          getExportLocations: async () => ({directory:'', fileName:'railwatch-events.txt', shortcuts:[]}),
+          listExportDirectory: async directory => ({directory, parent:'', folders:[], files:[]}),
+          prepareLogExport: async () => null,
+          previewAlertSound: async () => ({duration_ms:0}),
+          stopAlertSoundPreview: () => {},
+          importAlertSound: async () => null
         };
         """.replace("__INITIAL__", json.dumps(default_config(), ensure_ascii=False))
         cls.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
