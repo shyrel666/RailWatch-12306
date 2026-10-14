@@ -6,7 +6,8 @@ LABELS = {"wake": "唤醒迟到", "first_query": "首次查询", "query": "查�
           "readback": "下单页与核对", "confirm": "确认弹窗", "official": "官方处理",
           "alternate_open": "候补路径准备", "alternate_submit": "候补核对", "alternate_official": "候补处理"}
 
-ORDER_STEP_LABELS = {"page_load": "打开并等待下单页", "alternatives": "选择并核对候补组合", "passengers": "选择乘车人",
+ORDER_STEP_LABELS = {"page_load": "打开并等待下单页", "alternatives": "选择并核对候补组合",
+                     "people_wait": "等待乘车人列表", "passengers": "选择乘车人",
                      "seats": "选择席别", "deadline": "选择候补截止时间", "readback": "提交前核对",
                      "submit": "提交操作", "confirmation_wait": "等待确认弹窗",
                      "confirmation_action": "操作确认弹窗", "result_wait": "等待并核对订单结果"}
@@ -14,10 +15,40 @@ ORDER_STEP_LABELS = {"page_load": "打开并等待下单页", "alternatives": "�
 QUERY_STEP_LABELS = {"prepare": "查询前准备", "query": "查询及结果就绪", "snapshot": "读取余票快照",
                      "decision": "筛选车次与席别", "publish": "更新显示与最终检查", "pre_submit": "保存意图与下单准备"}
 
+# Most recent query rounds summarized, and rounds after the wake read to find
+# the first valid result; run_events loads both.
+QUERY_WINDOW = 200
+FIRST_QUERY_ROUNDS = 30
+
+
+def first_valid_query(events, target_at, wake):
+    """Sale time to the first valid result that no longer shows the pre-sale state.
+
+    Recorded only, never complete-history evidence. None when the rounds right
+    after the wake are not all known or none of them produced such a result."""
+    if target_at is None or wake is None or not wake.get("detail", {}).get("first_query_known", True):
+        return None
+    rounds = [e.get("detail", {}) for e in events
+              if e["stage"] == "query_timing" and e["sequence"] > wake["sequence"]][:FIRST_QUERY_ROUNDS]
+    presale = retries = 0
+    for index, detail in enumerate(rounds, 1):
+        sale_retry = detail.get("sale_retry") if isinstance(detail.get("sale_retry"), dict) else {}
+        if detail.get("status") == "not_on_sale" or sale_retry.get("evidence"):
+            presale += 1
+            retries += sale_retry.get("retry") is not None
+            continue
+        fetched = detail.get("fetched_at")
+        if detail.get("status") in ("ok", "empty") and type(fetched) in (int, float) and math.isfinite(fetched):
+            return {"offset_ms": round((fetched - target_at) * 1000, 1), "round": index,
+                    "presale_rounds": presale, "sale_retries": retries}
+    return None
+
 
 def query_timing_summary(events):
     """Summarize only recorded valid queries; incomplete history stays explicit."""
-    records = [e.get("detail", {}) for e in events if e["stage"] == "query_timing"]
+    # Events are in sequence order; the first rounds after the wake read for
+    # first_valid_query stay out of this recent window.
+    records = [e.get("detail", {}) for e in events if e["stage"] == "query_timing"][-QUERY_WINDOW:]
     valid = [r for r in records if r.get("status") in ("ok", "empty")]
     phases, dates = {}, {}
     def number(value):
@@ -36,12 +67,16 @@ def query_timing_summary(events):
             if name in QUERY_STEP_LABELS and name not in seen and number(value):
                 phases.setdefault(name, []).append(value)
                 seen.add(name)
+    resettles = []
     for record in records:
         # Cadence describes acknowledged clicks, including failed query responses.
         value, travel_date = record.get("revisit_ms"), record.get("date")
         if isinstance(travel_date, str) and travel_date and number(value):
             dates.setdefault(travel_date, []).append(value)
-    return {"recorded_queries": len(records), "valid_queries": len(valid), "window_limit": 200,
+        if isinstance(record.get("resettle"), list):
+            resettles += [item for item in record["resettle"] if isinstance(item, dict)]
+    return {"recorded_queries": len(records), "valid_queries": len(valid), "window_limit": QUERY_WINDOW,
+            "resettle": {"attempts": len(resettles), "accepted": sum(item.get("ok") is True for item in resettles)},
             "phases": [{"id": key, "label": label, **summary(phases[key])}
                        for key, label in QUERY_STEP_LABELS.items() if key in phases],
             "date_revisits": [{"date": key, **summary(values)} for key, values in sorted(dates.items())]}
@@ -170,6 +205,7 @@ def build_run_review(events, report=None):
             "segments": segments, "slowest": max(known, key=lambda s: s["duration_ms"])["label"] if known else None,
             "order_timings": order_timing_details(ordered),
             "query_timings": query_timing_summary(ordered),
+            "first_valid_query": first_valid_query(ordered, target_at, wake),
             "preparation_margin_ms": margin, "query_median_ms": median(rounds) if rounds and first_known else None,
             "history_complete": all(s["duration_ms"] is not None for s in segments),
             "note": "未记录的阶段不推测补齐；可能未命中、未执行对应路径，或查询遥测已按 20,000 条上限清理。官方处理为本机观察时间。",

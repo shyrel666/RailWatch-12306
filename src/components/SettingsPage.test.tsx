@@ -75,6 +75,8 @@ describe("SettingsPage", () => {
     const checkLogin = screen.getByRole("button", { name: /检查登录/ });
     expect(login.hasAttribute("disabled")).toBe(true);
     expect(checkLogin.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("status").textContent).toContain("首次使用可能需要下载 Chrome 或驱动");
+    expect(screen.getByRole("button", { name: "下载 ChromeDriver" }).hasAttribute("disabled")).toBe(true);
     await userEvent.click(login);
     await userEvent.click(checkLogin);
     expect(runCommand).not.toHaveBeenCalled();
@@ -82,6 +84,7 @@ describe("SettingsPage", () => {
     page.rerender(<SettingsPage busy={null} runCommand={runCommand} />);
     expect(login.hasAttribute("disabled")).toBe(false);
     expect(checkLogin.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "下载 ChromeDriver" }).hasAttribute("disabled")).toBe(false);
     await userEvent.click(login);
     expect(runCommand).toHaveBeenCalledWith("openLogin");
   });

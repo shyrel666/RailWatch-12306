@@ -17,14 +17,13 @@ vi.mock("./components/Shell", () => ({
 }));
 
 const checkEnvironment = vi.fn<() => Promise<RailWatchStatus>>();
+const getRuntimeInfo = vi.fn<() => Promise<typeof defaultRuntimeInfo>>();
+const loadTripState = vi.fn();
 let emitBridgeEvent: ((event: BridgeEvent) => void) | null = null;
 const command = vi.fn(async (name: string, _payload: Record<string, unknown> = {}) => {
   if (name === "checkEnvironment") return checkEnvironment();
-  if (name === "getRuntimeInfo") return defaultRuntimeInfo;
-  if (name === "loadTripState") return {
-    saved_config: defaultConfig, saved_at: null,
-    draft: { status: "missing", draft: null, warning: null },
-  };
+  if (name === "getRuntimeInfo") return getRuntimeInfo();
+  if (name === "loadTripState") return loadTripState();
   if (name === "loadPreferences") return {
     theme: "light", close_to_tray: false, auto_rehearsal: false, notification_settings: {},
   };
@@ -37,6 +36,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   emitBridgeEvent = null;
   checkEnvironment.mockReset().mockResolvedValue({ ...defaultStatus, environment_ready: true });
+  getRuntimeInfo.mockReset().mockResolvedValue(defaultRuntimeInfo);
+  loadTripState.mockReset().mockResolvedValue({
+    saved_config: defaultConfig, saved_at: null,
+    draft: { status: "missing", draft: null, warning: null },
+  });
   const initial = createRailWatchStore().getState();
   railwatchStore.setState({
     config: initial.config, status: initial.status, runtime: initial.runtime,
@@ -130,6 +134,60 @@ test("leaving during preparation cancels it, and reopening settings keeps the ma
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "检查环境" })); });
   expect(checkEnvironment).toHaveBeenCalledTimes(2);
   expect(screen.getAllByText("环境检查完成，运行环境已就绪。")).toHaveLength(1);
+});
+
+test.each(["getRuntimeInfo", "loadTripState"])("finishing startup %s keeps a slow environment check loading", async (startupCommand) => {
+  let finishStartup!: () => void;
+  const startup = new Promise<void>(resolve => { finishStartup = resolve; });
+  if (startupCommand === "getRuntimeInfo") {
+    getRuntimeInfo.mockImplementation(async () => { await startup; return defaultRuntimeInfo; });
+  } else {
+    loadTripState.mockImplementation(async () => {
+      await startup;
+      return { saved_config: defaultConfig, saved_at: null, draft: { status: "missing", draft: null, warning: null } };
+    });
+  }
+  let finishCheck!: (status: RailWatchStatus) => void;
+  checkEnvironment.mockImplementation(() => new Promise(resolve => { finishCheck = resolve; }));
+  await openApp();
+  fireEvent.click(screen.getByRole("button", { name: "检查环境" }));
+  await advance(1500);
+  expect(checkEnvironment).toHaveBeenCalledTimes(1);
+
+  await act(async () => { finishStartup(); });
+  await advance(60000);
+  const button = screen.getByRole("button", { name: /检查环境/ });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  expect(button.classList.contains("ant-btn-loading")).toBe(true);
+  expect(screen.queryByText("环境检查完成，运行环境已就绪。")).toBeNull();
+  expect(screen.getByRole("button", { name: /打开登录/ }).hasAttribute("disabled")).toBe(true);
+  fireEvent.click(button);
+  expect(checkEnvironment).toHaveBeenCalledTimes(1);
+
+  await act(async () => { finishCheck({ ...defaultStatus, environment_ready: true }); });
+  expect(button.hasAttribute("disabled")).toBe(false);
+  expect(button.classList.contains("ant-btn-loading")).toBe(false);
+  expect(screen.getByText("环境检查完成，运行环境已就绪。")).toBeTruthy();
+});
+
+test("returning through the dashboard does not start another environment check while the first is pending", async () => {
+  let finishCheck!: (status: RailWatchStatus) => void;
+  checkEnvironment.mockImplementation(() => new Promise(resolve => { finishCheck = resolve; }));
+  await openApp();
+  fireEvent.click(screen.getByRole("button", { name: "检查环境" }));
+  await advance(1500);
+
+  act(() => railwatchStore.getState().setActivePage("仪表盘"));
+  fireEvent.click(screen.getByRole("button", { name: "检查环境" }));
+  await advance(1500);
+  expect(checkEnvironment).toHaveBeenCalledTimes(1);
+  const button = screen.getByRole("button", { name: /检查环境/ });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  expect(button.classList.contains("ant-btn-loading")).toBe(true);
+
+  await act(async () => { finishCheck({ ...defaultStatus, environment_ready: true }); });
+  expect(button.hasAttribute("disabled")).toBe(false);
+  expect(button.classList.contains("ant-btn-loading")).toBe(false);
 });
 
 test("a fresh dashboard click gets a full delay after an earlier preparation was cancelled", async () => {

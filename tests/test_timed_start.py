@@ -139,6 +139,117 @@ class TimedStartTests(unittest.TestCase):
                 journal.record_telemetry("run", "regular_submit")
 
 
+def presale_row(train="G101", seats=None, **flags):
+    return {"train": train, "element": Mock(), "alternate_available": {},
+            "seats": {"二等座": "*", "一等座": "*", "商务座": "--", **(seats or {})},
+            "presale": {"stars": 2, "sale_text": True, "label": "12点起售", "book": False, **flags}}
+
+
+class SaleRetryTests(unittest.TestCase):
+    """Explicit pre-sale evidence shortens only a few queries right after the sale time."""
+
+    def monitor(self, rows=None, now=1000.5, **changes):
+        clock = Mock()
+        clock.server_timestamp.return_value = now
+        logs = []
+        monitor = TicketMonitor(Mock(), {**CONFIG, "train_code": "G101,G102", "seat_keyword": "二等座", **changes},
+                                server_time_sync=clock, log_callback=logs.append)
+        monitor.logs = logs
+        monitor.query_executor = Mock()
+        monitor.query_executor.execute.return_value = {"status": "ok"}
+        monitor.query_executor.current.return_value = True
+        monitor._fill_query_params = Mock(return_value=True)
+        monitor._dismiss_query_blockers = Mock(return_value="未到起售时间")
+        monitor._find_hit_row = Mock(return_value=None)
+        monitor.row_parser.snapshot_rows = Mock(return_value=[presale_row()] if rows is None else rows)
+        monitor._sleep = Mock()
+        return monitor
+
+    def waits(self, monitor, rounds, interval=3):
+        for loop in range(1, rounds + 1):
+            self.assertFalse(monitor._run_single_loop(loop, interval))
+        return [call.args[0] for call in monitor._sleep.call_args_list]
+
+    def test_presale_rows_retry_after_one_second_up_to_the_limit(self):
+        monitor = self.monitor()
+        self.assertEqual(self.waits(monitor, 3), [1, 1, 3])
+        self.assertIn("官方页面仍显示未开售，1 秒后重查（1/2）", monitor.logs)
+        self.assertIn("官方页面仍显示未开售，1 秒后重查（2/2）", monitor.logs)
+        monitor._find_hit_row.assert_called()  # Matching still inspects every round.
+
+    def test_retry_applies_only_within_the_window_after_the_sale_time(self):
+        for now, waits in ((999.0, [3]), (1000.0, [1]), (1010.0, [1]), (1010.5, [3]), (1050.0, [3])):
+            with self.subTest(now=now):
+                self.assertEqual(self.waits(self.monitor(now=now), 1), waits)
+
+    def test_prompt_counts_only_when_the_query_was_sent_and_a_local_prompt_reloads(self):
+        for requests, waits, reload in ((1, [1], False), (0, [3], True), (None, [3], False)):
+            with self.subTest(requests=requests):
+                monitor = self.monitor()
+                monitor.query_executor.execute.return_value = {
+                    "status": "not_on_sale", "reason": "未到起售时间", "requests": requests}
+                self.assertEqual(self.waits(monitor, 1), waits)
+                self.assertIs(monitor._needs_navigation, reload)
+                monitor.row_parser.snapshot_rows.assert_not_called()
+                monitor.query_executor.execute.return_value = {"status": "ok"}
+                self.waits(monitor, 1)
+                self.assertEqual(monitor.driver.get.call_count, int(reload))
+
+    def test_rate_limit_and_human_action_disable_fast_retries(self):
+        monitor = self.monitor()
+        monitor.query_executor.execute.return_value = {"status": "rate_limited", "retry_after_seconds": 5,
+                                                       "reason": "HTTP 429"}
+        self.assertFalse(monitor._run_single_loop(1, 3))
+        monitor.query_executor.execute.return_value = {"status": "ok"}
+        self.assertFalse(monitor._run_single_loop(2, 3))
+        waits = [call.args[0] for call in monitor._sleep.call_args_list]
+        self.assertGreaterEqual(waits[0], 5)
+        self.assertEqual(waits[1], 3)
+        monitor = self.monitor()
+        monitor._signal_human_action("", "请完成核验")
+        self.assertEqual(self.waits(monitor, 1), [3])
+
+    def test_partial_missing_or_empty_rows_are_not_presale_evidence(self):
+        cases = {
+            "one row bookable": [presale_row(), presale_row("G102", {"二等座": "有"}, sale_text=False, book=True)],
+            "one row sold out": [presale_row(), presale_row("G102", {"二等座": "无"})],
+            "one row waitlist": [presale_row(), {**presale_row("G102"), "alternate_available": {"二等座": True}}],
+            "booking link": [presale_row(book=True)],
+            "no sale label": [presale_row(sale_text=False, label=None)],
+            "no target rows": [presale_row("G103")],
+            "no rows": [],
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.waits(self.monitor(rows), 1), [3])
+        monitor = self.monitor()
+        monitor.query_executor.execute.return_value = {"status": "empty"}
+        self.assertEqual(self.waits(monitor, 1), [3])
+        # Without a train filter every visible row is a target row.
+        self.assertEqual(self.waits(self.monitor([presale_row("G103")], train_code=""), 1), [1])
+
+    def test_faster_configured_and_untimed_cadences_are_unchanged(self):
+        # Smart rate off can query faster than the retry; the retry never slows it.
+        monitor = self.monitor(smart_rate=False)
+        self.assertEqual(self.waits(monitor, 1, interval=.8), [.8])
+        self.assertIn("官方页面仍显示未开售，0.8 秒后重查（1/2）", monitor.logs)
+        monitor = self.monitor(timer_enabled=False)
+        self.assertEqual(self.waits(monitor, 1), [3])
+        monitor.query_executor.execute.return_value = {"status": "not_on_sale", "requests": 1}
+        self.assertEqual(self.waits(monitor, 2), [3, 3, 3])
+        self.assertFalse(any("重查" in line for line in monitor.logs))
+
+    def test_evidence_and_retry_are_recorded_with_the_query(self):
+        monitor = self.monitor()
+        monitor.order_journal = Mock()
+        self.waits(monitor, 3)
+        details = [call.kwargs["detail"] for call in monitor.order_journal.record_telemetry.call_args_list
+                   if call.args[1] == "query_timing"]
+        self.assertEqual([detail["sale_retry"] for detail in details],
+                         [{"evidence": "rows", "retry": 1}, {"evidence": "rows", "retry": 2},
+                          {"evidence": "rows", "retry": None}])
+
+
 class OvernightWorkerTests(unittest.TestCase):
     def run_worker(self, date_range, *, wake_at="2026-10-04T08:00:00+08:00"):
         directory = tempfile.TemporaryDirectory()
@@ -165,7 +276,7 @@ class OvernightWorkerTests(unittest.TestCase):
 
         def make_monitor(*args, **kwargs):
             monitor = TicketMonitor(*args, **kwargs)
-            def query(*_):
+            def query(*_, **__):
                 queries.append((clock[0], monitor.cfg["date"]))
                 task.cancel.set()
                 return {"status": "cancelled"}

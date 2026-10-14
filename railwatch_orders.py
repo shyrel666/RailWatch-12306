@@ -13,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from railwatch_alternate_plan import AlternateChoice, AlternatePlan
+from railwatch_run_review import FIRST_QUERY_ROUNDS, QUERY_WINDOW
 from railwatch_alternate_options import normalize_windows
 
 
@@ -221,8 +222,13 @@ class OrderJournal:
             db.row_factory = sqlite3.Row
             rows = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage NOT IN ('query_click','query_result') AND stage!='query_timing' ORDER BY sequence", (run_id,)))
             # A bounded recent window keeps review reads small even on long runs.
-            timings = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_timing' ORDER BY sequence DESC LIMIT 200", (run_id,)))
+            timings = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_timing' ORDER BY sequence DESC LIMIT ?", (run_id, QUERY_WINDOW)))
             wake = next((row["sequence"] for row in rows if row["stage"] == "scheduler_wake"), 0)
+            if wake:
+                # The first rounds after the wake show when the sale actually opened.
+                timings = list({row["sequence"]: row for row in timings + list(db.execute(
+                    "SELECT * FROM order_events WHERE run_id=? AND stage='query_timing' AND sequence>? ORDER BY sequence LIMIT ?",
+                    (run_id, wake, FIRST_QUERY_ROUNDS)))}.values())
             hit = next((row["sequence"] for row in rows if row["stage"] in ("inventory_found", "no_inventory")), 2**63-1)
             clicks = list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_click' AND sequence>? ORDER BY sequence LIMIT 5", (run_id, wake)))
             clicks += list(db.execute("SELECT * FROM order_events WHERE run_id=? AND stage='query_click' AND sequence<? ORDER BY sequence DESC LIMIT 5", (run_id, hit)))
@@ -340,20 +346,21 @@ class OrderJournal:
         finally:
             db.close()
 
-    def begin(self, run_id, intent, config):
-        with self._ordered_events(), self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+    def begin(self, run_id, intent, config, found=None):
+        """Claim submission with one commit: telemetry, intent, submitting and the hit marker."""
+        with self._ordered_transaction() as db:
             if db.execute("SELECT 1 FROM orders WHERE unresolved=1").fetchone():
                 raise RuntimeError("存在未核对或待支付的订单，请先继续处理，禁止重复提交。")
             db.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?)", (
                 intent.intent_id, run_id, json.dumps(asdict(intent), ensure_ascii=False),
                 json.dumps(config, ensure_ascii=False), json.dumps(OrderResult("submitting").payload()), 1, time.time()))
-        self.mark(run_id, "submitting", intent.intent_id)
+            self._insert_event(db, run_id, intent.intent_id, "submitting")
+            if found:
+                self._insert_event(db, run_id, intent.intent_id, found)
 
     def bind_alternatives(self, intent):
         """Commit the exact selected set before any final submission is allowed."""
-        with self._ordered_events(), self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self._ordered_transaction() as db:
             row = db.execute("SELECT intent,config,result,run_id FROM orders WHERE intent_id=? AND unresolved=1",
                              (intent.intent_id,)).fetchone()
             if not row:
@@ -376,8 +383,7 @@ class OrderJournal:
     def record(self, intent, result):
         if result.status not in STAGES:
             raise ValueError("未知订单状态")
-        with self._ordered_events(), self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self._ordered_transaction() as db:
             row = db.execute("SELECT result,intent FROM orders WHERE intent_id=?", (intent.intent_id,)).fetchone()
             if not row:
                 raise RuntimeError("订单意图尚未持久化，不能确认结果")
@@ -617,8 +623,7 @@ class OrderJournal:
         if lease is None:
             raise RuntimeError("订单正在恢复，请稍后重选")
         try:
-            with self._ordered_events(), self.connection() as db:
-                db.execute("BEGIN IMMEDIATE")
+            with self._ordered_transaction() as db:
                 row = db.execute("SELECT intent,config,result,run_id FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone()
                 if not row:
                     raise ValueError("待处理订单已变化")
@@ -664,8 +669,7 @@ class OrderJournal:
         if lease is None:
             raise RuntimeError("订单正在恢复处理中，请等待任务结束后再操作。")
         try:
-            with self._ordered_events(), self.connection() as db:
-                db.execute("BEGIN IMMEDIATE")
+            with self._ordered_transaction() as db:
                 row = db.execute("SELECT run_id,result FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone()
                 if not row:
                     raise ValueError("待核对记录已变化，请刷新后重试。")
@@ -689,8 +693,7 @@ class OrderJournal:
             if lease is None:
                 return False
             try:
-                with self._ordered_events(), self.connection() as db:
-                    db.execute("BEGIN IMMEDIATE")
+                with self._ordered_transaction() as db:
                     db.execute("UPDATE order_events SET stage='resume_released' WHERE stage='resume_claimed'")
                     if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
                         return False
@@ -709,51 +712,75 @@ class OrderJournal:
             if self._resume_owner is None or self._resume_owner[:2] != (run_id, intent_id):
                 return
             try:
-                with self._ordered_events(), self.connection() as db:
+                with self._ordered_transaction() as db:
                     db.execute("UPDATE order_events SET stage='resume_released' WHERE run_id=? AND intent_id=? AND stage='resume_claimed'", (run_id, intent_id))
             finally:
                 self._resume_owner[2].close()
                 self._resume_owner = None
 
     @contextmanager
-    def _ordered_events(self):
-        # Hold ownership through the commit, not just buffer removal. A review
-        # read can flush concurrently with the monitor and must not let a later
-        # result/transaction marker overtake the query that produced it.
+    def _ordered_transaction(self):
+        """One immediate transaction that also carries the buffered telemetry.
+
+        Telemetry is inserted first, so its sequence precedes the caller's
+        marker, and it shares the marker's single commit. Hold the buffer
+        through the commit: a concurrent review flush must not let a later
+        marker overtake the query that produced it. Pruning is left to
+        flush_telemetry so it never runs on the submission path.
+        """
         with self._telemetry_guard:
+            batch, self._telemetry_batch = self._telemetry_batch, []
             try:
-                self.flush_telemetry()
-            except sqlite3.Error:
-                # Diagnostics must not prevent a durable submission marker
-                # from making its own write attempt.
-                pass
-            yield
+                with self.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if batch:
+                        try:
+                            db.execute("SAVEPOINT telemetry")
+                            db.executemany("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) "
+                                           "VALUES(?,?,?,?,?,?)", batch)
+                            db.execute("RELEASE telemetry")
+                        except sqlite3.Error:
+                            # Diagnostics must not prevent the durable marker.
+                            if db.in_transaction:
+                                db.execute("ROLLBACK TO telemetry")
+                                db.execute("RELEASE telemetry")
+                            else:
+                                db.execute("BEGIN IMMEDIATE")
+                            self._telemetry_batch = batch + self._telemetry_batch
+                            batch = []
+                    yield db
+            except BaseException:
+                # The whole transaction rolled back; keep its telemetry.
+                self._telemetry_batch = batch + self._telemetry_batch
+                raise
+
+    @staticmethod
+    def _insert_event(db, run_id, intent_id, stage, detail=None):
+        return db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
+                          (run_id, intent_id, stage, time.time(), time.monotonic(),
+                           json.dumps(detail or {}, ensure_ascii=False))).lastrowid
 
     def mark(self, run_id, stage, intent_id="", detail=None):
-        with self._ordered_events(), self.connection() as db:
+        with self._ordered_transaction() as db:
             if stage == "alternate_confirm_attempt":
-                db.execute("BEGIN IMMEDIATE")
                 valid = db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1 AND json_extract(intent,'$.kind')='alternate'",
                                    (intent_id,)).fetchone()
                 submitted = db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage='alternate_submit'", (intent_id,)).fetchone()
                 if not valid or not submitted or self._confirmation_pending(db, intent_id):
                     raise RuntimeError("候补确认已尝试或意图无效，请仅核对原订单")
             if stage == "alternate_confirm_rejected":
-                db.execute("BEGIN IMMEDIATE")
                 if not self._confirmation_pending(db, intent_id):
                     raise RuntimeError("没有可撤回的候补确认尝试")
             if stage in ("regular_submit", "alternate_submit"):
-                db.execute("BEGIN IMMEDIATE")
                 if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
                     raise RuntimeError("提交意图已失效")
                 if db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND (stage IN ('regular_submit','alternate_submit') OR (stage='resume_claimed' AND run_id<>?)) LIMIT 1", (intent_id, run_id)).fetchone():
                     raise RuntimeError("提交已开始或由其他恢复任务持有，请核对原订单")
-            cursor = db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) VALUES(?,?,?,?,?,?)",
-                                (run_id, intent_id, stage, time.time(), time.monotonic(), json.dumps(detail or {}, ensure_ascii=False)))
+            sequence = self._insert_event(db, run_id, intent_id, stage, detail)
             if stage == "alternate_form":
                 db.execute("UPDATE orders SET result=json_set(result,'$.review',json(?)) WHERE intent_id=?",
                            (json.dumps(detail or {}, ensure_ascii=False), intent_id))
-            return cursor.lastrowid
+            return sequence
 
     def latest_alternate_options(self):
         with self.connection() as db:
@@ -762,7 +789,12 @@ class OrderJournal:
         return json.loads(row[0]) if row else None
 
     def record_telemetry(self, run_id, stage, intent_id="", detail=None):
-        """Buffer non-critical timing; submission ownership is always synchronous."""
+        """Buffer non-critical timing; submission ownership is always synchronous.
+
+        Never writes: a query click must not wait for the disk. The monitor
+        flushes during its waits (flush_due_telemetry) and markers carry the
+        buffer in their own commit.
+        """
         if stage not in BUFFERED_TELEMETRY_STAGES:
             raise ValueError("仅查询及定时唤醒遥测事件可以批量写入")
         with self._telemetry_guard:
@@ -771,12 +803,14 @@ class OrderJournal:
             self._telemetry_batch.append(event)
             if len(self._telemetry_batch) > self._telemetry_limit:
                 self._telemetry_batch = self._telemetry_batch[-self._telemetry_limit:]
-            if stage not in ("scheduler_wake", "query_timing") and len(self._telemetry_batch) >= self._telemetry_batch_size:
-                try:
-                    self.flush_telemetry()
-                except sqlite3.Error:
-                    return False
         return True
+
+    def flush_due_telemetry(self):
+        """Flush once a batch has accumulated; callers use idle waits."""
+        with self._telemetry_guard:
+            if len(self._telemetry_batch) < self._telemetry_batch_size:
+                return 0
+            return self.flush_telemetry()
 
     def flush_telemetry(self):
         with self._telemetry_guard:

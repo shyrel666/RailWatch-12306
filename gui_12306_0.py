@@ -47,7 +47,7 @@ from railwatch_preferences import atomic_write_json
 from railwatch_seats import seat_prefix
 from railwatch_task import is_session_lost
 from railwatch_date_plan import DatePlan
-from railwatch_policies import DATE_STRATEGIES
+from railwatch_policies import DATE_STRATEGIES, QUERY_STRATEGIES
 from railwatch_timing import PhaseTiming
 
 
@@ -94,7 +94,8 @@ CACHE_FILE = "station_codes_cache.json"
 STATION_SEARCH_FILE = "station_search_cache.json"
 USER_CONFIG_FILE = "user_config.json"
 
-# 仅明确未起售提示在冲刺期间使用短重试，其他故障遵循正常退避。
+# 非定时任务前 5 轮、关闭智能限速时，未起售提示后的短重试。定时任务的起售窗口
+# 不用它，改按策略 sale_start 处理（见 TicketMonitor._sale_retry_delay）。
 BURST_RETRY_SLEEP_SECONDS = 1.0
 
 def _read_float(value: object, fallback: float) -> float:
@@ -699,6 +700,11 @@ class TicketMonitor(BaseHandler):
         self._candidate_cooldowns = {}
         self._prepared = False
         self._last_query_started = None
+        self._query_clicked_at = None
+        self._sale_retries = 0
+        self._sale_retry_disabled = False
+        self._sale_retry = None
+        self._resettles = []
         self.query_executor = QueryExecutor(driver, self.should_stop, self._poll_wait, lambda: self.tick()) if param_filler else None
         self.notify = notify_callback or (lambda title, msg: print(title, msg, flush=True) if title.isascii() and msg.isascii() else _safe_print(title, msg))
         self.progress = progress_callback
@@ -794,13 +800,14 @@ class TicketMonitor(BaseHandler):
                     self.on_order(intent, OrderResult("submitting"))
             self.order_page.bind_intent = bind_intent
         try:
-            self.order_journal.begin(self.run_id, intent, saved_config)
+            # Intent, submitting and the hit marker share one commit before any click.
+            self.order_journal.begin(self.run_id, intent, saved_config,
+                                     "no_inventory" if action == "alternate" else "inventory_found")
         except Exception:
             self._signal_human_action(train, "无法取得订单提交权限，请先核对未完成订单和本地存储")
             return True
         if self.on_order:
             self.on_order(intent, OrderResult("submitting"))
-        self._mark("no_inventory" if action == "alternate" else "inventory_found")
         self._finish_query_timing()
         result = (self.alternate_flow.try_alternate_order(row, train, seat, intent=intent)
                   if action == "alternate" else self.submit_flow.try_auto_submit(button, seat, intent=intent))
@@ -890,6 +897,15 @@ class TicketMonitor(BaseHandler):
     def _sleep(self, seconds):
         self._finish_query_timing()
         self.tick(status="backoff", next_query_at=time.time() + seconds)
+        if seconds >= 0.2 and self.order_journal:
+            # Write buffered query telemetry while idle, never before a click.
+            # The flush counts toward this wait so the cadence does not drift.
+            deadline = time.monotonic() + seconds
+            try:
+                if self.order_journal.flush_due_telemetry():
+                    seconds = max(0.0, deadline - time.monotonic())
+            except Exception:
+                pass  # Optional diagnostics cannot change the query cadence.
         self._poll_wait(seconds)
 
     def _fill_query_params(self, force: bool = False) -> bool:
@@ -1064,6 +1080,47 @@ class TicketMonitor(BaseHandler):
             delay = max(0.0, interval - (time.monotonic() - self._last_query_started))
         self._sleep(delay)
 
+    def _sale_retry_delay(self, evidence, interval):
+        """Start-to-start delay after this round. Shorter only on explicit pre-sale
+        evidence shortly after the sale time, a bounded number of times per task."""
+        if not evidence or not self._sale_focus_active():
+            return interval
+        policy = QUERY_STRATEGIES["sale_start"]
+        elapsed = self.server_time_sync.server_timestamp() - self.cfg["_target_timestamp"]
+        retry = None
+        if (not self._sale_retry_disabled and self._sale_retries < policy["presale_retry_limit"]
+                and 0 <= elapsed <= policy["presale_retry_window_seconds"]):
+            self._sale_retries += 1
+            retry = self._sale_retries
+        self._sale_retry = {"evidence": evidence, "retry": retry}
+        if retry is None:
+            return interval
+        # Never slower than the task's own cadence (smart rate off can be below 1s).
+        delay = min(policy["presale_retry_seconds"], interval)
+        self.log(f"官方页面仍显示未开售，{delay:g} 秒后重查（{retry}/{policy['presale_retry_limit']}）")
+        return delay
+
+    def _target_rows(self):
+        rows = self._row_snapshot or []
+        return [row for row in rows if not self.target_trains or row.get("train") in self.target_trains]
+
+    def _query_poll_interval(self):
+        settle = QUERY_STRATEGIES["query_settle"]
+        return settle["sale_poll_ms" if self._sale_focus_active() else "poll_ms"] / 1000
+
+    def _resettle(self, where):
+        """After a late re-render of this same round, wait for the page to settle
+        again instead of discarding the round; every ownership check still applies."""
+        started = time.monotonic()
+        status = self.query_executor.resettle(QUERY_STRATEGIES["query_settle"]["resettle_timeout_ms"] / 1000,
+                                              poll_interval=self._query_poll_interval())
+        status = status if status in ("ok", "empty") else None
+        self._resettles.append({"at": where, "ok": status is not None,
+                                "ms": round((time.monotonic() - started) * 1000, 1)})
+        if status:
+            self.last_query["status"] = status
+        return status
+
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:
         self._query_timing = PhaseTiming()
         self._query_timing.step("prepare")
@@ -1075,6 +1132,9 @@ class TicketMonitor(BaseHandler):
         self._snapshot_published = False
         self.last_query = {}
         self._last_query_started = None
+        self._query_clicked_at = None
+        self._sale_retry = None
+        self._resettles = []
         self._snapshot_config = dict(self.cfg)
         if self.travel_dates:
             self._snapshot_config["date"] = self._loop_date(loop_count)
@@ -1097,11 +1157,19 @@ class TicketMonitor(BaseHandler):
         steps = timing.finish()
         if self.order_journal:
             try:
+                target, clicked = self.cfg.get("_target_timestamp"), self._query_clicked_at
                 self.order_journal.record_telemetry(self.run_id, "query_timing", detail={
                     "query_id": self._snapshot_query_id, "date": self._snapshot_config.get("date", ""),
                     "status": ("invalid" if self._query_invalidated else self.last_query.get("status", "unconfirmed")),
                     "hit": getattr(self, "_query_hit", False),
-                    "revisit_ms": self._date_revisit_ms, "steps": steps})
+                    "revisit_ms": self._date_revisit_ms, "steps": steps,
+                    # Settle and pre-sale evidence for tuning and review only.
+                    "requests": self.last_query.get("requests"), "page": self.last_query.get("page_timing"),
+                    "presale": None if self._row_snapshot is None else self.row_parser.presale_summary(self._target_rows()),
+                    "sale_retry": self._sale_retry, "resettle": self._resettles or None,
+                    "fetched_at": self.last_query.get("fetched_at"),
+                    "sale_offset_ms": (round((clicked - target) * 1000, 1)
+                                       if all(type(value) in (int, float) for value in (target, clicked)) else None)})
             except Exception:
                 pass  # Optional diagnostics cannot change query or order decisions.
 
@@ -1159,7 +1227,8 @@ class TicketMonitor(BaseHandler):
         self._timing_step("query")
         if self.query_executor:
             self.tick(status="querying", next_query_at=None)
-            result = self.query_executor.execute(self._timed_query_click, int(self.cfg.get("query_timeout", 40)))
+            result = self.query_executor.execute(self._timed_query_click, int(self.cfg.get("query_timeout", 40)),
+                                                 poll_interval=self._query_poll_interval())
             self.last_query = result
             if result.get("status") in ("ok", "empty"): self._mark("query_result")
             status = result["status"]
@@ -1168,6 +1237,7 @@ class TicketMonitor(BaseHandler):
             if status not in ("ok", "empty"):
                 self._publish_query(error=result.get("reason") or {"not_on_sale": "尚未起售", "rate_limited": "查询限频", "server_backoff": "服务端要求等待"}.get(status, "本轮查询未完成"))
             if status in ("rate_limited", "server_backoff"):
+                self._sale_retry_disabled = True
                 reason = result.get("reason", f"查询收到 HTTP {result.get('http_status')}")
                 if self.rate_limiter:
                     if status == "rate_limited":
@@ -1194,8 +1264,14 @@ class TicketMonitor(BaseHandler):
                 if not self._dismiss_query_blockers():
                     self._signal_human_action("", "未起售提示无法关闭，请检查浏览器")
                     return True
+                requests = result.get("requests")
+                sent = type(requests) is int and requests >= 1
+                if type(requests) is int and requests == 0:
+                    # The page refused without asking the server, so its sale
+                    # state is local; reload it instead of hitting it again.
+                    self._needs_navigation = True
                 if self._sale_focus_active():
-                    self._wait_next_query(interval)
+                    self._wait_next_query(self._sale_retry_delay("prompt" if sent else None, interval))
                 else:
                     self._sleep(min(interval, BURST_RETRY_SLEEP_SECONDS) if is_burst_mode and not self.rate_limiter else interval)
                 return False
@@ -1206,7 +1282,9 @@ class TicketMonitor(BaseHandler):
                     self.rate_limiter.on_timeout()
                 self._sleep(max(interval, self.rate_limiter.get_interval() if self.rate_limiter else interval))
                 return False
-            if not self.query_executor.current():
+            # A timeout of 0 keeps the old rule: any change after completion voids the round.
+            if not self.query_executor.current() and not (
+                    QUERY_STRATEGIES["query_settle"]["resettle_timeout_ms"] and self._resettle("query")):
                 self._publish_query(error="查询条件或结果已改变，本轮结果无效")
                 self._needs_navigation = True
                 self._sleep(interval)
@@ -1290,7 +1368,8 @@ class TicketMonitor(BaseHandler):
             self._fallback_date = ""
             self.log("原订单日期暂无可用现票或候补入口，恢复正常日期轮询。")
         self.log("❌ 未命中目标票，继续监控...")
-        self._wait_next_query(interval)
+        presale = self.last_query.get("status") == "ok" and RowParser.all_presale(self._target_rows())
+        self._wait_next_query(self._sale_retry_delay("rows" if presale else None, interval))
         return False
 
     def _timed_query_click(self):
@@ -1300,6 +1379,7 @@ class TicketMonitor(BaseHandler):
         # not consume the interval between two actual query requests.
         if clicked:
             self._last_query_started = time.monotonic()
+            self._query_clicked_at = self.server_time_sync.server_timestamp()
             travel_date = self.cfg.get("date", "")
             previous = self._date_last_query.get(travel_date)
             self._date_revisit_ms = (round((self._last_query_started - previous) * 1000, 3)
@@ -1313,7 +1393,7 @@ class TicketMonitor(BaseHandler):
             if self.should_stop():
                 return None
             if self.query_executor and not self.query_executor.current():
-                if not attempt and self.query_executor.current(accept_revision=True):
+                if not attempt and self._resettle("scan"):
                     self._row_snapshot = self.row_parser.snapshot_rows(
                         list(dict.fromkeys([*DISPLAY_SEATS, *self.target_seats])))
                     continue
@@ -1323,7 +1403,7 @@ class TicketMonitor(BaseHandler):
             except StaleElementReferenceException:
                 if attempt:
                     raise
-                if self.query_executor and not self.query_executor.current(accept_revision=True):
+                if self.query_executor and not self._resettle("scan"):
                     raise
                 self._row_snapshot = self.row_parser.snapshot_rows(
                     list(dict.fromkeys([*DISPLAY_SEATS, *self.target_seats])))
@@ -1563,6 +1643,7 @@ class TicketMonitor(BaseHandler):
 
     def _signal_human_action(self, train_code: str, message: str) -> None:
         """停止自动化，把控制权交还给用户去完成核验。"""
+        self._sale_retry_disabled = True
         self.log(f"🙋 需要人工操作：{message}")
         try:
             self.driver.switch_to.window(self.driver.current_window_handle)

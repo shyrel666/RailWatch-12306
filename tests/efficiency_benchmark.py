@@ -5,6 +5,7 @@ No latency assertions: timings depend on the host. Railway requests are blocked.
 """
 import argparse
 from dataclasses import replace
+import inspect
 import json
 import math
 from pathlib import Path
@@ -79,6 +80,18 @@ def main():
             if index:
                 samples.append(sample)
         report["cases"]["query_response_50ms"] = summarize(samples)
+        # Sale-window polling; older source roots without it skip the case.
+        if "poll_interval" in inspect.signature(query_case.query.execute).parameters:
+            from railwatch_policies import QUERY_STRATEGIES
+            poll = QUERY_STRATEGIES["query_settle"]["sale_poll_ms"] / 1000
+            samples = []
+            for index in range(args.samples + 1):
+                query_case.setUp()
+                result, sample = measure(driver, lambda: query_case.query.execute(query_case.click, 3, poll_interval=poll))
+                assert result["status"] == "ok", result
+                if index:
+                    samples.append(sample)
+            report["cases"]["query_response_50ms_sale"] = summarize(samples)
         for count in (1, 5, 20, 100):
             samples = []
             for index in range(args.samples + 1):

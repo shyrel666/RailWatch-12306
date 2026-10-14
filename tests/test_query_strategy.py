@@ -5,7 +5,8 @@ from unittest.mock import Mock, patch
 from gui_12306_0 import ConfigManager, QueryConfig, TicketMonitor
 from railwatch_bridge import RailWatchBridge
 from railwatch_config_contract import default_config, validate_config
-from railwatch_policies import priority_defaults
+from railwatch_policies import (ORDER_POLICIES, QUERY_STRATEGIES, priority_defaults, validate_order_policies,
+                                validate_query_strategies)
 
 
 class QueryStrategyTests(unittest.TestCase):
@@ -79,6 +80,51 @@ class QueryStrategyTests(unittest.TestCase):
                 self.assertFalse(manager.save(changed))
             self.assertIn("disk full", manager.last_error)
             self.assertEqual(manager.load().from_station_cn, original.from_station_cn)
+
+
+class PolicyRangeTests(unittest.TestCase):
+    def test_packaged_passenger_wait_values_are_valid_and_out_of_range_values_fail_loading(self):
+        self.assertIs(validate_order_policies(ORDER_POLICIES), ORDER_POLICIES)
+        for key, value in (("people_ready_timeout_seconds", 0), ("people_ready_timeout_seconds", 30),
+                           ("people_stable_ms", 100), ("people_stable_ms", 2000)):
+            with self.subTest(key=key, value=value):
+                validate_order_policies({**ORDER_POLICIES, key: value})
+        for key, value in (("people_ready_timeout_seconds", -1), ("people_ready_timeout_seconds", 31),
+                           ("people_ready_timeout_seconds", True), ("people_ready_timeout_seconds", "10"),
+                           ("people_stable_ms", 99), ("people_stable_ms", 2001), ("people_stable_ms", None)):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                validate_order_policies({**ORDER_POLICIES, key: value})
+
+    def test_sale_start_and_settle_values_are_range_checked_at_load(self):
+        self.assertIs(validate_query_strategies(QUERY_STRATEGIES), QUERY_STRATEGIES)
+        def changed(section, key, value, strategies=QUERY_STRATEGIES):
+            return {**strategies, section: {**strategies[section], key: value}}
+        valid = (("sale_start", "presale_retry_seconds", 1), ("sale_start", "presale_retry_seconds", 3),
+                 ("sale_start", "presale_retry_limit", 0), ("sale_start", "presale_retry_limit", 3),
+                 ("sale_start", "presale_retry_window_seconds", 0), ("sale_start", "presale_retry_window_seconds", 30),
+                 ("query_settle", "quiet_ms", 50), ("query_settle", "quiet_ms", 300),
+                 ("query_settle", "poll_ms", 10), ("query_settle", "sale_poll_ms", 100),
+                 ("query_settle", "resettle_timeout_ms", 0), ("query_settle", "resettle_timeout_ms", 2000))
+        for section, key, value in valid:
+            with self.subTest(key=key, value=value):
+                validate_query_strategies(changed(section, key, value))
+        invalid = (("sale_start", "presale_retry_seconds", .5), ("sale_start", "presale_retry_seconds", 3.5),
+                   ("sale_start", "presale_retry_limit", 4), ("sale_start", "presale_retry_limit", 1.0),
+                   ("sale_start", "presale_retry_limit", True), ("sale_start", "presale_retry_window_seconds", 31),
+                   ("query_settle", "quiet_ms", 49), ("query_settle", "quiet_ms", 301),
+                   ("query_settle", "poll_ms", 0), ("query_settle", "sale_poll_ms", 101),
+                   ("query_settle", "resettle_timeout_ms", -1), ("query_settle", "resettle_timeout_ms", None))
+        for section, key, value in invalid:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                validate_query_strategies(changed(section, key, value))
+        # The retry ceiling follows the lowest floor across all modes.
+        lower = {**QUERY_STRATEGIES, "modes": {**QUERY_STRATEGIES["modes"],
+                 "fast": {**QUERY_STRATEGIES["modes"]["fast"], "min_interval": 2}}}
+        with self.assertRaises(ValueError):
+            validate_query_strategies(changed("sale_start", "presale_retry_seconds", 2.5, lower))
+        for section in ("sale_start", "query_settle"):
+            with self.subTest(missing=section), self.assertRaises(ValueError):
+                validate_query_strategies({key: value for key, value in QUERY_STRATEGIES.items() if key != section})
 
 
 if __name__ == "__main__":

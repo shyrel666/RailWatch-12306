@@ -6,6 +6,8 @@ import re
 import time
 import uuid
 
+from railwatch_policies import QUERY_STRATEGIES
+
 
 def query_conditions(config):
     split = lambda value: list(dict.fromkeys(item for item in re.split(r"[,，、;；\s]+", str(value or "").strip()) if item))
@@ -131,7 +133,7 @@ QUERY_BEGIN_JS = r"""
 // A DOM mutation alone (e.g. opening train details) is not query completion.
 if (!window.__railwatchTransport) {
   const urls = new WeakMap();
-  const begin = input => {
+  const begin = (input, transport) => {
     let url;
     try { url = new URL(input, location.href); } catch { return null; }
     if (url.origin !== location.origin || !/^\/otn\/leftTicket\/query[A-Za-z]*$/.test(url.pathname)) return null;
@@ -145,18 +147,27 @@ if (!window.__railwatchTransport) {
     }
     state.requests++;
     if (state.requests !== 1) state.invalidated = true;
-    return (status, retryAfter=null, responseDate=null) => {
-      if (window.__railwatchQuery !== state) {
-        if (window.__railwatchQuery) window.__railwatchQuery.invalidated = true;
-        return;
-      }
-      state.responseFinished = status >= 200 && status < 300;
-      if (!state.responseFinished) {
-        state.invalidated = true;
-        // Keep explicit throttling evidence even if another response interferes.
-        if (!state.failure || status === 429) state.failure = {
-          http_status:status, retry_after:retryAfter, response_date:responseDate
-        };
+    // Diagnostics keep only timestamps of the round's own request.
+    const first = state.requests === 1;
+    if (first) { state.sentAt = performance.now(); state.transport = transport; }
+    return {
+      respond() {
+        if (first && state.responseAt === null) state.responseAt = performance.now();
+      },
+      finish(status, retryAfter=null, responseDate=null) {
+        if (window.__railwatchQuery !== state) {
+          if (window.__railwatchQuery) window.__railwatchQuery.invalidated = true;
+          return;
+        }
+        if (first && state.loadendAt === null) state.loadendAt = performance.now();
+        state.responseFinished = status >= 200 && status < 300;
+        if (!state.responseFinished) {
+          state.invalidated = true;
+          // Keep explicit throttling evidence even if another response interferes.
+          if (!state.failure || status === 429) state.failure = {
+            http_status:status, retry_after:retryAfter, response_date:responseDate
+          };
+        }
       }
     };
   };
@@ -167,18 +178,25 @@ if (!window.__railwatchTransport) {
     return open.call(this, method, url, ...rest);
   };
   XMLHttpRequest.prototype.send = function(...args) {
-    const finish = begin(urls.get(this));
-    if (finish) this.addEventListener('loadend', () => finish(this.status,
-      this.getResponseHeader('Retry-After'), this.getResponseHeader('Date')), {once:true});
+    const track = begin(urls.get(this), 'xhr');
+    if (track) {
+      // Registered before the page's own post-send handlers, so this runs
+      // before a render done synchronously in the page's XHR callback.
+      this.addEventListener('readystatechange', () => { if (this.readyState === 4) track.respond(); });
+      this.addEventListener('loadend', () => track.finish(this.status,
+        this.getResponseHeader('Retry-After'), this.getResponseHeader('Date')), {once:true});
+    }
     return send.apply(this, args);
   };
   if (window.fetch) {
     const fetch = window.fetch;
     window.fetch = function(input, ...args) {
-      const finish = begin(typeof input === 'string' || input instanceof URL ? input : input.url);
+      const track = begin(typeof input === 'string' || input instanceof URL ? input : input.url, 'fetch');
       const result = fetch.call(this, input, ...args);
-      if (finish) result.then(response => finish(response.status,
-        response.headers.get('Retry-After'), response.headers.get('Date')), () => finish(0));
+      // The body is never read, so fetch's loadend is its headers: rendering
+      // then counts as late, which only makes the settle data conservative.
+      if (track) result.then(response => { track.respond(); track.finish(response.status,
+        response.headers.get('Retry-After'), response.headers.get('Date')); }, () => track.finish(0));
       return result;
     };
   }
@@ -186,8 +204,12 @@ if (!window.__railwatchTransport) {
 }
 window.__railwatchQuery?.observer?.disconnect();
 const token = arguments[0];
-const state = {token, changed:false, last:performance.now(), revision:0,
+const quiet = arguments[1];
+const armedAt = performance.now();
+const state = {token, changed:false, last:armedAt, revision:0, quiet:Number.isFinite(quiet) ? quiet : 300,
   requests:0, responseFinished:false, invalidated:false,
+  armedAt, transport:null, sentAt:null, responseAt:null, loadendAt:null,
+  lateCount:0, lateMax:0, gapMax:0, lastAfterResponse:null,
   conditions:['fromStation','toStation','train_date'].map(id => document.getElementById(id)?.value)};
 state.observer = new MutationObserver(records => {
   const table = document.getElementById('queryLeftTable');
@@ -202,7 +224,15 @@ state.observer = new MutationObserver(records => {
       (n.id === 'queryLeftTable' || n.querySelector?.('#queryLeftTable') ||
        (table?.contains(r.target) && (n.matches('tr[id^="ticket_"]') || n.querySelector('tr[id^="ticket_"]')))));
   });
-  if (relevant) { state.changed=true; state.last=performance.now(); state.revision++; }
+  if (!relevant) return;
+  const now = performance.now();
+  state.changed=true; state.last=now; state.revision++;
+  // Settle diagnostics only; completion still uses the quiet window below.
+  if (state.loadendAt !== null) { state.lateCount++; state.lateMax=Math.max(state.lateMax, now-state.loadendAt); }
+  if (state.responseAt !== null) {
+    if (state.lastAfterResponse !== null) state.gapMax=Math.max(state.gapMax, now-state.lastAfterResponse);
+    state.lastAfterResponse=now;
+  }
 });
 state.observer.observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['disabled','aria-busy']});
 window.__railwatchQuery = state;
@@ -216,7 +246,7 @@ QUERY_ARM_JS = (
     "const dialog=(function(){" + DIALOG_INSPECT_JS + "})();"
     "if(form.values.length!==5 || form.values.some(v=>v===null || v==='')) return {form,dialog,armed:false};"
     "if(dialog.kind!=='none') return {form,dialog,armed:false};"
-    "const armed=(function(){" + QUERY_BEGIN_JS + "}).call(null,arguments[0]);"
+    "const armed=(function(){" + QUERY_BEGIN_JS + "}).call(null,arguments[0],arguments[2]);"
     "return {form,dialog,armed};"
 )
 
@@ -231,8 +261,18 @@ const rows = table ? [...table.querySelectorAll('tr[id^="ticket_"]')] : [];
 const emptyBox = document.querySelector('#no_filter_ticket,#no_filter_ticket_6,[data-query-empty]');
 const empty = (emptyBox && emptyBox.getClientRects().length && /没有|未查询到|暂无/.test(emptyBox.textContent || ''))
  || (table && /没有符合条件|没有查询到|未查询到|暂无.*车次/.test(table.textContent || ''));
-const completed = state.responseFinished && state.changed && !loading && performance.now()-state.last >= 300;
-return {status:completed && rows.length ? 'ok' : completed && empty ? 'empty' : 'pending', revision:state.revision};
+const now = performance.now();
+const completed = state.responseFinished && state.changed && !loading && now-state.last >= state.quiet;
+const status = completed && rows.length ? 'ok' : completed && empty ? 'empty' : 'pending';
+const result = {status, revision:state.revision, requests:state.requests, responseFinished:state.responseFinished};
+if (status !== 'pending') {
+  const ms = value => value === null ? null : Math.round(value*10)/10;
+  const since = value => value === null ? null : ms(value-state.armedAt);
+  result.timing = {transport:state.transport, sent_ms:since(state.sentAt), response_ms:since(state.responseAt),
+    loadend_ms:since(state.loadendAt), last_change_ms:since(state.last), completed_ms:since(now),
+    late_count:state.lateCount, late_max_ms:ms(state.lateMax), gap_max_ms:ms(state.gapMax)};
+}
+return result;
 """
 
 
@@ -247,11 +287,12 @@ QUERY_OBSERVATION_JS = (
 
 
 class QueryExecutor:
-    def __init__(self, driver, stop_check=lambda: False, wait=None, tick=lambda: None):
+    def __init__(self, driver, stop_check=lambda: False, wait=None, tick=lambda: None, settle=None):
         self.driver = driver
         self.stop_check = stop_check
         self.wait = wait or time.sleep
         self.tick = tick
+        self.settle = {**QUERY_STRATEGIES["query_settle"], **(settle or {})}
         self.snapshot = None
         self.token = None
         self.revision = None
@@ -263,7 +304,7 @@ class QueryExecutor:
     def snapshot_form(self):
         return self.driver.execute_script(FORM_SNAPSHOT_JS, uuid.uuid4().hex)
 
-    def current(self, *, accept_revision=False):
+    def current(self):
         if self.stop_check():
             return False
         observation = self.observe()
@@ -272,19 +313,43 @@ class QueryExecutor:
         status = observation.get("status")
         if not isinstance(status, dict) or status.get("status") not in ("ok", "empty"):
             return False
-        if accept_revision:
-            self.revision = status.get("revision")
         return status.get("revision") == self.revision
+
+    def resettle(self, timeout, *, poll_interval=None):
+        """Accept this round's newer revision once the page is stable again.
+
+        Returns the settled status, or None. A different token, a second or failed
+        request, a form change or any dialog ends the wait without accepting.
+        With timeout 0 this is a single check of the page as it is now.
+        """
+        poll = self.settle["poll_ms"] / 1000 if poll_interval is None else poll_interval
+        deadline = time.monotonic() + max(0.0, timeout)
+        while not self.stop_check():
+            observation = self.observe()
+            status = observation.get("status")
+            if (observation.get("form") != self.snapshot or (observation.get("dialog") or {}).get("kind") != "none"
+                    or not isinstance(status, dict) or status.get("status") == "invalid"):
+                return None
+            if status.get("status") in ("ok", "empty"):
+                self.revision = status.get("revision")
+                return status["status"]
+            if time.monotonic() >= deadline:
+                return None
+            self.tick()
+            self.wait(poll)
+        return None
 
     def observe(self):
         value = self.driver.execute_script(QUERY_OBSERVATION_JS, self.token, uuid.uuid4().hex)
         return value if isinstance(value, dict) else {}
 
-    def execute(self, click, timeout):
+    def execute(self, click, timeout, *, poll_interval=None):
         if self.stop_check():
             return {"status": "cancelled"}
+        slow = self.settle["poll_ms"] / 1000
+        fast = slow if poll_interval is None else poll_interval
         self.token = uuid.uuid4().hex
-        armed = self.driver.execute_script(QUERY_ARM_JS, self.token, uuid.uuid4().hex)
+        armed = self.driver.execute_script(QUERY_ARM_JS, self.token, uuid.uuid4().hex, self.settle["quiet_ms"])
         if not isinstance(armed, dict):
             return {"status": "invalid", "reason": "无法准备本轮查询"}
         self.snapshot = armed.get("form")
@@ -311,9 +376,11 @@ class QueryExecutor:
             if observation.get("form") != self.snapshot:
                 return {"status": "invalid", "reason": "页面或查询条件已改变"}
             dialog = observation.get("dialog") or {"kind": "unknown", "text": "无法确认页面状态"}
-            if dialog["kind"] != "none":
-                return {"status": dialog["kind"], "reason": dialog["text"]}
             result = observation.get("status")
+            if dialog["kind"] != "none":
+                # Whether the page sent this round's query before showing the prompt.
+                return {"status": dialog["kind"], "reason": dialog["text"],
+                        "requests": result.get("requests") if isinstance(result, dict) else None}
             if isinstance(result, dict) and result.get("status") == "invalid":
                 http_status = result.get("http_status")
                 retry_after = parse_retry_after(result.get("retry_after"), result.get("response_date"))
@@ -323,8 +390,13 @@ class QueryExecutor:
                 return {**result, "reason": "本轮请求失败或有其他查询响应干扰"}
             if isinstance(result, dict) and result.get("status") in ("ok", "empty"):
                 self.revision = result.get("revision")
-                return {**result, "round_trip_ms": round((time.monotonic() - clicked_at) * 1000, 3), "query_id": self.token, "conditions": self.snapshot, "fetched_at": time.time()}
-            self.wait(0.1)
+                timing = result.pop("timing", None)
+                result.pop("responseFinished", None)
+                return {**result, "round_trip_ms": round((time.monotonic() - clicked_at) * 1000, 3), "query_id": self.token, "conditions": self.snapshot, "fetched_at": time.time(),
+                        "page_timing": timing if isinstance(timing, dict) else None}
+            # Faster polling only helps once the response is in; before that it
+            # would force layout on every poll while the page is still rendering.
+            self.wait(fast if isinstance(result, dict) and result.get("responseFinished") is True else slow)
         return {"status": "timeout", "reason": "未观察到本轮查询完成"}
 
 

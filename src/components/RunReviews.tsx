@@ -41,6 +41,7 @@ function Detail({ detail, busy }: { detail: RunReviewDetail; busy: boolean }) {
   const margin = detail.preparation_margin_ms ?? null;
   const timed = detail.target_at != null;
   const timings = detail.query_timings;
+  const firstValid = detail.first_valid_query ?? null;
   const orders = detail.order_timings ?? [];
   const travel = day(detail.trip?.date);
   return <article className="rv-detail" aria-label="复盘详情" aria-busy={busy || undefined}>
@@ -67,6 +68,9 @@ function Detail({ detail, busy }: { detail: RunReviewDetail; busy: boolean }) {
     </dl>
     <section className="rv-section" aria-label="阶段时间线">
       <h4>阶段时间线{timed ? <small>以起售时刻为 0</small> : <small>即时任务按阶段先后排列</small>}</h4>
+      {timed ? <p className="rv-section-note">{firstValid
+        ? `首个有效查询：起售后 ${seconds(firstValid.offset_ms)}，第 ${firstValid.round} 轮取得；此前 ${firstValid.presale_rounds} 轮仍显示未开售，其中快速重查 ${firstValid.sale_retries} 次。`
+        : "首个有效查询未记录：起售后的查询记录不完整，或尚未取得已开售的有效结果。"}</p> : null}
       <TimelineWaterfall segments={segments} prediction={detail.prediction ?? []} origin={timed ? "距起售" : undefined} />
     </section>
     {orders.length ? <section className="rv-section" aria-label="下单分步耗时">
@@ -80,7 +84,8 @@ function Detail({ detail, busy }: { detail: RunReviewDetail; busy: boolean }) {
     {timings?.recorded_queries ? <section className="rv-section" aria-label="查询分阶段统计">
       <h4>查询分阶段统计</h4>
       <p className="rv-section-note">最近最多{timings.window_limit}轮记录中，{timings.valid_queries}轮取得有效结果，共{timings.recorded_queries}轮有记录。
-        耗时包含本机操作与页面等待；未记录的阶段不补算，中断步骤可能只记录部分。P95表示95%的样本不超过此值，少量样本仅供参考。</p>
+        耗时包含本机操作与页面等待；未记录的阶段不补算，中断步骤可能只记录部分。P95表示95%的样本不超过此值，少量样本仅供参考。
+        {timings.resettle?.attempts ? `结果判定后页面又变化${timings.resettle.attempts}次，其中${timings.resettle.accepted}次重新稳定后继续使用本轮结果，其余整页重载。` : ""}</p>
       <div className="rv-subchart">
         <h5>有效查询各阶段耗时</h5>
         <TimingRangeChart rows={timings.phases} format={millis} label="有效查询各阶段耗时" />

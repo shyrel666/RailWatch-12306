@@ -30,10 +30,25 @@ function people(area,target,regular){
  el(target).innerHTML=names.map((name,i)=>`<input ${regular?`id="passenger_name_${i}"`:'class="name-input"'} readonly value="${name}">`+
    (regular?`<select id="seatType_${i}"><option>一等座</option><option>二等座</option></select><select id="ticketType_${i}"><option>成人票</option></select>`:'')).join('');
 }
-for(const input of el('normal_passenger_id').querySelectorAll('input'))input.onchange=()=>people('normal_passenger_id','normal-selected',true);
-for(const input of el('passenge_list').querySelectorAll('input'))input.onchange=()=>people('passenge_list','candidate-selected',false);
-el('book').onclick=()=>{show('regular');if(fixture.mode==='sold_out'){el('dialog').innerText='余票不足';show('dialog');}};
-el('candidate').onclick=()=>{fixture.kind='alternate';show('candidate-form');};
+function bindPeople(){
+ for(const input of el('normal_passenger_id').querySelectorAll('input'))input.onchange=()=>people('normal_passenger_id','normal-selected',true);
+ for(const input of el('passenge_list').querySelectorAll('input'))input.onchange=()=>people('passenge_list','candidate-selected',false);
+}
+bindPeople();
+// The official list arrives after the form shell (getPassengerDTOs). peopleDelay
+// renders it late; peopleStaged renders the last passenger first, the rest 200ms later.
+function renderPeopleLater(area){
+ if(fixture.peopleDelay==null&&!fixture.peopleStaged)return;
+ const list=el(area),rows=[...list.children];
+ list.replaceChildren();
+ const add=items=>{list.append(...items);bindPeople();};
+ setTimeout(()=>{
+  if(!fixture.peopleStaged)return add(rows);
+  add(rows.slice(-1));setTimeout(()=>add(rows.slice(0,-1)),200);
+ },fixture.peopleDelay||0);
+}
+el('book').onclick=()=>{show('regular');renderPeopleLater('normal_passenger_id');if(fixture.mode==='sold_out'){el('dialog').innerText='余票不足';show('dialog');}};
+el('candidate').onclick=()=>{fixture.kind='alternate';show('candidate-form');renderPeopleLater('passenge_list');};
 el('dafaultTime').onclick=()=>show('date_box');
 for(const item of el('date_box').children)item.onclick=()=>{el('dafaultTime').innerText=item.innerText;el('date_box').classList.add('hidden');};
 function record(state='待支付'){

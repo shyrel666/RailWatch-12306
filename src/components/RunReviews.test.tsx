@@ -33,6 +33,26 @@ test("query statistics chart sample counts and revisit intervals and keep a data
   expect(within(region).getByText(/少量样本仅供参考/)).toBeTruthy();
 });
 
+test("timed runs show the first valid query and late re-renders without guessing missing data", async () => {
+  const detail = (first_valid_query: unknown) => ({ run_id: "run-1", started_at: 1, target_at: 2, conclusion: "已停止",
+    segments: [], prediction: [], preparation_margin_ms: null, first_valid_query,
+    query_timings: { recorded_queries: 4, valid_queries: 3, window_limit: 200, phases: [], date_revisits: [],
+      resettle: { attempts: 3, accepted: 2 } } });
+  let current: unknown = { offset_ms: 2150, round: 3, presale_rounds: 2, sale_retries: 2 };
+  vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "runReviews" ?
+    { items: [{ run_id: "run-1", started_at: 1, target_at: 2, conclusion: "已停止" }], next_cursor: null } :
+    detail(current)) as never);
+  render(<RunReviews />);
+  const timeline = await screen.findByRole("region", { name: "阶段时间线" });
+  expect(within(timeline).getByText("首个有效查询：起售后 2.15 秒，第 3 轮取得；此前 2 轮仍显示未开售，其中快速重查 2 次。")).toBeTruthy();
+  const stats = screen.getByRole("region", { name: "查询分阶段统计" });
+  expect(within(stats).getByText(/结果判定后页面又变化3次，其中2次重新稳定后继续使用本轮结果/)).toBeTruthy();
+  cleanup();
+  current = null;
+  render(<RunReviews />);
+  expect(within(await screen.findByRole("region", { name: "阶段时间线" })).getByText(/首个有效查询未记录/)).toBeTruthy();
+});
+
 test("the newest run opens without a click and keeps an incomplete timeline explicit", async () => {
   const command = vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "runReviews" ?
     { items: [{ run_id: "run-1", started_at: 1, target_at: null, conclusion: "未命中", trip: { from_station: "北京", to_station: "上海" } }], next_cursor: null } :

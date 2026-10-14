@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 
 from gui_12306_0 import TicketMonitor
 from railwatch_bridge import RailWatchBridge
-from railwatch_query import query_snapshot
+from railwatch_policies import QUERY_STRATEGIES
+from railwatch_query import QueryExecutor, query_snapshot
 from railwatch_row_parser import RowParser
 
 
@@ -123,6 +124,101 @@ class MonitorSnapshotTests(unittest.TestCase):
             monitor._run_single_loop(1, 3)
         self.assertEqual(events[0]["snapshot"]["status"], "error")
         self.assertEqual(events[0]["rows"], [])
+
+    def test_late_render_is_waited_out_instead_of_reloading(self):
+        monitor, events, _ = self.monitor({"status": "ok", "fetched_at": 90})
+        checks = iter([False])  # Changed right after the early completion.
+        monitor.query_executor.current.side_effect = lambda: next(checks, True)
+        monitor.query_executor.resettle.return_value = "ok"
+        monitor.order_journal = Mock()
+        self.assertFalse(monitor._run_single_loop(1, 3))
+        self.assertFalse(monitor._needs_navigation)
+        monitor._find_hit_row.assert_called_once()
+        self.assertEqual(events[0]["snapshot"]["status"], "success")
+        self.assertEqual(events[0]["rows"][0]["seats"]["二等座"]["count"], 3)
+        detail = next(call.kwargs["detail"] for call in monitor.order_journal.record_telemetry.call_args_list
+                      if call.args[1] == "query_timing")
+        self.assertEqual([(item["at"], item["ok"]) for item in detail["resettle"]], [("query", True)])
+
+    def test_resettled_status_replaces_the_early_one(self):
+        monitor, events, _ = self.monitor({"status": "ok", "fetched_at": 90})
+        checks = iter([False])
+        monitor.query_executor.current.side_effect = lambda: next(checks, True)
+        monitor.query_executor.resettle.return_value = "empty"
+        self.assertFalse(monitor._run_single_loop(1, 3))
+        monitor.row_parser.snapshot_rows.assert_not_called()
+        monitor._find_hit_row.assert_not_called()
+        self.assertEqual((events[0]["status"], events[0]["rows"]), ("empty", []))
+
+    def test_failed_or_disabled_resettle_keeps_the_reload_path(self):
+        for timeout, settled in ((1000, None), (1000, "pending"), (0, "ok")):
+            with self.subTest(timeout=timeout, settled=settled), \
+                 patch.dict(QUERY_STRATEGIES["query_settle"], {"resettle_timeout_ms": timeout}):
+                monitor, events, _ = self.monitor({"status": "ok", "fetched_at": 90})
+                monitor.query_executor.current.return_value = False
+                monitor.query_executor.resettle.return_value = settled
+                self.assertFalse(monitor._run_single_loop(1, 3))
+                self.assertTrue(monitor._needs_navigation)
+                self.assertEqual(events[0]["snapshot"]["status"], "error")
+                self.assertEqual(monitor.query_executor.resettle.called, bool(timeout))
+                monitor._find_hit_row.assert_not_called()
+
+    def test_scan_resnapshots_after_resettling_and_uses_policy_timing(self):
+        monitor, events, _ = self.monitor({"status": "ok", "fetched_at": 90})
+        checks = iter([True, False])  # Stable after execute, changed before matching.
+        monitor.query_executor.current.side_effect = lambda: next(checks, True)
+        monitor.query_executor.resettle.return_value = "ok"
+        self.assertFalse(monitor._run_single_loop(1, 3))
+        self.assertEqual(monitor.row_parser.snapshot_rows.call_count, 2)
+        monitor._find_hit_row.assert_called_once()
+        timeout, = monitor.query_executor.resettle.call_args.args
+        self.assertEqual(timeout, QUERY_STRATEGIES["query_settle"]["resettle_timeout_ms"] / 1000)
+        self.assertEqual(monitor.query_executor.resettle.call_args.kwargs["poll_interval"],
+                         QUERY_STRATEGIES["query_settle"]["poll_ms"] / 1000)
+
+
+class ResettleTests(unittest.TestCase):
+    FORM = {"page": "one", "values": ["北京", "BJP", "上海", "SHH", "2026-09-22"]}
+
+    def executor(self, *statuses, form=None, dialog="none"):
+        driver = Mock()
+        driver.execute_script.side_effect = [{"form": form or self.FORM, "dialog": {"kind": dialog, "text": ""},
+                                              "status": status} for status in statuses]
+        executor = QueryExecutor(driver, wait=Mock())
+        executor.snapshot, executor.token, executor.revision = self.FORM, "token", 1
+        return executor
+
+    def test_accepts_this_round_only_once_the_page_is_stable_again(self):
+        executor = self.executor({"status": "pending", "revision": 2}, {"status": "ok", "revision": 3})
+        self.assertEqual(executor.resettle(1, poll_interval=.025), "ok")
+        self.assertEqual(executor.revision, 3)
+        executor.wait.assert_called_once_with(.025)
+        executor = self.executor({"status": "empty", "revision": 4})
+        self.assertEqual(executor.resettle(0), "empty")  # A zero timeout is a single check.
+        self.assertEqual(executor.driver.execute_script.call_count, 1)
+
+    def test_other_rounds_failed_requests_form_changes_and_dialogs_are_rejected(self):
+        cases = {"other token or second request": self.executor({"status": "invalid"}),
+                 "failed response": self.executor({"status": "invalid", "http_status": 500}),
+                 "form changed": self.executor({"status": "ok", "revision": 2},
+                                               form={**self.FORM, "values": self.FORM["values"][:4] + ["2026-09-23"]}),
+                 "dialog": self.executor({"status": "ok", "revision": 2}, dialog="human_action"),
+                 "unreadable": self.executor(None)}
+        for name, executor in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(executor.resettle(1))
+                self.assertEqual(executor.revision, 1)
+                executor.wait.assert_not_called()
+
+    def test_gives_up_when_the_page_keeps_changing_or_monitoring_stops(self):
+        executor = self.executor(*({"status": "pending", "revision": n} for n in (2, 3)))
+        with patch("railwatch_query.time.monotonic", side_effect=[0, .5, 1.1]):
+            self.assertIsNone(executor.resettle(1))
+        self.assertEqual(executor.revision, 1)
+        executor = self.executor({"status": "ok", "revision": 2})
+        executor.stop_check = lambda: True
+        self.assertIsNone(executor.resettle(1))
+        executor.driver.execute_script.assert_not_called()
 
 
 class ManualQuerySnapshotTests(unittest.TestCase):

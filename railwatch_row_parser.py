@@ -27,11 +27,13 @@ return [...table.querySelectorAll('tr[id^="ticket_"]')].filter(row => row.getCli
   const seats = {};
   const seat_indices = {};
   const alternate_available = {};
+  let stars = 0;
   for (const [name,prefix] of Object.entries(seatPrefixes)) {
     const index = headers.indexOf(name);
     if (index >= 0) seat_indices[name] = index;
     const cell = (prefix && row.querySelector('td[id^="'+prefix+'_"]')) || (index >= 0 ? row.cells[index] : null);
     seats[name] = cell ? cell.innerText.trim().replace(/\n/g,'') : null;
+    if (seats[name] === '*') stars++;
     // Waitlist actions must belong to the exact seat's prefixed cell.
     const alternateCell = prefix && row.querySelector('td[id^="'+prefix+'_"]');
     alternate_available[name] = !!rwAlternateAction(alternateCell);
@@ -43,7 +45,12 @@ return [...table.querySelectorAll('tr[id^="ticket_"]')].filter(row => row.getCli
   const arrival = texts('.ls span');
   const dayLabels = {'当日到达':0, '次日到达':1, '第三日到达':2, '第四日到达':3};
   const days = arrival.filter(value => Object.hasOwn(dayLabels, value));
-  return {element:row, train, raw:row.innerText.trim(), seats, seat_indices, alternate_available,
+  // Pre-sale markers only pace sale-start retries and diagnostics; matching never reads them.
+  const action = (row.cells[row.cells.length-1]?.innerText || '').replace(/\s+/g,'');
+  const saleText = /起售/.test(action);
+  const presale = {stars, sale_text:saleText, label:saleText ? action.slice(0,24) : null,
+    book:[...row.querySelectorAll('a')].some(a => (a.textContent || '').trim() === '预订')};
+  return {element:row, train, raw:row.innerText.trim(), seats, seat_indices, alternate_available, presale,
     from_station:stations.length === 2 ? stations[0] : null,
     to_station:stations.length === 2 ? stations[1] : null,
     departure_time:times.length === 2 ? times[0] : null,
@@ -108,6 +115,38 @@ class RowParser:
         result[field] = row.get(field)
       rows.append(result)
     return rows
+
+  @staticmethod
+  def presale_summary(snapshot) -> dict:
+    """Count pre-sale markers on the given rows; diagnostics only."""
+    summary = {"rows": 0, "sale_text_rows": 0, "star_rows": 0, "all_star_rows": 0, "book_rows": 0}
+    labels = set()
+    for row in snapshot:
+      flags = row.get("presale") if isinstance(row.get("presale"), dict) else {}
+      seats = [value for value in row.get("seats", {}).values() if value not in (None, "", "--")]
+      summary["rows"] += 1
+      summary["sale_text_rows"] += flags.get("sale_text") is True
+      summary["star_rows"] += bool(flags.get("stars"))
+      summary["all_star_rows"] += bool(seats) and all(value == "*" for value in seats)
+      summary["book_rows"] += flags.get("book") is True
+      if isinstance(flags.get("label"), str) and flags["label"]:
+        labels.add(flags["label"])
+    return {**summary, "labels": sorted(labels)[:3]}
+
+  @classmethod
+  def all_presale(cls, snapshot) -> bool:
+    """Explicit not-yet-on-sale evidence: at least one row, and every row shows a
+    sale-time label without a booking link. Any bookable, waitlist or sold-out
+    seat on any row means the page is no longer in the pre-sale state."""
+    def presale(row):
+      flags = row.get("presale") if isinstance(row.get("presale"), dict) else {}
+      if flags.get("sale_text") is not True or flags.get("book") is not False:
+        return False
+      if any(value is True for value in (row.get("alternate_available") or {}).values()):
+        return False
+      return all(cls.seat_availability(value)["status"] in ("unknown", "not_applicable")
+                 for value in (row.get("seats") or {}).values())
+    return bool(snapshot) and all(presale(row) for row in snapshot)
 
   @staticmethod
   def is_seat_available(value: Optional[str]) -> bool:

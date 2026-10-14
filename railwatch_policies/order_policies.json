@@ -6,5 +6,7 @@
   "order_watch_enabled": true,
   "order_watch_interval_seconds": 60,
   "min_watch_interval_seconds": 30,
-  "max_watch_interval_seconds": 600
+  "max_watch_interval_seconds": 600,
+  "people_ready_timeout_seconds": 10,
+  "people_stable_ms": 500
 }

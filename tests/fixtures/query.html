@@ -7,7 +7,7 @@
 <div id="dialogs"></div>
 <script>
 window.fixture = {
-  mode: 'replace', delay: 50, clicks: 0, confirms: 0,
+  mode: 'replace', delay: 50, lateDelay: 150, stageDelay: 200, churnMs: 0, staged: false, clicks: 0, confirms: 0,
   show(text) {
     document.querySelector('#dialogs').innerHTML = '<div class="modal"><span></span><button>确认</button></div>';
     document.querySelector('.modal span').textContent = text;
@@ -21,7 +21,35 @@ document.querySelector('#query_ticket').onclick = () => {
   const button = document.querySelector('#query_ticket');
   button.disabled = !fixture.noBusy;
   const render = () => {
-    if (fixture.mode === 'empty') document.querySelector('#queryLeftTable').innerHTML = '<tr><td>没有符合条件的车次</td></tr>';
+    if (fixture.mode === 'notOnSale') fixture.show('未到起售时间');
+    else if (fixture.mode === 'empty') document.querySelector('#queryLeftTable').innerHTML = '<tr><td>没有符合条件的车次</td></tr>';
+    else if (fixture.mode === 'late') {
+      // A seat cell changes again after the response has fully ended.
+      document.querySelector('#queryLeftTable').innerHTML = '<tr id="ticket_G101"><td>G101</td><td id="ZE_G101">有</td></tr>';
+      setTimeout(() => { document.getElementById('ZE_G101').textContent = '5'; }, fixture.lateDelay);
+    }
+    else if (fixture.mode === 'presale') {
+      // Expected pre-sale row; replace with a sanitized real capture once recorded.
+      document.querySelector('#queryLeftTable').innerHTML = '<tr id="ticket_G101"><td><a class="number">G101</a></td>' +
+        '<td id="ZE_G101">*</td><td id="ZY_G101">*</td><td id="SWZ_G101">--</td><td>12点<br>起售</td></tr>';
+    }
+    else if (fixture.mode === 'twoStage') {
+      // A bookable first render, then the seat changes again stageDelay later;
+      // with churnMs it keeps changing that long and ends sold out.
+      document.querySelector('#queryLeftTable').innerHTML =
+        '<tr id="ticket_G101"><td>G101</td><td id="ZE_G101">有</td><td><a class="btn72">预订</a></td></tr>';
+      setTimeout(() => {
+        fixture.staged = true;
+        const cell = document.getElementById('ZE_G101');
+        const end = performance.now() + fixture.churnMs;
+        const step = () => {
+          const churning = performance.now() < end;
+          cell.textContent = churning && cell.textContent === '无' ? '有' : '无';
+          if (churning) setTimeout(step, 40);
+        };
+        step();
+      }, fixture.stageDelay);
+    }
     else document.querySelector('#queryLeftTable').innerHTML = '<tr id="ticket_G101"><td>G101 二等座 有</td></tr>';
     button.disabled = false;
   };

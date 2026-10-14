@@ -14,7 +14,7 @@ from selenium.webdriver.chrome.service import Service
 from railwatch_bridge import CHROMEDRIVER_PATH
 from railwatch_query import QueryExecutor, FILL_QUERY_FORM_JS, DISMISS_DIALOG_JS, LOGIN_CHECK_JS
 from gui_12306_0 import PageAnalyzer, TicketMonitor, SeatType
-from railwatch_row_parser import RowParser
+from railwatch_row_parser import RowParser, DISPLAY_SEATS
 
 
 class BrowserQueryTests(unittest.TestCase):
@@ -138,6 +138,124 @@ class BrowserQueryTests(unittest.TestCase):
     def test_fetch_and_fast_response_without_disabled_button_are_supported(self):
         self.driver.execute_script("fixture.useFetch=true; fixture.noBusy=true; fixture.delay=0")
         self.assertEqual(self.query.execute(self.click, 2)["status"], "ok")
+
+    def test_completed_query_reports_settle_timing_and_request_count(self):
+        for use_fetch in (False, True):
+            with self.subTest(fetch=use_fetch):
+                self.setUp()
+                self.driver.execute_script("fixture.useFetch=arguments[0]", use_fetch)
+                result = self.query.execute(self.click, 2)
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["requests"], 1)
+                self.assertNotIn("timing", result)
+                page = result["page_timing"]
+                self.assertEqual(page["transport"], "fetch" if use_fetch else "xhr")
+                self.assertLessEqual(page["sent_ms"], page["response_ms"])
+                self.assertLessEqual(page["response_ms"], page["loadend_ms"])
+                self.assertGreaterEqual(page["completed_ms"] - page["last_change_ms"], 300)
+                if not use_fetch:
+                    # The page renders in its XHR callback, between response and loadend.
+                    self.assertLessEqual(page["response_ms"], page["last_change_ms"])
+                    self.assertLessEqual(page["last_change_ms"], page["loadend_ms"])
+                    self.assertEqual((page["late_count"], page["late_max_ms"], page["gap_max_ms"]), (0, 0, 0))
+
+    def test_changes_after_loadend_are_measured_without_changing_completion(self):
+        self.driver.execute_script("fixture.mode='late'; fixture.lateDelay=150")
+        result = self.query.execute(self.click, 2)
+        self.assertEqual(result["status"], "ok")
+        page = result["page_timing"]
+        self.assertEqual(page["late_count"], 1)
+        self.assertGreaterEqual(page["late_max_ms"], 100)
+        self.assertLess(page["late_max_ms"], 300)
+        self.assertGreaterEqual(page["gap_max_ms"], 100)
+        self.assertGreaterEqual(page["completed_ms"] - page["last_change_ms"], 300)
+        self.assertTrue(self.query.current())
+
+    def settle_monitor(self, **config):
+        from unittest.mock import Mock
+        def fill(from_name, to_name, date):
+            return self.driver.execute_script(FILL_QUERY_FORM_JS, from_name, "BJP", to_name, "SHH", date)
+        progress, hits = [], []
+        clock = config.pop("clock", None)
+        monitor = TicketMonitor(self.driver, {"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-09-10",
+                                              "train_code": "G101", "seat_keyword": "二等座", "query_timeout": 3, **config},
+                                param_filler=fill, log_callback=lambda _: None, progress_callback=progress.append,
+                                on_hit=hits.append, server_time_sync=clock)
+        monitor._sleep = Mock()
+        monitor._focus_and_highlight = Mock()
+        return monitor, progress, hits
+
+    def run_with_early_completion(self, monitor):
+        """Detect completion before the page's second render, then continue as the loop would."""
+        monitor.query_executor.settle["quiet_ms"] = 100
+        execute = monitor.query_executor.execute
+        def early(*args, **kwargs):
+            result = execute(*args, **kwargs)
+            self.assertEqual(result["status"], "ok")
+            deadline = time.monotonic() + 2
+            while not self.driver.execute_script("return fixture.staged") and time.monotonic() < deadline:
+                time.sleep(.01)
+            return result
+        monitor.query_executor.execute = early
+        return monitor._run_single_loop(1, 3)
+
+    def test_early_completion_is_resettled_and_never_uses_the_first_render(self):
+        from unittest.mock import patch
+        from railwatch_policies import QUERY_STRATEGIES
+        # The first render is bookable; the settled page is sold out.
+        for timeout, settled in ((1000, True), (0, False)):
+            with self.subTest(resettle_timeout_ms=timeout), \
+                 patch.dict(QUERY_STRATEGIES["query_settle"], {"resettle_timeout_ms": timeout}):
+                self.setUp()
+                self.driver.execute_script("fixture.mode='twoStage'; fixture.stageDelay=200")
+                monitor, progress, hits = self.settle_monitor()
+                self.assertFalse(self.run_with_early_completion(monitor))
+                self.assertEqual(hits, [])
+                self.assertEqual(monitor._needs_navigation, not settled)
+                self.assertEqual(progress[0]["snapshot"]["status"], "success" if settled else "error")
+                if settled:
+                    self.assertEqual(progress[0]["rows"][0]["seats"]["二等座"]["status"], "unavailable")
+                    self.assertEqual([item["ok"] for item in monitor._resettles], [True])
+                self.assertEqual(self.driver.execute_script("return fixture.clicks"), 1)
+
+    def test_page_that_keeps_changing_is_discarded_after_the_resettle_limit(self):
+        from unittest.mock import patch
+        from railwatch_policies import QUERY_STRATEGIES
+        self.driver.execute_script("fixture.mode='twoStage'; fixture.stageDelay=200; fixture.churnMs=1500")
+        monitor, progress, hits = self.settle_monitor()
+        with patch.dict(QUERY_STRATEGIES["query_settle"], {"resettle_timeout_ms": 300}):
+            started = time.monotonic()
+            self.assertFalse(self.run_with_early_completion(monitor))
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(hits, [])
+        self.assertTrue(monitor._needs_navigation)
+        self.assertEqual(progress[0]["snapshot"]["status"], "error")
+        self.assertEqual([item["ok"] for item in monitor._resettles], [False])
+
+    def test_presale_page_retries_quickly_and_matching_resumes_once_on_sale(self):
+        from unittest.mock import Mock
+        clock = Mock()
+        clock.server_timestamp.return_value = 1000.5
+        monitor, _, hits = self.settle_monitor(timer_enabled=True, _target_timestamp=1000, smart_rate=True,
+                                               request_mode="fast", interval=3, clock=clock)
+        self.driver.execute_script("fixture.mode='presale'")
+        self.assertFalse(monitor._run_single_loop(1, 3))
+        self.assertLessEqual(monitor._sleep.call_args.args[0], 1)
+        self.assertEqual(monitor._sale_retry, {"evidence": "rows", "retry": 1})
+        self.assertEqual(hits, [])
+        self.driver.execute_script("fixture.mode='twoStage'; fixture.stageDelay=5000")
+        self.assertTrue(monitor._run_single_loop(2, 3))
+        self.assertEqual([(hit["train_code"], hit["seat_type"]) for hit in hits], [("G101", "二等座")])
+        self.assertEqual(self.driver.execute_script("return fixture.clicks"), 2)
+
+    def test_not_on_sale_prompt_records_whether_the_query_was_sent(self):
+        for mode, requests in (("dialog", 0), ("notOnSale", 1)):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.driver.execute_script("fixture.mode=arguments[0]", mode)
+                result = self.query.execute(self.click, 2)
+                self.assertEqual(result["status"], "not_on_sale")
+                self.assertEqual(result["requests"], requests)
 
     def test_http_429_preserves_cooldown_for_xhr_and_fetch(self):
         for use_fetch in (False, True):
@@ -461,6 +579,23 @@ class BrowserQueryTests(unittest.TestCase):
                 row = monitor.row_parser.snapshot_rows(monitor.target_seats)[0]
                 self.assertFalse(row["alternate_available"]["二等座"])
                 self.assertIsNone(monitor._find_alternate_button(row["element"], "二等座"))
+
+    def test_presale_markers_are_recorded_without_changing_matching(self):
+        self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=
+          '<tr id="ticket_a"><td>G101</td><td id="ZE_a">*</td><td id="ZY_a">*</td><td id="SWZ_a">--</td>'+
+          '<td>12点<br>起售</td></tr>'+
+          '<tr id="ticket_b"><td>G102</td><td id="ZE_b">有</td><td id="ZY_b">*</td><td><a class="btn72">预订</a></td></tr>';""")
+        monitor = TicketMonitor(self.driver, {"train_code": "G101,G102", "seat_keyword": "二等座"},
+                                log_callback=lambda _: None)
+        monitor._row_snapshot = monitor.row_parser.snapshot_rows(list(dict.fromkeys([*DISPLAY_SEATS, *monitor.target_seats])))
+        flags = {row["train"]: row["presale"] for row in monitor._row_snapshot}
+        self.assertEqual(flags["G101"], {"stars": 2, "sale_text": True, "label": "12点起售", "book": False})
+        self.assertEqual(flags["G102"], {"stars": 1, "sale_text": False, "label": None, "book": True})
+        self.assertEqual(RowParser.presale_summary(monitor._row_snapshot),
+                         {"rows": 2, "sale_text_rows": 1, "star_rows": 2, "all_star_rows": 1, "book_rows": 1,
+                          "labels": ["12点起售"]})
+        self.assertNotIn("presale", RowParser.structured_rows(monitor._row_snapshot, "2026-09-10")[0])
+        self.assertEqual(monitor._find_hit_row()[:2], ("G102", "二等座"))
 
     def test_advanced_sleeper_uses_its_own_inventory(self):
         self.driver.execute_script("""document.getElementById('queryLeftTable').innerHTML=

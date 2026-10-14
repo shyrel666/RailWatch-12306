@@ -332,11 +332,80 @@ class JournalTests(unittest.TestCase):
 
     def test_telemetry_write_failure_does_not_interrupt_the_query_path(self):
         journal = OrderJournal(self.path, telemetry_batch_size=1)
-        with patch.object(journal, "flush_telemetry", side_effect=sqlite3.OperationalError("busy")):
-            self.assertFalse(journal.record_telemetry("run", "query_click"))
+        with patch.object(journal, "flush_telemetry", side_effect=sqlite3.OperationalError("busy")) as flush:
+            # Recording never writes, so a query click cannot wait for the disk.
+            self.assertTrue(journal.record_telemetry("run", "query_click"))
+            flush.assert_not_called()
+            with self.assertRaises(sqlite3.OperationalError):
+                journal.flush_due_telemetry()
             journal.mark("run", "verification")
         with journal.connection() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM order_events WHERE stage='verification'").fetchone()[0], 1)
+
+    def count_connections(self, journal):
+        opened = []
+        original = journal.connection
+        def counted():
+            opened.append(True)
+            return original()
+        journal.connection = counted
+        return opened
+
+    def stages(self, journal):
+        with journal.connection() as db:
+            return [row[0] for row in db.execute("SELECT stage FROM order_events ORDER BY sequence")]
+
+    def test_hit_claim_and_buffered_telemetry_share_one_commit_in_order(self):
+        journal = OrderJournal(self.path)
+        journal.record_telemetry("run", "query_click")
+        journal.record_telemetry("run", "query_timing")
+        claimed = intent()
+        opened = self.count_connections(journal)
+        journal.begin("run", claimed, CONFIG, "inventory_found")
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(self.stages(journal), ["query_click", "query_timing", "submitting", "inventory_found"])
+        self.assertEqual(journal._telemetry_batch, [])
+        journal.record_telemetry("run", "query_timing")
+        opened.clear()
+        journal.mark("run", "regular_submit", claimed.intent_id)
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(self.stages(journal)[-2:], ["query_timing", "regular_submit"])
+
+    def test_failed_claim_or_marker_writes_nothing_and_keeps_telemetry(self):
+        journal = OrderJournal(self.path)
+        first = intent()
+        journal.begin("run", first, CONFIG, "inventory_found")
+        before = self.stages(journal)
+        journal.record_telemetry("run", "query_timing", detail={"round": 2})
+        with self.assertRaises(RuntimeError):
+            journal.begin("run", intent(), CONFIG, "inventory_found")
+        with self.assertRaises(RuntimeError):
+            journal.mark("run", "regular_submit", "missing-intent")
+        self.assertEqual(self.stages(journal), before)
+        with journal.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM orders").fetchone()[0], 1)
+        self.assertEqual([event[2] for event in journal._telemetry_batch], ["query_timing"])
+
+    def test_telemetry_insert_failure_keeps_buffer_and_still_commits_marker(self):
+        journal = OrderJournal(self.path)
+        journal.record_telemetry("run", "query_timing")
+        poison = ("run", "", "query_timing", 1.0, 1.0, object())  # Cannot be bound by SQLite.
+        journal._telemetry_batch.append(poison)
+        journal.mark("run", "verification")
+        self.assertEqual(self.stages(journal), ["verification"])
+        self.assertEqual(len(journal._telemetry_batch), 2)
+        journal._telemetry_batch.remove(poison)
+        self.assertEqual(journal.flush_telemetry(), 1)
+        self.assertEqual(self.stages(journal), ["verification", "query_timing"])
+
+    def test_due_flush_waits_for_a_full_batch(self):
+        journal = OrderJournal(self.path, telemetry_batch_size=3)
+        for _ in range(2):
+            journal.record_telemetry("run", "query_click")
+        self.assertEqual(journal.flush_due_telemetry(), 0)
+        journal.record_telemetry("run", "query_result")
+        self.assertEqual(journal.flush_due_telemetry(), 3)
+        self.assertEqual(self.stages(journal), ["query_click", "query_click", "query_result"])
 
     def test_bridge_restores_pending_state_without_browser_or_order_replay(self):
         original = intent("alternate")
@@ -608,6 +677,86 @@ class OrderResultWaitingTests(unittest.TestCase):
                 self.assertEqual(self.elapsed, 0)
 
 
+class PassengerListWaitTests(unittest.TestCase):
+    """官方乘客列表异步渲染：等到目标姓名出现或列表稳定，停止与超时分开。"""
+
+    def setUp(self):
+        self.now = 0.0
+        clock = patch("railwatch_order_page.time.monotonic", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.lists = lambda: {"count": 2, "complete": True}
+        self.driver = Mock()
+        self.driver.execute_script.side_effect = lambda *args: self.lists()
+        self.page = OrderPage(self.driver, wait=self.advance, poll_interval=.05)
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def test_complete_list_is_ready_immediately_and_zero_timeout_skips_waiting(self):
+        self.assertIs(self.page.wait_people(intent()), True)
+        self.assertEqual(self.now, 0)
+        self.driver.execute_script.reset_mock()
+        with patch.dict("railwatch_order_page.ORDER_POLICIES", {"people_ready_timeout_seconds": 0}):
+            self.assertIs(self.page.wait_people(intent()), True)
+        self.driver.execute_script.assert_not_called()
+
+    def test_stability_is_measured_in_time_not_poll_count(self):
+        self.lists = lambda: {"count": 1, "complete": False}
+        for interval in (.05, .2):
+            with self.subTest(interval=interval):
+                self.now, self.page.poll_interval = 0.0, interval
+                self.assertIs(self.page.wait_people(intent()), True)
+                self.assertGreaterEqual(self.now, .5)
+                self.assertLess(self.now, .5 + interval + 1e-9)
+
+    def test_growing_or_cleared_list_restarts_the_stability_window(self):
+        self.lists = lambda: {"count": 1 if self.now < .3 else 0 if self.now < .4 else 2, "complete": False}
+        self.assertIs(self.page.wait_people(intent()), True)
+        self.assertGreaterEqual(self.now, .9)
+
+    def test_timeout_and_stop_are_reported_separately_before_any_click(self):
+        self.lists = lambda: {"count": 0, "complete": False}
+        self.assertIs(self.page.wait_people(intent()), False)
+        self.assertGreaterEqual(self.now, 10)
+        for stop_at, status, reason in ((None, "verification", "尚未提交订单：官方乘客列表未加载完成"),
+                                        (1.0, "not_submitted", "已停止，尚未点击提交订单")):
+            with self.subTest(status=status):
+                self.now = 0.0
+                self.page.stop = (lambda: False) if stop_at is None else (lambda: self.now >= stop_at)
+                self.page.snapshot = lambda: {"formReady": True}
+                self.page.prepare_people = Mock()
+                result = self.page.regular(Mock(), intent())
+                self.assertEqual(result.status, status)
+                self.assertIn(reason, result.reason)
+                self.page.prepare_people.assert_not_called()
+
+    def test_regular_and_alternate_wait_before_selecting_passengers(self):
+        for kind, snap in (("regular", {"formReady": True}), ("alternate", {"details": [{}]})):
+            with self.subTest(kind=kind):
+                calls = []
+                self.page.snapshot = lambda: snap
+                self.page.wait_people = lambda target: calls.append("wait") or True
+                self.page.prepare_people = lambda target: calls.append("prepare") or False
+                result = getattr(self.page, kind)(None, intent(kind))
+                self.assertEqual(result.status, "verification")
+                self.assertEqual(calls, ["wait", "prepare"])
+
+    def test_probe_errors_retry_but_a_missing_probe_falls_back_to_name_checks(self):
+        answers = iter([RuntimeError("list replaced"), {"count": 2, "complete": True}])
+        def probe(*args):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        self.driver.execute_script.side_effect = probe
+        self.assertIs(self.page.wait_people(intent()), True)
+        self.assertEqual(self.now, .05)
+        self.driver.execute_script.side_effect = None
+        self.driver.execute_script.return_value = None
+        self.assertIs(self.page.wait_people(intent()), True)
+
+
 class RegularConfirmationTests(unittest.TestCase):
     """提交后正常确认；停止不再点击，未知保留核对，页面不乱跳。"""
 
@@ -616,6 +765,7 @@ class RegularConfirmationTests(unittest.TestCase):
         page = OrderPage(Mock())
         page.snapshot = lambda: {"formReady": True}
         page.result = lambda *a, **k: OrderResult("unknown")
+        page.wait_people = lambda names: True
         page.prepare_people = lambda names: True
         page.select_regular_seats = lambda target: True
         page.verify_form = lambda target: True
@@ -657,7 +807,7 @@ class RegularConfirmationTests(unittest.TestCase):
         page.mark = lambda stage, detail=None: events.append((stage, detail))
         result = page.regular(Mock(), intent())
         self.assertEqual(result.status, "verification")
-        self.assertEqual([s["id"] for s in events[0][1]["steps"]], ["page_load", "passengers"])
+        self.assertEqual([s["id"] for s in events[0][1]["steps"]], ["page_load", "people_wait", "passengers"])
         page.mark = Mock(side_effect=OSError("disk full"))
         self.assertEqual(page.regular(Mock(), intent()).status, "verification")
 

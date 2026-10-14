@@ -96,7 +96,11 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   const { modal, message, notification } = AntApp.useApp();
   const { choosePath, dialog: exportDialog } = useExportLogDialog();
   const exportingRef = useRef(false);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [pendingCommands, setPendingCommands] = useState<{ command: string }[]>([]);
+  const environmentCheckRef = useRef(false);
+  // Startup and other commands can finish while Chrome is still downloading.
+  const busy = pendingCommands.find(pending => pending.command === "checkEnvironment")?.command
+    ?? pendingCommands.at(-1)?.command ?? null;
   const [startupReady, setStartupReady] = useState(false);
   useEffect(() => {
     if (startupReady && appearance.ready) finishStartupSplash();
@@ -344,11 +348,16 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       successText?: string,
     ): Promise<T | undefined> => {
       if (clearingDataRef.current) return undefined;
+      if (command === "checkEnvironment") {
+        if (environmentCheckRef.current) return undefined;
+        environmentCheckRef.current = true;
+      }
       if (command === "clearLocalData") {
         clearingDataRef.current = true;
         await draftWriteChain.current;
       }
-      setBusy(command);
+      const pendingCommand = { command };
+      setPendingCommands(current => [...current, pendingCommand]);
       const finishClear = async (value: unknown) => {
         if (command !== "clearLocalData" || !value || typeof value !== "object" || !("cleared" in value) || !value.cleared) return;
         latestDraft.current = null;
@@ -432,7 +441,8 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         return undefined;
       } finally {
         if (queryRequestId && railwatchStore.getState().manualQueryPending) railwatchStore.getState().endManualQuery(queryRequestId);
-        setBusy(null);
+        setPendingCommands(current => current.filter(pending => pending !== pendingCommand));
+        if (command === "checkEnvironment") environmentCheckRef.current = false;
         if (command === "clearLocalData") clearingDataRef.current = false;
       }
     },

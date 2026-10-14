@@ -9,5 +9,7 @@
     "balanced": { "label": "均衡模式", "interval": 5, "query_timeout": 30, "min_interval": 4, "max_interval": 45 },
     "conservative": { "label": "保守模式", "interval": 6, "query_timeout": 40, "min_interval": 5, "max_interval": 60 },
     "legacy": { "label": "原有配置", "interval": 5, "query_timeout": 40, "min_interval": 3, "max_interval": 30 }
-  }
+  },
+  "sale_start": { "presale_retry_seconds": 1, "presale_retry_limit": 2, "presale_retry_window_seconds": 10 },
+  "query_settle": { "quiet_ms": 300, "poll_ms": 100, "sale_poll_ms": 25, "resettle_timeout_ms": 1000 }
 }

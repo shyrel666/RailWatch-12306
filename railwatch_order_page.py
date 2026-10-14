@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from selenium.common.exceptions import ElementClickInterceptedException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from railwatch_orders import OrderResult
+from railwatch_policies import ORDER_POLICIES
 from railwatch_task import TaskCancelled
 from railwatch_alternate_options import FORM_OPTIONS_JS, canonical_deadline, deadline_minutes, form_review, new_train_summary_matches
 
@@ -222,6 +223,13 @@ if(changes.some(e=>e.disabled)) return '乘客勾选项不可操作，请检查�
 for(const input of changes) if(input.checked!==wanted.includes(name(input))) (label(input)||input).click();
 const actual=inputs.filter(e=>e.checked).map(name);
 return actual.length===wanted.length && wanted.every(n=>actual.includes(n)) || '乘客勾选结果与目标名单不一致';
+"""
+
+# The official list is rendered asynchronously after the form shell. Return
+# only a count and whether every target name is present, never the names.
+PASSENGER_LIST_READY_JS = PASSENGER_FIELDS_JS + r"""
+const wanted=arguments[0], names=new Set(allInputs.map(name));
+return {count:allInputs.length, complete:wanted.length>0 && wanted.every(n=>names.has(n))};
 """
 
 READ_PASSENGER_BOOK_JS = r"""
@@ -682,6 +690,42 @@ class OrderPage:
           return true;
         """, intent.seat, len(intent.passengers)) is True
 
+    def wait_people(self, intent):
+        """True once the list holds every target name or stops growing.
+
+        Stability is measured in time, not polls, so a short timed-mode poll
+        interval cannot accept a list that is still rendering in batches.
+        Returns None when stopped and False on timeout.
+        """
+        timeout = ORDER_POLICIES["people_ready_timeout_seconds"]
+        if timeout <= 0:
+            return True
+        stable_seconds = ORDER_POLICIES["people_stable_ms"] / 1000
+        seen = {"count": None, "since": 0.0}
+        def ready():
+            try:
+                value = self.driver.execute_script(PASSENGER_LIST_READY_JS, list(intent.passengers))
+            except Exception:
+                return False  # The list may be replaced while it renders.
+            if not isinstance(value, dict):
+                # No readiness evidence at all: prepare_people still checks
+                # every name and fails closed, as before this wait existed.
+                return True
+            count = value.get("count")
+            if type(count) is not int or count <= 0:
+                seen["count"] = None
+                return False
+            if value.get("complete") is True:
+                return True
+            now = time.monotonic()
+            if count != seen["count"]:
+                seen.update(count=count, since=now)
+                return False
+            return now - seen["since"] >= stable_seconds
+        if self.poll(ready, timeout):
+            return True
+        return None if self.stop() else False
+
     def prepare_people(self, intent):
         result = self.driver.execute_script(SELECT_PASSENGERS_JS, list(intent.passengers), intent.kind == "regular")
         selected = result is True
@@ -1058,9 +1102,12 @@ class OrderPage:
                 return result if result.status in ("sold_out", "verification", "pending_payment", "fulfilled") else snap.get("formReady")
             ready_result = self.poll(ready)
             if isinstance(ready_result, OrderResult): return ready_result
-            stage = "选择乘车人"
+            stage = "等待乘车人列表"
             if not ready_result:
                 return OrderResult("verification", "乘客表单尚未加载，请检查官方页面")
+            people = self._wait_people_result(intent, timing)
+            if people: return people
+            stage = "选择乘车人"
             timing.step("passengers")
             if not self.prepare_people(intent):
                 return OrderResult("verification", self._people_error)
@@ -1165,6 +1212,9 @@ class OrderPage:
                 self.alternate_editor = AlternateEditor(self, plan_config)
                 intent = self.alternate_editor.populate(intent).for_choice_dates()
                 self.bind_intent(intent)
+            stage = "等待乘车人列表"
+            people = self._wait_people_result(intent, timing)
+            if people: return people
             timing.step("passengers")
             stage = "选择乘车人"
             if not self.prepare_people(intent):
@@ -1220,6 +1270,16 @@ class OrderPage:
             return result
         finally:
             self._save_timing(intent, timing)
+
+    def _wait_people_result(self, intent, timing):
+        """None when the passenger list is ready; otherwise the pre-submit result."""
+        timing.step("people_wait")
+        ready = self.wait_people(intent)
+        if ready:
+            return None
+        if ready is None or self.stop():
+            return self._stopped_result(False)
+        return OrderResult("verification", "尚未提交订单：官方乘客列表未加载完成，请检查官方页面")
 
     @staticmethod
     def _stopped_result(submitted):

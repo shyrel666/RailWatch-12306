@@ -22,7 +22,9 @@ export type RunReviewDetail = RunReviewSummary & {
     recorded_queries: number; valid_queries: number; window_limit: number;
     phases: { id: string; label: string; samples: number; median_ms: number; p95_ms: number }[];
     date_revisits: { date: string; samples: number; median_ms: number; p95_ms: number }[];
+    resettle?: { attempts: number; accepted: number };
   };
+  first_valid_query?: { offset_ms: number; round: number; presale_rounds: number; sale_retries: number } | null;
   preparation_margin_ms: number | null; query_median_ms: number | null; history_complete: boolean; note: string;
 };
 

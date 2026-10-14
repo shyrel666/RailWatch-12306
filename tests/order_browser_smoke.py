@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from unittest.mock import Mock, patch
@@ -168,6 +169,67 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(self.js("return [fixture.regularClicks,fixture.confirmClicks]"), [1, 1])
         self.js("fixture.record('已支付')")
         self.assertEqual(self.page.result(self.intent, known_id="E123456").status, "fulfilled")
+
+    def start_order(self, kind, intent=None):
+        button = self.driver.find_element("id", "book" if kind == "regular" else "candidate")
+        return getattr(self.page, kind)(button, replace(intent or self.intent, kind=kind))
+
+    def submit_clicks(self):
+        return self.js("return fixture.regularClicks + fixture.alternateClicks")
+
+    def test_late_passenger_list_is_awaited_and_recorded(self):
+        for kind in ("regular", "alternate"):
+            with self.subTest(kind=kind):
+                self.setUp()
+                marks = []
+                self.page.mark = lambda stage, detail=None: marks.append((stage, detail))
+                self.js("fixture.peopleDelay=800")
+                result = self.start_order(kind)
+                self.assertEqual(result.status, "pending_payment")
+                self.assertEqual(self.submit_clicks(), 1)
+                steps = {step["id"]: step["duration_ms"] for stage, detail in marks
+                         if stage == "order_timing" for step in detail["steps"]}
+                self.assertGreaterEqual(steps["people_wait"], 700)
+
+    def test_late_passenger_list_without_waiting_is_handed_off_as_in_v070(self):
+        for kind in ("regular", "alternate"):
+            with self.subTest(kind=kind), patch.dict("railwatch_order_page.ORDER_POLICIES",
+                                                     {"people_ready_timeout_seconds": 0}):
+                self.setUp()
+                self.js("fixture.peopleDelay=800")
+                result = self.start_order(kind)
+                self.assertEqual(result.status, "verification")
+                self.assertIn("未找到完整姓名", result.reason)
+                self.assertEqual(self.submit_clicks(), 0)
+
+    def test_batched_passenger_list_waits_for_every_target_name(self):
+        for kind in ("regular", "alternate"):
+            with self.subTest(kind=kind):
+                self.setUp()
+                self.js("fixture.peopleStaged=true")
+                self.assertEqual(self.start_order(kind).status, "pending_payment")
+                self.assertEqual(self.submit_clicks(), 1)
+
+    def test_absent_target_name_hands_off_once_the_list_is_stable(self):
+        started = time.monotonic()
+        result = self.start_order("regular", replace(self.intent, passengers=("王五",)))
+        self.assertEqual(result.status, "verification")
+        self.assertIn("未找到完整姓名", result.reason)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(self.submit_clicks(), 0)
+
+    def test_passenger_list_that_never_renders_times_out_before_any_submit(self):
+        for kind in ("regular", "alternate"):
+            with self.subTest(kind=kind), patch.dict("railwatch_order_page.ORDER_POLICIES",
+                                                     {"people_ready_timeout_seconds": 1}):
+                self.setUp()
+                self.js("fixture.peopleDelay=60000")
+                started = time.monotonic()
+                result = self.start_order(kind)
+                self.assertEqual(result.status, "verification")
+                self.assertIn("尚未提交订单：官方乘客列表未加载完成", result.reason)
+                self.assertGreaterEqual(time.monotonic() - started, 1)
+                self.assertEqual(self.submit_clicks(), 0)
 
     def test_verified_regular_seat_options_are_read_back_before_submit(self):
         for seat in ("一等座", "硬座", "软座", "硬卧", "软卧"):

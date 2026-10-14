@@ -23,6 +23,58 @@ class RunReviewTests(unittest.TestCase):
         self.assertEqual(review["order_timings"][0]["segments"][0]["label"], "打开并等待下单页")
         self.assertEqual(sum(s["duration_ms"] for s in review["order_timings"][0]["segments"]), 7000)
 
+    def test_passenger_list_wait_is_a_labelled_order_step(self):
+        steps = [{"id": "page_load", "start_ms": 0, "duration_ms": 5000},
+                 {"id": "people_wait", "start_ms": 5000, "duration_ms": 800},
+                 {"id": "passengers", "start_ms": 5800, "duration_ms": 100}]
+        review = build_run_review([event(1, "order_timing", 1, {"kind": "alternate", "steps": steps})])
+        self.assertEqual([s["label"] for s in review["order_timings"][0]["segments"]],
+                         ["打开并等待下单页", "等待乘车人列表", "选择乘车人"])
+
+    def test_first_valid_query_counts_presale_rounds_outside_complete_history(self):
+        def timing(sequence, at, status, **detail):
+            return event(sequence, "query_timing", at, {"status": status, **detail})
+        start = [event(1, "target_sale", 0, {"target_at": 1020}), event(2, "scheduler_wake", 20, {"late_ms": 5})]
+        rounds = [timing(3, 20.8, "not_on_sale", requests=1, sale_retry={"evidence": "prompt", "retry": 1}),
+                  timing(4, 21.8, "ok", fetched_at=1021.7, sale_retry={"evidence": "rows", "retry": 2}),
+                  timing(5, 22.5, "invalid", fetched_at=1022.5),
+                  timing(6, 25.8, "ok", fetched_at=1025.75, sale_retry={"evidence": "rows", "retry": None}),
+                  timing(7, 28.8, "empty", fetched_at=1028.5, sale_retry=None),
+                  timing(8, 31.8, "ok", fetched_at=1031.7)]
+        review = build_run_review(start + rounds)
+        self.assertEqual(review["first_valid_query"],
+                         {"offset_ms": 8500.0, "round": 5, "presale_rounds": 3, "sale_retries": 2})
+        self.assertNotIn("first_valid_query", [segment["id"] for segment in review["segments"]])
+
+    def test_first_valid_query_is_missing_rather_than_guessed(self):
+        target, wake = event(1, "target_sale", 0, {"target_at": 1020}), event(2, "scheduler_wake", 20)
+        found = event(3, "query_timing", 21, {"status": "ok", "fetched_at": 1021})
+        cases = {"untimed": [wake, found], "no wake": [target, found],
+                 "pruned after wake": [target, event(2, "scheduler_wake", 20, {"first_query_known": False}), found],
+                 "still pre-sale": [target, wake, event(3, "query_timing", 21, {"status": "not_on_sale"})],
+                 "no result time": [target, wake, event(3, "query_timing", 21, {"status": "ok"})],
+                 "beyond first rounds": [target, wake] + [event(3 + i, "query_timing", 21 + i, {"status": "timeout"})
+                                                          for i in range(30)] + [event(40, "query_timing", 60, {"status": "ok", "fetched_at": 1060})]}
+        for name, events in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(build_run_review(events)["first_valid_query"])
+
+    def test_first_rounds_after_wake_survive_the_recent_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = OrderJournal(directory + "/db.sqlite3", telemetry_batch_size=1000)
+            journal.mark("test-run", "target_sale", detail={"target_at": 1000})
+            journal.mark("test-run", "scheduler_wake")
+            journal.record_telemetry("test-run", "query_click")
+            for index in range(230):
+                journal.record_telemetry("test-run", "query_timing", detail=(
+                    {"status": "not_on_sale", "requests": 1} if index < 2 else
+                    {"status": "ok", "fetched_at": 1000 + index, "resettle": [{"at": "query", "ok": index % 2 == 0}]}))
+            review = build_run_review(journal.run_events("test-run"))
+        self.assertEqual(review["first_valid_query"]["round"], 3)
+        self.assertEqual(review["first_valid_query"]["offset_ms"], 2000)
+        self.assertEqual(review["query_timings"]["recorded_queries"], 200)
+        self.assertEqual(review["query_timings"]["resettle"], {"attempts": 200, "accepted": 100})
+
     def test_separate_attempts_and_invalid_order_timing_values(self):
         valid = {"id": "page_load", "start_ms": 0, "duration_ms": 1000}
         invalid = [None, {}, {**valid, "id": "private"}, {**valid, "duration_ms": float("nan")},

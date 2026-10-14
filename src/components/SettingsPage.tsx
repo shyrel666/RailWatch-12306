@@ -320,6 +320,7 @@ export function SettingsPage({
             control={
               <Button
                 icon={<Download size={15} />}
+                disabled={checkingEnvironment}
                 loading={busy === "downloadChromeDriver"}
                 onClick={() => void runCommand("downloadChromeDriver")}
               >
@@ -359,11 +360,13 @@ export function SettingsPage({
               aria-live="polite"
               className={"login-state " + (loginOk === null ? "" : loginOk ? "health-ok" : "health-warning")}
             >
-              {checkingLogin
-                ? "正在检查12306登录状态…"
-                : !environmentReady
-                  ? "请先检查运行环境，再打开登录。"
-                  : loginResult?.message || (loginReady ? "登录已验证" : "尚未检查当前登录状态")}
+              {checkingEnvironment
+                ? "正在检查运行环境，首次使用可能需要下载 Chrome 或驱动，请稍候…"
+                : checkingLogin
+                  ? "正在检查12306登录状态…"
+                  : !environmentReady
+                    ? "请先检查运行环境，再打开登录。"
+                    : loginResult?.message || (loginReady ? "登录已验证" : "尚未检查当前登录状态")}
             </p>
           </SettingRow>
         </SettingsSection>
