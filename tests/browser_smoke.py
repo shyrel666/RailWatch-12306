@@ -232,6 +232,43 @@ class BrowserQueryTests(unittest.TestCase):
         self.assertEqual(progress[0]["snapshot"]["status"], "error")
         self.assertEqual([item["ok"] for item in monitor._resettles], [False])
 
+    def test_resettled_timing_reaches_snapshots_reviews_and_settle_reports(self):
+        from unittest.mock import Mock
+        from railwatch_run_review import first_valid_query
+        from scripts.query_settle_report import build_report
+        self.driver.execute_script("fixture.mode='twoStage'; fixture.stageDelay=60000")
+        monitor, progress, hits = self.settle_monitor()
+        monitor.order_journal = Mock()
+        monitor.query_executor.settle["quiet_ms"] = 100
+        execute, early_results = monitor.query_executor.execute, []
+        def capture(*args, **kwargs):
+            result = execute(*args, **kwargs)
+            early_results.append(dict(result))
+            # Trigger the late render after completion, independent of host timing.
+            self.driver.execute_script("document.getElementById('ZE_G101').textContent='无'")
+            return result
+        monitor.query_executor.execute = capture
+        self.assertFalse(monitor._run_single_loop(1, 3))
+        self.assertEqual(hits, [])
+        detail = next(call.kwargs["detail"] for call in monitor.order_journal.record_telemetry.call_args_list
+                      if call.args[1] == "query_timing")
+        early, settled = early_results[0], monitor.last_query
+        self.assertEqual(early["page_timing"]["late_count"], 0)
+        self.assertEqual(detail["page"]["late_count"], 1)
+        self.assertGreater(detail["page"]["last_change_ms"], early["page_timing"]["last_change_ms"])
+        self.assertGreaterEqual(detail["page"]["completed_ms"] - detail["page"]["last_change_ms"], 100)
+        self.assertGreater(detail["fetched_at"], early["fetched_at"])
+        self.assertGreater(settled["round_trip_ms"], early["round_trip_ms"])
+        self.assertEqual(settled["query_id"], early["query_id"])
+        self.assertEqual(progress[0]["snapshot"]["fetched_at"], detail["fetched_at"])
+        target_at = early["fetched_at"] - 1
+        review = first_valid_query([{"stage": "query_timing", "sequence": 2, "detail": detail}],
+                                   target_at, {"sequence": 1})
+        self.assertEqual(review["offset_ms"], round((detail["fetched_at"] - target_at) * 1000, 1))
+        self.assertGreater(review["offset_ms"], 1000)
+        self.assertEqual(build_report([detail])["settle"]["late_zero_share"], 0)
+        self.assertEqual(self.driver.execute_script("return fixture.clicks"), 1)
+
     def test_presale_page_retries_quickly_and_matching_resumes_once_on_sale(self):
         from unittest.mock import Mock
         clock = Mock()

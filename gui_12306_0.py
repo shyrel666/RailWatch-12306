@@ -1112,13 +1112,14 @@ class TicketMonitor(BaseHandler):
         """After a late re-render of this same round, wait for the page to settle
         again instead of discarding the round; every ownership check still applies."""
         started = time.monotonic()
-        status = self.query_executor.resettle(QUERY_STRATEGIES["query_settle"]["resettle_timeout_ms"] / 1000,
+        result = self.query_executor.resettle(QUERY_STRATEGIES["query_settle"]["resettle_timeout_ms"] / 1000,
                                               poll_interval=self._query_poll_interval())
+        status = result.get("status") if isinstance(result, dict) else None
         status = status if status in ("ok", "empty") else None
         self._resettles.append({"at": where, "ok": status is not None,
                                 "ms": round((time.monotonic() - started) * 1000, 1)})
         if status:
-            self.last_query["status"] = status
+            self.last_query.update(result)
         return status
 
     def _run_single_loop(self, loop_count: int, interval: float) -> bool:

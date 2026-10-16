@@ -689,6 +689,7 @@ class PassengerListWaitTests(unittest.TestCase):
         self.driver = Mock()
         self.driver.execute_script.side_effect = lambda *args: self.lists()
         self.page = OrderPage(self.driver, wait=self.advance, poll_interval=.05)
+        self.page.snapshot = lambda: {"formReady": True}
 
     def advance(self, seconds):
         self.now += seconds
@@ -741,6 +742,43 @@ class PassengerListWaitTests(unittest.TestCase):
                 result = getattr(self.page, kind)(None, intent(kind))
                 self.assertEqual(result.status, "verification")
                 self.assertEqual(calls, ["wait", "prepare"])
+
+    def test_page_interruptions_stop_the_wait_even_before_the_list_arrives(self):
+        cases = [({"verification": True}, "verification"),
+                 ({"url": "https://kyfw.12306.cn/otn/login/init"}, "verification"),
+                 ({"dialogs": ["请完成人脸核验"]}, "verification"),
+                 ({"dialogs": ["操作过快，请稍后再试"]}, "verification"),
+                 ({"dialogs": ["未识别的官方提示"]}, "verification"),
+                 ({"dialogs": ["余票不足"]}, "sold_out"),
+                 ({"processing": True}, "unknown")]
+        for kind in ("regular", "alternate"):
+            for changes, expected in cases:
+                for list_arrives in (False, True):
+                    with self.subTest(kind=kind, changes=changes, list_arrives=list_arrives):
+                        self.now = 0.0
+                        self.page.snapshot = lambda: {"formReady": True, "details": [{}],
+                                                       **(changes if self.now >= .2 else {})}
+                        self.lists = lambda: {"count": int(list_arrives and self.now >= .2),
+                                              "complete": list_arrives and self.now >= .2}
+                        self.page.prepare_people = Mock(return_value=False)
+                        result = getattr(self.page, kind)(None, intent(kind))
+                        self.assertEqual(result.status, expected)
+                        self.page.prepare_people.assert_not_called()
+                        self.assertLess(self.now, .3)
+
+    def test_ready_list_is_rechecked_before_any_form_action(self):
+        for kind in ("regular", "alternate"):
+            for after_wait, expected in (({"verification": True}, "verification"), ({}, "unknown")):
+                with self.subTest(kind=kind, after_wait=after_wait):
+                    self.page.snapshot = lambda: {"formReady": True, "details": [{}]}
+                    def wait_people(target):
+                        self.page.snapshot = lambda: after_wait
+                        return True
+                    self.page.wait_people = wait_people
+                    self.page.prepare_people = Mock(return_value=False)
+                    result = getattr(self.page, kind)(None, intent(kind))
+                    self.assertEqual(result.status, expected)
+                    self.page.prepare_people.assert_not_called()
 
     def test_probe_errors_retry_but_a_missing_probe_falls_back_to_name_checks(self):
         answers = iter([RuntimeError("list replaced"), {"count": 2, "complete": True}])

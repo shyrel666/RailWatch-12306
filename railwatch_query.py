@@ -296,6 +296,7 @@ class QueryExecutor:
         self.snapshot = None
         self.token = None
         self.revision = None
+        self._clicked_at = None
 
     def inspect_dialog(self):
         result = self.driver.execute_script(DIALOG_INSPECT_JS)
@@ -318,7 +319,7 @@ class QueryExecutor:
     def resettle(self, timeout, *, poll_interval=None):
         """Accept this round's newer revision once the page is stable again.
 
-        Returns the settled status, or None. A different token, a second or failed
+        Returns the final query result, or None. A different token, a second or failed
         request, a form change or any dialog ends the wait without accepting.
         With timeout 0 this is a single check of the page as it is now.
         """
@@ -331,8 +332,7 @@ class QueryExecutor:
                     or not isinstance(status, dict) or status.get("status") == "invalid"):
                 return None
             if status.get("status") in ("ok", "empty"):
-                self.revision = status.get("revision")
-                return status["status"]
+                return self._completed_result(status)
             if time.monotonic() >= deadline:
                 return None
             self.tick()
@@ -343,12 +343,24 @@ class QueryExecutor:
         value = self.driver.execute_script(QUERY_OBSERVATION_JS, self.token, uuid.uuid4().hex)
         return value if isinstance(value, dict) else {}
 
+    def _completed_result(self, status):
+        """Bind rows and diagnostics to the same accepted page revision."""
+        self.revision = status.get("revision")
+        result = dict(status)
+        timing = result.pop("timing", None)
+        result.pop("responseFinished", None)
+        elapsed = (round((time.monotonic() - self._clicked_at) * 1000, 3)
+                   if self._clicked_at is not None else None)
+        return {**result, "round_trip_ms": elapsed, "query_id": self.token, "conditions": self.snapshot,
+                "fetched_at": time.time(), "page_timing": timing if isinstance(timing, dict) else None}
+
     def execute(self, click, timeout, *, poll_interval=None):
         if self.stop_check():
             return {"status": "cancelled"}
         slow = self.settle["poll_ms"] / 1000
         fast = slow if poll_interval is None else poll_interval
         self.token = uuid.uuid4().hex
+        self._clicked_at = None
         armed = self.driver.execute_script(QUERY_ARM_JS, self.token, uuid.uuid4().hex, self.settle["quiet_ms"])
         if not isinstance(armed, dict):
             return {"status": "invalid", "reason": "无法准备本轮查询"}
@@ -363,8 +375,8 @@ class QueryExecutor:
             return {"status": "cancelled"}
         if armed.get("armed") is not True:
             return {"status": "invalid", "reason": "无法准备本轮查询"}
-        clicked_at = time.monotonic()
-        deadline = clicked_at + timeout
+        self._clicked_at = time.monotonic()
+        deadline = self._clicked_at + timeout
         if not click():
             dialog = self.inspect_dialog()
             return {"status": dialog["kind"] if dialog["kind"] != "none" else "timeout", "reason": dialog["text"]}
@@ -389,11 +401,7 @@ class QueryExecutor:
                             "reason": f"查询收到 HTTP {http_status}", "retry_after_seconds": retry_after}
                 return {**result, "reason": "本轮请求失败或有其他查询响应干扰"}
             if isinstance(result, dict) and result.get("status") in ("ok", "empty"):
-                self.revision = result.get("revision")
-                timing = result.pop("timing", None)
-                result.pop("responseFinished", None)
-                return {**result, "round_trip_ms": round((time.monotonic() - clicked_at) * 1000, 3), "query_id": self.token, "conditions": self.snapshot, "fetched_at": time.time(),
-                        "page_timing": timing if isinstance(timing, dict) else None}
+                return self._completed_result(result)
             # Faster polling only helps once the response is in; before that it
             # would force layout on every poll while the page is still rendering.
             self.wait(fast if isinstance(result, dict) and result.get("responseFinished") is True else slow)

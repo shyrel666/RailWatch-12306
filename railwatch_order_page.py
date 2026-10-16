@@ -690,12 +690,19 @@ class OrderPage:
           return true;
         """, intent.seat, len(intent.passengers)) is True
 
+    def _pre_submit_result(self, intent, snap=None):
+        """Return any page state that must stop further form actions."""
+        snap = self.snapshot() if snap is None else snap
+        result = self._result_from_snapshot(snap, intent)
+        return result if not snap or snap.get("processing") or result.status != "unknown" else None
+
     def wait_people(self, intent):
         """True once the list holds every target name or stops growing.
 
         Stability is measured in time, not polls, so a short timed-mode poll
         interval cannot accept a list that is still rendering in batches.
-        Returns None when stopped and False on timeout.
+        Returns an OrderResult if the page interrupts the wait, None when
+        stopped and False on timeout.
         """
         timeout = ORDER_POLICIES["people_ready_timeout_seconds"]
         if timeout <= 0:
@@ -703,6 +710,12 @@ class OrderPage:
         stable_seconds = ORDER_POLICIES["people_stable_ms"] / 1000
         seen = {"count": None, "since": 0.0}
         def ready():
+            snap = self.snapshot()
+            if not snap:
+                return False
+            interrupted = self._pre_submit_result(intent, snap)
+            if interrupted:
+                return interrupted
             try:
                 value = self.driver.execute_script(PASSENGER_LIST_READY_JS, list(intent.passengers))
             except Exception:
@@ -722,8 +735,9 @@ class OrderPage:
                 seen.update(count=count, since=now)
                 return False
             return now - seen["since"] >= stable_seconds
-        if self.poll(ready, timeout):
-            return True
+        result = self.poll(ready, timeout)
+        if result:
+            return result
         return None if self.stop() else False
 
     def prepare_people(self, intent):
@@ -1122,6 +1136,8 @@ class OrderPage:
                 return OrderResult("verification", "车次、日期、区间、乘客、成人票种或席别回读不一致，尚未提交订单")
             submit = self.button(("#submitOrder_id",))
             if not submit: return OrderResult("not_submitted", "提交按钮不可用", no_order=True)
+            interrupted = self._pre_submit_result(intent)
+            if interrupted: return interrupted
             if self.stop(): return OrderResult("not_submitted", "提交前已停止", no_order=True)
             stage = "提交订单"
             timing.step("submit")
@@ -1242,6 +1258,8 @@ class OrderPage:
             if self.stop(): return OrderResult("not_submitted", "提交前已停止", no_order=True)
             if not submit: return OrderResult("not_submitted", "候补提交按钮不可用", no_order=True)
             snap, options = self.snapshot(), self.alternate_options()
+            interrupted = self._pre_submit_result(intent, snap)
+            if interrupted: return interrupted
             if self.alternate_signature(snap, options) != self.verified_alternate_signature:
                 return OrderResult("verification", "等待提交按钮时候补方案已变化，请核对原方案")
             review = form_review(intent, options, snap, self.trip_route)
@@ -1275,10 +1293,14 @@ class OrderPage:
         """None when the passenger list is ready; otherwise the pre-submit result."""
         timing.step("people_wait")
         ready = self.wait_people(intent)
-        if ready:
-            return None
         if ready is None or self.stop():
             return self._stopped_result(False)
+        if isinstance(ready, OrderResult):
+            return ready
+        if ready:
+            # The list probe and this handoff are separate browser commands;
+            # a prompt may have appeared after the last poll's page check.
+            return self._pre_submit_result(intent)
         return OrderResult("verification", "尚未提交订单：官方乘客列表未加载完成，请检查官方页面")
 
     @staticmethod

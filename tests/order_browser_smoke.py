@@ -191,6 +191,38 @@ class OrderBrowserTests(unittest.TestCase):
                          if stage == "order_timing" for step in detail["steps"]}
                 self.assertGreaterEqual(steps["people_wait"], 700)
 
+    def test_verification_during_passenger_wait_never_selects_or_submits(self):
+        for kind in ("regular", "alternate"):
+            with self.subTest(kind=kind):
+                self.setUp()
+                self.js("""fixture.peopleDelay=800;
+                  const button=el(arguments[0]), open=button.onclick;
+                  button.onclick=event=>{open(event);setTimeout(()=>{
+                    el('dialog').innerText='请完成人脸核验';show('dialog');
+                  },200);};""", "book" if kind == "regular" else "candidate")
+                with patch.object(self.page, "prepare_people", wraps=self.page.prepare_people) as prepare:
+                    result = self.start_order(kind)
+                self.assertEqual(result.status, "verification")
+                self.assertIn("核验", result.reason)
+                prepare.assert_not_called()
+                self.assertEqual(self.submit_clicks(), 0)
+                self.assertEqual(self.js("return fixture.confirmClicks"), 0)
+
+    def test_verification_after_passenger_selection_stops_before_submit(self):
+        for kind in ("regular", "alternate"):
+            with self.subTest(kind=kind):
+                self.setUp()
+                prepare = self.page.prepare_people
+                def select_then_interrupt(target):
+                    selected = prepare(target)
+                    self.js("el('dialog').innerText='请完成人脸核验';show('dialog')")
+                    return selected
+                self.page.prepare_people = select_then_interrupt
+                result = self.start_order(kind)
+                self.assertEqual(result.status, "verification")
+                self.assertIn("核验", result.reason)
+                self.assertEqual(self.submit_clicks(), 0)
+
     def test_late_passenger_list_without_waiting_is_handed_off_as_in_v070(self):
         for kind in ("regular", "alternate"):
             with self.subTest(kind=kind), patch.dict("railwatch_order_page.ORDER_POLICIES",
