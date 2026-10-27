@@ -43,6 +43,53 @@ test.each(["success", "queued"])("requires saving edits and reports %s delivery 
   }
 });
 
+test("channel forms fold away until a channel is switched on, and events list only enabled channels", async () => {
+  const command = mockSoundPreferences();
+  render(<NotificationSettingsPanel />);
+  const expand = await screen.findByRole("button", { name: "Bark设置" });
+  expect(expand.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByRole("switch", { name: "静音也响" })).toBeNull();
+  expect(screen.queryByRole("checkbox", { name: /·/ })).toBeNull();
+  expect(screen.getByText("开启外部渠道后，在这里选择各渠道推送哪些事件。")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("switch", { name: "Bark" }));
+  expect(expand.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByText("已开启，还有必填项未填写")).toBeTruthy();
+  await userEvent.type(screen.getByLabelText("Bark 设备 Key"), "device-key");
+  expect(screen.queryByText("已开启，还有必填项未填写")).toBeNull();
+  expect(expand.getAttribute("aria-expanded")).toBe("true");
+  await userEvent.click(screen.getByRole("switch", { name: "静音也响" }));
+  expect(screen.getAllByRole("row")).toHaveLength(2);
+  await userEvent.click(screen.getByRole("checkbox", { name: "待支付 · Bark" }));
+  expect(screen.queryByRole("checkbox", { name: "待支付 · ntfy" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "ntfy设置" }));
+  expect(screen.getByLabelText("ntfy 主题地址").getAttribute("placeholder")).toBe("https://ntfy.sh/你的主题名");
+  await userEvent.click(screen.getByRole("button", { name: "保存通知设置" }));
+  await waitFor(() => expect(command).toHaveBeenCalledWith("savePreferences", { notification_settings: expect.objectContaining({
+    bark_enabled: true, bark_key: "device-key", bark_critical: true,
+  }) }));
+  const saved = command.mock.calls.find(([name]) => name === "savePreferences")![1] as { notification_settings: { event_channels: Record<string, string[]> } };
+  expect(saved.notification_settings.event_channels.payment).toEqual(["bark"]);
+});
+
+test("a configured channel loads folded and one missing its key loads open", async () => {
+  vi.spyOn(railwatchApi, "command").mockImplementation(async (name) => {
+    if (name === "loadPreferences") return { notification_settings: {
+      desktop_urgent: true, sound_loop: true, window_attention: true,
+      server_chan_enabled: true, server_chan_key: "", server_chan_key_configured: true,
+      ntfy_enabled: true, ntfy_topic_url: "", ntfy_topic_url_configured: false,
+      event_channels: { hit: ["server_chan", "ntfy"] },
+    } } as never;
+    return {} as never;
+  });
+  render(<NotificationSettingsPanel />);
+  expect((await screen.findByRole("button", { name: "Server酱设置" })).getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByRole("button", { name: "ntfy设置" }).getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByRole("checkbox", { name: "发现余票 · Server酱" })).toHaveProperty("checked", true);
+  expect(screen.getByRole("checkbox", { name: "待支付 · ntfy" })).toHaveProperty("checked", false);
+});
+
 function mockSoundPreferences() {
   let settings: Record<string, unknown> = {
     desktop_urgent: true, sound_loop: true, window_attention: true,

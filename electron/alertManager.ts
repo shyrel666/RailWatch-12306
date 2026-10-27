@@ -148,26 +148,33 @@ function attachFocusAutoStop(mainWindow: BrowserWindow): void {
   });
 }
 
+function showDesktopNotification(mainWindow: BrowserWindow | null, title: string, body: string,
+  options: { urgency: "critical" | "normal"; silent: boolean }): void {
+  const notification = new Notification({ title, body, ...options });
+  notification.on("click", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  notification.show();
+}
+
+/** A system notification only: no sound loop, no window raise. For reminders that need no immediate action. */
+export function showNoticeAlert(mainWindow: BrowserWindow | null, payload: UrgentAlertPayload, preferences: AlertPreferences): void {
+  if (preferences.desktop_urgent && Notification.isSupported()) {
+    showDesktopNotification(mainWindow, payload.title || "RailWatch 提醒", payload.message || "", { urgency: "normal", silent: false });
+  }
+}
+
 export function showUrgentAlert(mainWindow: BrowserWindow | null, payload: UrgentAlertPayload, preferences: AlertPreferences): void {
   const title = payload.title || "RailWatch 提醒";
   const body = payload.message || "";
   if (preferences.desktop_urgent && Notification.isSupported()) {
-    const notification = new Notification({
-      title,
-      body,
-      urgency: "critical",
-      silent: preferences.sound_loop,
-    });
-    notification.on("click", () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        if (mainWindow.isMinimized()) {
-          mainWindow.restore();
-        }
-        mainWindow.show();
-        mainWindow.focus();
-      }
-    });
-    notification.show();
+    showDesktopNotification(mainWindow, title, body, { urgency: "critical", silent: preferences.sound_loop });
   }
 
   if (preferences.window_attention && mainWindow && !mainWindow.isDestroyed()) {

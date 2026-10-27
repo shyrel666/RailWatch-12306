@@ -90,4 +90,34 @@ describe("SaleCalendar", () => {
     expect(screen.getByRole("button", { name: "2026-09-28 预售期内" }).textContent).toContain("今天");
     expect(screen.getByText("乘车日期 · 2026-10-11 · 当前行程")).toBeTruthy();
   });
+
+  test("sets and cancels a sale reminder for the route and selected date", async () => {
+    const reminder = { id: "r1", from_station: "北京", to_station: "上海", date: "2026-10-11", sale_at: now / 1000 + 1, notified_at: null };
+    const calls: [string, Record<string, unknown> | undefined][] = [];
+    vi.mocked(railwatchApi.command).mockImplementation((async (command: string, payload?: Record<string, unknown>) => {
+      calls.push([command, payload]);
+      if (command === "stationSaleTimes") return info();
+      if (command === "addSaleReminder") return { items: [reminder], lead_minutes: 30 };
+      return { items: [], lead_minutes: 30 };
+    }) as typeof railwatchApi.command);
+    render(<SaleCalendar {...props} destination="上海" />);
+    fireEvent.click(await screen.findByRole("button", { name: /起售前 30 分钟提醒我/ }));
+    await screen.findByText("将在起售前 30 分钟提醒");
+    expect(calls).toContainEqual(["addSaleReminder", { from_station: "北京", to_station: "上海", date: "2026-10-11" }]);
+    fireEvent.click(screen.getByRole("button", { name: /取消提醒/ }));
+    await waitFor(() => expect(calls.at(-1)).toEqual(["removeSaleReminder", { id: "r1" }]));
+    await screen.findByRole("button", { name: /起售前 30 分钟提醒我/ });
+  });
+  test("a refused reminder explains why, and a route without a destination offers none", async () => {
+    vi.mocked(railwatchApi.command).mockImplementation((async (command: string) => {
+      if (command === "stationSaleTimes") return info();
+      if (command === "addSaleReminder") throw new Error("未能确定该日期的官方起售时间，请在购票日历中刷新起售时间后重试。");
+      return { items: [], lead_minutes: 30 };
+    }) as typeof railwatchApi.command);
+    const { rerender } = render(<SaleCalendar {...props} destination="上海" />);
+    fireEvent.click(await screen.findByRole("button", { name: /起售前 30 分钟提醒我/ }));
+    expect((await screen.findByRole("alert")).textContent).toContain("未能确定该日期的官方起售时间");
+    rerender(<SaleCalendar {...props} />);
+    expect(screen.queryByRole("button", { name: /起售前 30 分钟提醒我/ })).toBeNull();
+  });
 });

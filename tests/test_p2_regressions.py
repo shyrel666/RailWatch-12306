@@ -23,7 +23,7 @@ class NotificationQueueTests(unittest.TestCase):
             "event_channels": {"hit": ["server_chan"]},
         })
         self.service._send_server_chan = Mock(side_effect=lambda *_: self.release.wait(3) or True)
-        self.service._send_wecom = Mock(return_value=True)
+        self.service._send_wecom_webhook = Mock(return_value=True)
 
     def tearDown(self):
         self.release.set()
@@ -41,7 +41,7 @@ class NotificationQueueTests(unittest.TestCase):
 
     def test_busy_channel_does_not_delay_other_channel(self):
         fast = threading.Event()
-        self.service._send_wecom.side_effect = lambda *_: fast.set() or True
+        self.service._send_wecom_webhook.side_effect = lambda *_: fast.set() or True
         self.fill_slow_channel()
         result = self.service.enqueue("payment", "test", event_type="payment", event_key="order-1")
         self.assertEqual(result["server_chan"]["status"], "queue_full")
@@ -59,13 +59,13 @@ class NotificationQueueTests(unittest.TestCase):
         for executor in self.service._executors.values():
             executor.submit(lambda: None).result(timeout=2)
         self.service._send_server_chan.reset_mock()
-        self.service._send_wecom.reset_mock()
+        self.service._send_wecom_webhook.reset_mock()
         retry = self.service.enqueue("payment", "test", event_type="payment", event_key="order-1")
         self.assertEqual(retry["server_chan"]["status"], "queued")
         self.assertEqual(retry["wecom_webhook"]["status"], "duplicate")
         self.service._executors["server_chan"].submit(lambda: None).result(timeout=2)
         self.service._send_server_chan.assert_called_once()
-        self.service._send_wecom.assert_not_called()
+        self.service._send_wecom_webhook.assert_not_called()
 
     def test_concurrent_repeated_event_is_admitted_once_per_channel(self):
         with ThreadPoolExecutor(max_workers=8) as callers:
@@ -90,7 +90,7 @@ class NotificationQueueTests(unittest.TestCase):
 
     def test_test_notification_reports_still_queued_instead_of_inventing_failure(self):
         fast = threading.Event()
-        self.service._send_wecom.side_effect = lambda *_: fast.set() or True
+        self.service._send_wecom_webhook.side_effect = lambda *_: fast.set() or True
         from concurrent.futures import wait as real_wait
         # Exercise the real shared-deadline logic with a shorter test deadline.
         with patch("railwatch_notify.wait", side_effect=lambda futures, timeout: real_wait(futures, timeout=0.1)):
@@ -173,12 +173,14 @@ class FavoriteTrainTests(unittest.TestCase):
     def test_favorite_format_matches_query_parser_and_rejects_bad_tokens(self):
         from railwatch_row_parser import RowParser
         with tempfile.TemporaryDirectory() as directory:
-            for code in ("1461", "12345", "G1", "D12345", "C12", "Z99", "T12", "K123", "Y12", "S1", "L1", "g101"):
+            for code in ("1461", "12345", "G1", "D12345", "C12", "Z99", "T12", "K123", "Y12", "S1", "L1", "g101",
+                         "X123", "N12", "V6001"):
                 with self.subTest(code=code):
                     saved = save_train_favorites(directory, "北京", "上海", [code])
                     self.assertEqual(saved["favorites"][0]["trains"], [RowParser.extract_train_code(code)])
             before = load_trip_choices(directory)
-            for code in ("", "123", "123456", "G", "G12G", "G123456", "X123", "G1 G2", "G1\n", " 1461"):
+            # E is no train prefix, before or after 12306's 2026 renumbering.
+            for code in ("", "123", "123456", "G", "G12G", "G123456", "E123", "G1 G2", "G1\n", " 1461"):
                 with self.subTest(code=code), self.assertRaises(ValueError):
                     save_train_favorites(directory, "北京", "上海", [code])
             self.assertEqual(load_trip_choices(directory), before)

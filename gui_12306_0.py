@@ -27,7 +27,8 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from railwatch_dates import expand_travel_dates
-from railwatch_query import FillResult, fill_result, QueryExecutor, FILL_QUERY_FORM_JS, DISMISS_DIALOG_JS, query_snapshot, query_conditions
+from railwatch_query import (FillResult, fill_result, QueryExecutor, FILL_QUERY_FORM_JS, DISMISS_DIALOG_JS, MissingTargets,
+                             query_snapshot, query_conditions)
 from railwatch_row_parser import RowParser, TRAIN_CODE_PATTERN, DISPLAY_SEATS
 from railwatch_selectors import (
     ALTERNATE_ACTION_JS,
@@ -683,6 +684,7 @@ class TicketMonitor(BaseHandler):
         on_order=None,
         run_id="",
         query_start_callback=None,
+        train_schedules=None,
     ):
         super().__init__(driver, log_callback)
         self.cfg = dict(cfg)
@@ -716,6 +718,10 @@ class TicketMonitor(BaseHandler):
         # 解析目标车次和席别
         self.target_trains = self._parse_train_targets()
         self.target_seats = self._parse_seat_targets()
+        self.missing_targets = MissingTargets()
+        self._missing_report = None
+        self.train_schedules = train_schedules
+        self._renumbered = {}
         self.auto_submit = cfg.get("auto_submit", False)
         self.auto_alternate = cfg.get("auto_alternate", False)
         self.rate_limiter = None
@@ -749,7 +755,6 @@ class TicketMonitor(BaseHandler):
             self.driver,
             cfg,
             log_callback=self.log,
-            popup_handler=self._handle_popups,
         )
         self.alternate_flow = AlternateFlow(
             self.driver,
@@ -1104,6 +1109,34 @@ class TicketMonitor(BaseHandler):
         rows = self._row_snapshot or []
         return [row for row in rows if not self.target_trains or row.get("train") in self.target_trains]
 
+    def _observe_missing_targets(self):
+        """Count targets absent from a complete result that still lists the route's other trains.
+
+        A missing target is matched to a listed train with the stations and times it was
+        last seen with. Display and logging only: matching and ordering never read these counts.
+        """
+        rows = self._row_snapshot or []
+        if self.last_query.get("status") != "ok" or not rows:
+            return
+        date = self._snapshot_config.get("date", "")
+        if self.train_schedules is not None:
+            self.train_schedules.observe(rows, date)
+        if not self.target_trains:
+            return
+        reached = self.missing_targets.observe(date, self.target_trains, {row.get("train") for row in rows})
+        if reached:
+            self.log(f"⚠️ 目标车次 {'、'.join(reached)} 在 {date} 已连续 {self.missing_targets.rounds} 次不在查询结果中，"
+                     "同区间仍有其他车次：可能已因全国车次调整换号，或当日不开行。请在官方页面核对，确认换号后停止监控并修改车次。")
+        for item in self.missing_targets.missing([date]) if self.train_schedules is not None else []:
+            key = (item["train"], date)
+            if key not in self._renumbered and (found := self.train_schedules.candidates(item["train"], rows)):
+                self._renumbered[key] = found
+                self.log(f"💡 {item['train']} 在 {date} 可能已改为 {'、'.join(entry['train'] for entry in found)}："
+                         "出发、到达站和时刻与此前记录一致。请在官方页面核对后，在购票监控页替换。")
+        self._missing_report = {"rounds": self.missing_targets.rounds,
+                                "items": [{**item, "candidates": self._renumbered.get((item["train"], item["date"]), [])}
+                                          for item in self.missing_targets.missing(self.travel_dates or [date])]}
+
     def _query_poll_interval(self):
         settle = QUERY_STRATEGIES["query_settle"]
         return settle["sale_poll_ms" if self._sale_focus_active() else "poll_ms"] / 1000
@@ -1136,6 +1169,7 @@ class TicketMonitor(BaseHandler):
         self._query_clicked_at = None
         self._sale_retry = None
         self._resettles = []
+        self._missing_report = None
         self._snapshot_config = dict(self.cfg)
         if self.travel_dates:
             self._snapshot_config["date"] = self._loop_date(loop_count)
@@ -1189,7 +1223,8 @@ class TicketMonitor(BaseHandler):
         try:
             self.progress({**self.last_query, "query_id": snapshot["query_id"], "fetched_at": snapshot["fetched_at"],
                            "loop": self._snapshot_sequence, "date": snapshot["conditions"]["date"],
-                           "rows": snapshot["rows"], "snapshot": snapshot})
+                           "rows": snapshot["rows"], "snapshot": snapshot,
+                           **({"missing_targets": self._missing_report} if error is None and self._missing_report else {})})
         except Exception:
             pass  # A display callback must not alter transaction decisions.
 
@@ -1325,6 +1360,7 @@ class TicketMonitor(BaseHandler):
                 self.log("本日可候补，按多日期策略继续查现票；候补提交前会重新确认对应日期。")
                 hit = None
         self._timing_step("publish")
+        self._observe_missing_targets()
         self._publish_query()
         if hit:
             train_code, seat_name, seat_value, row_el, action_btn, action_type = hit
@@ -1519,128 +1555,6 @@ class TicketMonitor(BaseHandler):
 
         except Exception as e:
             self.log(f"⚠️ 定位/高亮失败（可忽略）：{e}")
-
-    def _handle_popups(self):
-        """
-        处理12306页面上可能出现的各种弹窗
-        包括：学生票确认（点击取消选成人票）、温馨提示、座位选择提示等
-        """
-        popup_handled = False
-        
-        # 首先处理学生票确认弹窗 - 点击"取消"选择成人票
-        try:
-            # 查找学生票弹窗中的"取消"按钮
-            js_student_ticket = """
-            // 查找学生票确认弹窗
-            var dialogs = document.querySelectorAll('.dhtmlx_window_active, .modal, .layui-layer');
-            for (var i = 0; i < dialogs.length; i++) {
-                var dialog = dialogs[i];
-                var text = dialog.innerText || '';
-                // 检查是否是学生票相关弹窗
-                if (text.indexOf('学生') !== -1 || text.indexOf('学生票') !== -1) {
-                    // 查找"取消"按钮
-                    var buttons = dialog.querySelectorAll('a.btn, button');
-                    for (var j = 0; j < buttons.length; j++) {
-                        var btn = buttons[j];
-                        var btnText = btn.innerText.trim();
-                        if (btnText === '取消' || btnText === '否') {
-                            btn.click();
-                            return 'student_cancel';
-                        }
-                    }
-                }
-            }
-            return null;
-            """
-            result = self.driver.execute_script(js_student_ticket)
-            if result == 'student_cancel':
-                self.log("✅ 已点击【取消】，选择购买成人票")
-                popup_handled = True
-                self._sleep(0.5)
-                return popup_handled
-        except Exception:
-            pass
-        
-        # 处理其他一般性弹窗 - 点击"确定"
-        popup_selectors = [
-            # 通用确认按钮
-            (".dhtmlx_window_active .btn-primary", "温馨提示"),
-            (".dhtmlx_window_active a.btn:last-child", "对话框确认"),
-            # 模态框确认按钮
-            (".modal-ft .btn-primary", "模态确认"),
-            (".layui-layer-btn0", "layui确认"),
-            # 12306常用确认按钮类
-            ("#qd_closeDefaultWarningWindowDialog_id", "关闭警告"),
-        ]
-        
-        for selector, name in popup_selectors:
-            try:
-                buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for btn in buttons:
-                    if btn.is_displayed() and btn.is_enabled():
-                        btn_text = btn.text.strip()
-                        # 只点击确认类按钮（排除学生票弹窗的确定按钮）
-                        if btn_text in ("确定", "确认", "知道了", "好的", "继续"):
-                            # 再次检查是否是学生票弹窗
-                            parent = btn.find_element(By.XPATH, "./ancestor::*[contains(@class, 'dhtmlx_window') or contains(@class, 'modal') or contains(@class, 'layui-layer')]")
-                            parent_text = parent.text if parent else ""
-                            if "学生" in parent_text:
-                                # 是学生票弹窗，跳过，不点确定
-                                continue
-                            btn.click()
-                            self.log(f"✅ 已自动处理弹窗：{name} ({btn_text})")
-                            popup_handled = True
-                            self._sleep(0.5)
-                            return popup_handled
-            except (NoSuchElementException, StaleElementReferenceException):
-                continue
-            except Exception:
-                continue
-        
-        # 尝试使用 JavaScript 处理其他弹窗
-        if not popup_handled:
-            try:
-                js_code = """
-                var buttons = document.querySelectorAll('.dhtmlx_window_active a.btn, .layui-layer-btn a, .modal-ft a.btn');
-                for (var i = 0; i < buttons.length; i++) {
-                    var btn = buttons[i];
-                    var text = btn.innerText.trim();
-                    // 检查父元素是否包含"学生"关键字
-                    var parent = btn.closest('.dhtmlx_window_active, .modal, .layui-layer');
-                    var parentText = parent ? parent.innerText : '';
-                    if (parentText.indexOf('学生') !== -1) {
-                        // 学生票弹窗，点击取消
-                        if (text === '取消' || text === '否') {
-                            btn.click();
-                            return 'student_cancel';
-                        }
-                    } else {
-                        // 其他弹窗，点击确定
-                        if (text === '确定' || text === '确认' || text === '知道了') {
-                            btn.click();
-                            return 'confirmed';
-                        }
-                    }
-                }
-                return null;
-                """
-                result = self.driver.execute_script(js_code)
-                if result == 'student_cancel':
-                    self.log("✅ 已通过JS点击【取消】，选择成人票")
-                    popup_handled = True
-                elif result == 'confirmed':
-                    self.log("✅ 已通过JS自动处理弹窗")
-                    popup_handled = True
-                if popup_handled:
-                    self._sleep(0.5)
-            except Exception:
-                pass
-        
-        return popup_handled
-
-    def _select_seat_preference(self, preference: str):
-        count = len(parse_passenger_names(self.cfg.get("passengers", ""))) or int(self.cfg.get("passenger_count", 1))
-        return self.order_page.apply_seat_preference(preference, count)
 
     def _signal_human_action(self, train_code: str, message: str) -> None:
         """停止自动化，把控制权交还给用户去完成核验。"""

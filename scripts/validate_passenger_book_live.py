@@ -72,7 +72,7 @@ def validate(port):
         expression = """(()=>{
           const result=(new Function(SCRIPT))();
           return {...result,items:result.items.map(person=>({
-            ticket_type:person.ticket_type,type_source:person.type_source,
+            ticket_type:person.ticket_type,type_source:person.type_source,account_holder:person.account_holder,
             verification:person.verification,has_masked_identity:!!person.identity_hint
           }))};
         })()""".replace("SCRIPT", json.dumps(READ_PASSENGER_BOOK_JS))

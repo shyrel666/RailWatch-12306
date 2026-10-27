@@ -25,6 +25,13 @@
 .sale-calendar-status.open, .sale-calendar-status.window { color: var(--success); }
 .sale-calendar-status.waiting, .sale-calendar-status.unknown, .sale-calendar-detail .sale-calendar-warning { color: var(--warning); }
 .sale-calendar-countdown strong { display: block; margin-top: 2px; color: var(--text); font-family: var(--font-mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+.sale-calendar-reminder { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 10px; }
+.sale-calendar-reminder > small { color: var(--muted); font-size: 11px; }
+.sale-calendar-reminder-set { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 12px; }
+.sale-calendar-reminder-set .ant-btn { padding: 0 4px; height: auto; }
+.sale-calendar-reminder ul { list-style: none; margin: 4px 0 0; padding: 0; width: 100%; font-size: 12px; color: var(--muted); }
+.sale-calendar-reminder li { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.sale-calendar-reminder li > span { min-width: 0; overflow-wrap: anywhere; }
 .sale-calendar-source { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: auto; padding-top: 12px; color: var(--muted); font-size: 11px; }
 .sale-calendar-source .ant-btn { padding-left: 0; font-size: 12px; }
 @media (max-width: 1100px) {
@@ -891,6 +898,12 @@ html[data-theme="dark"] .chart-card {
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
+.trip-setup-footer-hint {
+  margin-right: auto;
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+}
 /* Monitoring */
 .signal-tower {
   display: flex;
@@ -1713,9 +1726,9 @@ html[data-theme="dark"] .chart-card {
 }
 .toggle-tile {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 14px 16px 15px;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
   cursor: pointer;
@@ -1728,16 +1741,18 @@ html[data-theme="dark"] .chart-card {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   background: color-mix(in srgb, var(--accent-soft) 40%, var(--surface));
 }
-.toggle-tile-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-.toggle-tile-head .setting-icon {
+.toggle-tile .setting-icon,
+.channel-card .setting-icon {
   width: 30px;
   height: 30px;
   border-radius: 8px;
+}
+.toggle-tile-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 .toggle-tile.on .setting-icon,
 .channel-card.on .setting-icon {
@@ -1749,13 +1764,13 @@ html[data-theme="dark"] .chart-card {
 }
 .toggle-tile small {
   color: var(--muted);
-  line-height: 1.55;
+  line-height: 1.5;
 }
 .notification-sound-settings {
-  margin-top: 12px;
+  margin-top: 10px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 14px 16px;
+  padding: 10px 14px;
 }
 .notification-sound-row {
   display: flex;
@@ -1899,24 +1914,32 @@ html[data-theme="dark"] .chart-card {
   font-size: 13px;
   font-weight: 500;
 }
+/* One list: each channel is a single row; its form unfolds below it. */
 .channel-list {
-  display: grid;
-  gap: 12px;
-}
-.channel-card {
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
-  transition: border-color 180ms var(--ease-out);
 }
-.channel-card.on {
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+.channel-card + .channel-card {
+  border-top: 1px solid var(--border);
 }
 .channel-card > header {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
+  gap: 12px;
+  padding: 9px 10px 9px 14px;
+}
+.channel-title small.channel-incomplete {
+  color: var(--warning);
+}
+.channel-expand.ant-btn {
+  color: var(--muted);
+}
+.channel-expand svg {
+  transition: transform 180ms var(--ease-out);
+}
+.channel-expand.open svg {
+  transform: rotate(180deg);
 }
 .channel-title {
   flex: 1;
@@ -1945,10 +1968,13 @@ html[data-theme="dark"] .chart-card {
 .channel-fields {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px 16px;
-  padding: 14px 16px 16px 64px;
+  gap: 12px 16px;
+  padding: 12px 16px 14px 56px;
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--subtle) 45%, var(--surface));
+}
+.channel-fields[hidden] {
+  display: none;
 }
 .channel-card:not(.on) .channel-fields {
   opacity: 0.72;
@@ -1983,6 +2009,17 @@ html[data-theme="dark"] .chart-card {
 .channel-field small {
   color: var(--muted);
 }
+.channel-field > .channel-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.channel-switch .ant-switch {
+  flex: none;
+  margin-top: 1px;
+}
 .secret-input {
   display: flex;
   gap: 8px;
@@ -2003,13 +2040,20 @@ html[data-theme="dark"] .chart-card {
 }
 .channel-matrix th,
 .channel-matrix td {
-  padding: 10px 16px;
+  padding: 8px 14px;
   border-top: 1px solid var(--border);
   text-align: center;
 }
 .channel-matrix thead th:not(:first-child),
 .channel-matrix td {
-  width: 18%;
+  width: 11%;
+}
+.channel-matrix-empty {
+  padding: 10px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 12.5px;
 }
 .channel-matrix thead th {
   border-top: 0;
@@ -3119,3 +3163,7 @@ html[data-theme="dark"] .timing-chart {
 .alternate-deadline .trip-input-with-action { max-width: 420px; }
 .alternate-deadline .trip-select { flex: 1; min-width: 0; }
 @media (max-width: 680px) { .alternate-window { grid-template-columns: 1fr 1fr; } }
+
+.renumber-list { list-style: none; margin: 8px 0 4px; padding: 0; display: grid; gap: 6px; }
+.renumber-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; }
+.renumber-list li > span { min-width: 0; overflow-wrap: anywhere; }

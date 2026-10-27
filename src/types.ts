@@ -1,3 +1,5 @@
+import type { NotificationChannelId, NotificationChannelValues, NotificationSecretField } from "./lib/notificationChannels";
+
 export type RailWatchPage = "仪表盘" | "行程设置" | "购票监控" | "订单中心" | "运行复盘" | "系统设置" | "关于";
 
 export type AppInfo = {
@@ -56,6 +58,7 @@ export type NotificationSoundTone = "beep" | "chime" | "double" | "alarm" | "cus
 export type NotificationSoundSelection = { sound_tone: NotificationSoundTone; sound_custom_file?: string };
 export type ImportedNotificationSound = { file: string; name: string };
 
+/** Channel ids and fields come from railwatch_policies/notification_channels.json. */
 export type NotificationSettings = {
   desktop_urgent: boolean;
   sound_loop: boolean;
@@ -63,36 +66,24 @@ export type NotificationSettings = {
   sound_custom_file?: string;
   sound_custom_name?: string;
   window_attention?: boolean;
-  server_chan_enabled: boolean;
-  server_chan_key: string;
-  server_chan_key_configured?: boolean;
-  email_enabled: boolean;
-  email_smtp_host: string;
-  email_smtp_port: number;
-  email_user: string;
-  email_password: string;
-  email_password_configured?: boolean;
-  email_to: string;
-  wecom_webhook_enabled: boolean;
-  wecom_webhook_url: string;
-  wecom_webhook_url_configured?: boolean;
-  event_channels: Record<"hit" | "verification" | "payment" | "alternate_active" | "alternate_fulfilled" | "purchase_success", ("server_chan" | "email" | "wecom_webhook")[]>;
-};
+  event_channels: Record<"hit" | "verification" | "payment" | "alternate_active" | "alternate_fulfilled" | "purchase_success"
+    | "login_expired" | "sale_reminder", NotificationChannelId[]>;
+  /** Channels already added to event_channels once; maintained by the runtime only. */
+  event_channels_seeded?: NotificationChannelId[];
+} & { [C in NotificationChannelId as `${C}_enabled`]: boolean }
+  & NotificationChannelValues
+  & { [F in NotificationSecretField as `${F}_configured`]?: boolean };
 
 /** Empty/missing secrets retain their value; null explicitly clears a secret. */
-export type NotificationSettingsPatch = Partial<Omit<NotificationSettings,
-  "server_chan_key" | "email_password" | "wecom_webhook_url" |
-  "server_chan_key_configured" | "email_password_configured" | "wecom_webhook_url_configured"
->> & {
-  server_chan_key?: string | null;
-  email_password?: string | null;
-  wecom_webhook_url?: string | null;
-};
+export type NotificationSettingsPatch =
+  Partial<Omit<NotificationSettings, NotificationSecretField | `${NotificationSecretField}_configured` | "event_channels_seeded">>
+  & { [F in NotificationSecretField]?: string | null };
 
 export type RailWatchPreferences = {
   theme: "system" | "light" | "dark";
   close_to_tray: boolean;
   auto_rehearsal?: boolean;
+  idle_keep_alive?: boolean;
   notification_settings: NotificationSettings;
 };
 
@@ -101,8 +92,13 @@ export type PreferencesPatch = {
   theme?: RailWatchPreferences["theme"];
   close_to_tray?: boolean;
   auto_rehearsal?: boolean;
+  idle_keep_alive?: boolean;
   notification_settings?: NotificationSettingsPatch;
 };
+
+/** A route and travel date to announce before its official sale time; `notified_at` is set once sent. */
+export type SaleReminder = { id: string; from_station: string; to_station: string; date: string; sale_at: number; notified_at: number | null };
+export type SaleReminderList = { items: SaleReminder[]; lead_minutes: number };
 
 /** M4 will expose draft save/restore; reading a draft never authorizes execution. */
 export type TripDraft = {
@@ -140,7 +136,11 @@ export type StationSaleTimes = {
 export type TripRoute = { from_station: string; to_station: string };
 export type TrainFavorite = TripRoute & { trains: string[] };
 export type TripChoices = { recent_routes: TripRoute[]; favorites: TrainFavorite[] };
-export type PassengerCandidate = { name: string; ticket_type: "adult" | "student" | "child" | "unknown"; identity_hint: string; ambiguous: boolean };
+export type PassengerCandidate = {
+  name: string; ticket_type: "adult" | "student" | "child" | "unknown"; identity_hint: string; ambiguous: boolean;
+  /** The official list showed no type (always the account holder), so adult is assumed. */
+  default_adult?: boolean;
+};
 export type PassengerCandidates = { items: PassengerCandidate[]; warning: string | null };
 
 /** M2 contract: a display snapshot, never an authorization to quit/install. */
@@ -375,7 +375,24 @@ export type ResultsPayload = {
   fetched_at?: number;
   conditions?: unknown;
   rows: QueryResultRow[];
+  /** Manual queries only: saved trains absent from a date's result that match a listed train's timetable. */
+  renumber?: RenumberSuggestion[];
 };
+
+/** A listed train whose stations and times equal those last seen for a saved number (`seen_date`). */
+export type RenumberCandidate = {
+  train: string;
+  from_station: string;
+  to_station: string;
+  departure_time: string;
+  arrival_time: string;
+  arrival_day_offset: number;
+  seen_date: string;
+};
+export type RenumberSuggestion = { train: string; date: string; candidates: RenumberCandidate[] };
+
+/** Target trains absent from `rounds` consecutive complete results of a date that listed other trains. */
+export type MissingTargets = { rounds: number; items: { train: string; date: string; candidates?: RenumberCandidate[] }[] };
 
 export type MonitorTickPayload = {
   snapshot?: QuerySnapshot;
@@ -386,6 +403,8 @@ export type MonitorTickPayload = {
   loop: number;
   date: string;
   rows: QueryResultRow[];
+  /** Present on complete results only; an empty `items` clears an earlier hint. */
+  missing_targets?: MissingTargets;
 };
 
 export type NotifyPayload = {

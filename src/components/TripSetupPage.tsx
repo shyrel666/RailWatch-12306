@@ -3,6 +3,7 @@ import { Alert, Button, ConfigProvider, Input, InputNumber, Select, Switch } fro
 import { AutomationSection } from "./AutomationSettings";
 import { DATE_STRATEGIES, DATE_SCAN_BUDGET, dateStrategy, dateStrategySummary } from "../lib/dateStrategy";
 import { automationConfigIssue } from "../lib/automationReadiness";
+import { browserTaskBlock } from "../lib/dashboardState";
 import {
   ArrowLeftRight,
   BarChart3,
@@ -239,6 +240,9 @@ export function TripSetupPage({
   const seatCapabilities = loadedSeatCapabilities ?? [];
   const automationIssue = automationConfigIssue(config, loadedSeatCapabilities);
   const monitoring = useRailWatchStore((state) => state.status.monitoring);
+  const order = useRailWatchStore((state) => state.status.order);
+  const queryBlock = browserTaskBlock(monitoring, order, "查询");
+  const passengerBlock = browserTaskBlock(monitoring, order, "读取乘客");
   const tripDateStatus = getTripDateStatus(config.date, today, windowDays);
   const rangeStatus = getDateRangeStatus(
     config.date,
@@ -331,7 +335,7 @@ export function TripSetupPage({
   };
 
   const readPassengers = async () => {
-    if (readingPassengers || busy || monitoring) return;
+    if (readingPassengers || busy || passengerBlock) return;
     setReadingPassengers(true);
     setPassengerCandidates(null);
     try {
@@ -598,7 +602,7 @@ export function TripSetupPage({
             <div className="trip-form-row trip-form-row--split">
               <div className="trip-field">
                 <span className="trip-field-label-with-help">乘客
-                  <Hint text="自动交易仅支持成人票：普通订单勾选后回读确认票种，候补须在官方乘客列表中标为成人。学生、儿童票请在官网办理。" /></span>
+                  <Hint text="自动交易仅支持成人票：官方乘车人列表不显示本人票种，读取时默认按成人；下单时仍在官方页面回读票种，不是成人票时不会提交。学生、儿童票请在官网办理。" /></span>
                 <div className="passenger-strip">
                   {passengerNames.map((name, index) => (
                     <span className="passenger-tag" key={`${name}-${index}`}>
@@ -631,20 +635,20 @@ export function TripSetupPage({
                       添加乘客
                     </Button>
                     <Button className="trip-station-refresh" icon={<UserRoundSearch size={14} />}
-                      disabled={readingPassengers || !!busy || monitoring}
+                      disabled={readingPassengers || !!busy || !!passengerBlock}
                       aria-busy={readingPassengers} onClick={() => void readPassengers()}>
                       {readingPassengers ? "正在读取官方乘客…" : "从官方页面读取乘客"}
                     </Button>
                   </span>
                 </div>
                 {passengerError ? <small className="trip-date-hint" role="alert">{passengerError}</small> : null}
-                {monitoring ? <small className="field-help">监控运行中，请停止监控后读取乘客。</small> : null}
+                {passengerBlock ? <small className="field-help">{passengerBlock}</small> : null}
                 {passengerCandidates?.warning ? <small className="field-help" role="status">{passengerCandidates.warning}</small> : null}
                 {passengerCandidates?.items.length ? <div className="trip-route-choices" aria-label="官方页面乘客候选">
                   {passengerCandidates.items.map((candidate, index) => <button type="button" key={`${candidate.name}-${candidate.identity_hint}-${index}`}
                     disabled={candidate.ambiguous || candidate.ticket_type !== "adult" || passengerNames.includes(candidate.name)}
                     onClick={() => addCandidate(candidate)}>{candidate.name} · {candidate.identity_hint || "证件摘要未提供"} · {
-                      candidate.ambiguous ? "同名需人工核对" : candidate.ticket_type === "adult" ? "成人" : candidate.ticket_type === "unknown" ? "列表未标票种，可手动填写姓名后核对" : "票种不支持自动交易"
+                      candidate.ambiguous ? "同名需人工核对" : candidate.ticket_type === "adult" ? (candidate.default_adult ? "默认成人" : "成人") : candidate.ticket_type === "unknown" ? "列表未标票种，可手动填写姓名后核对" : "票种不支持自动交易"
                     }</button>)}
                 </div> : null}
               </div>
@@ -765,6 +769,7 @@ export function TripSetupPage({
         </fieldset>
         </ConfigProvider>
         <footer className="trip-setup-footer">
+          {queryBlock ? <small className="trip-setup-footer-hint" role="status">{queryBlock}</small> : null}
           <Button
             icon={<Save size={15} />}
             loading={busy === "saveConfig"}
@@ -777,11 +782,12 @@ export function TripSetupPage({
             type="primary"
             icon={<BarChart3 size={15} />}
             loading={busy === "analyzeQuery"}
+            disabled={!!queryBlock}
             onClick={() => void runCommand("analyzeQuery", { config })}
           >
             查询余票
           </Button>
-          <Button loading={busy === "analyzeQuery"}
+          <Button loading={busy === "analyzeQuery"} disabled={!!queryBlock}
             onClick={() => void runCommand("analyzeQuery", { config: { ...config, train_code: "" } })}>
             查询全部车次
           </Button>

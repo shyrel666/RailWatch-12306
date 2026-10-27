@@ -14,7 +14,7 @@ import {
   isTrustedRailWatchUrl,
   recordExportPathGrant,
 } from "./ipcSecurity";
-import { cleanupUrgentAlert, previewAlertSound, registerAlertIpcHandlers, showUrgentAlert, stopAlertSoundPreview,
+import { cleanupUrgentAlert, previewAlertSound, registerAlertIpcHandlers, showNoticeAlert, showUrgentAlert, stopAlertSoundPreview,
   stopUrgentAlertLoop, updateUrgentAlertSound, validateImportedAlertSound, type AlertPreferences } from "./alertManager";
 import { isAlertSoundTone, prepareSoundImport, storeImportedSound } from "./alertSoundFiles";
 import { ConfirmationBridge, type ConfirmationRequestPayload } from "./confirmationBridge";
@@ -381,6 +381,8 @@ function createWindow(): void {
           train_code: payload.train_code,
           kind: event.event === "humanAction" ? "humanAction" : "notify",
         }, alertPreferences);
+      } else if (payload.priority === "notice" && shouldShowUrgentEvent(payload.event_id)) {
+        showNoticeAlert(mainWindow, { title: payload.title || "RailWatch 提醒", message: payload.message || "" }, alertPreferences);
       }
     }
     sendToRenderer("railwatch:event", event);

@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { launchProcess, RailWatchNsisUpdater } from "../nsisUpdater";
+import { launchElevated, launchProcess, RailWatchNsisUpdater, windowsCommandLine } from "../nsisUpdater";
 import { INSTALLER_UNAVAILABLE } from "../updateManager";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -17,7 +17,9 @@ beforeEach(() => {
     children.push(child);
     return child;
   });
-  vi.stubGlobal("process", Object.assign(Object.create(process), { resourcesPath: "C:/RailWatch/resources" }));
+  vi.stubGlobal("process", Object.assign(Object.create(process), {
+    resourcesPath: "C:/RailWatch/resources", env: { ...process.env, SystemRoot: "C:\\Windows" },
+  }));
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -44,7 +46,7 @@ test("a ChildProcess return is not success until spawn is acknowledged", async (
   await pending;
   expect(children[0].unref).toHaveBeenCalledOnce();
   expect(mocks.spawn).toHaveBeenCalledWith("installer.exe", ["--updated"], {
-    detached: true, stdio: "ignore", windowsHide: true,
+    detached: true, stdio: "ignore", windowsHide: false,
   });
 });
 
@@ -70,15 +72,31 @@ test("verified NSIS metadata supplies installer flags without invoking upstream 
   instance.installDirectory = "C:/RailWatch install";
   const quit = vi.spyOn(instance, "quitAndInstall");
   const pending = instance.launchInstaller();
-  expect(mocks.spawn.mock.calls[0].slice(0, 2)).toEqual([
+  expect(mocks.spawn).toHaveBeenCalledWith(
     "C:/update cache/RailWatch.exe", ["--updated", "--force-run", "/D=C:/RailWatch install"],
-  ]);
+    { detached: true, stdio: "ignore", windowsHide: false },
+  );
   children[0].emit("spawn");
   await pending;
   expect(quit).not.toHaveBeenCalled();
 });
 
-test.each([0, 1])("elevation waits for helper exit and detects UAC cancellation (exit=%s)", async code => {
+const powershell = path.join("C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+
+function expectElevated(call: unknown[], installer: string, commandLine: string) {
+  const [executable, args, options] = call as [string, string[], { env: NodeJS.ProcessEnv }];
+  expect(executable).toBe(powershell);
+  expect(args.slice(0, 4)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
+  // Paths travel only through the environment, never inside the script text.
+  expect(args[4]).toContain("$info.Verb = 'runas'");
+  expect(args[4]).not.toContain(installer);
+  expect(options).toMatchObject({ stdio: "ignore", windowsHide: true });
+  // A detached powershell.exe exits 0 without running the script, faking UAC success.
+  expect(options).not.toHaveProperty("detached");
+  expect(options.env).toMatchObject({ RAILWATCH_ELEVATE_FILE: installer, RAILWATCH_ELEVATE_ARGS: commandLine });
+}
+
+test.each([0, 1223])("elevation waits for helper exit and detects UAC cancellation (exit=%s)", async code => {
   const pending = updater(true).launchInstaller();
   const outcome = pending.then(() => "launched", error => error.message);
   let settled = false;
@@ -86,18 +104,36 @@ test.each([0, 1])("elevation waits for helper exit and detects UAC cancellation 
   children[0].emit("spawn");
   await Promise.resolve();
   expect(settled).toBe(false);
-  expect(mocks.spawn.mock.calls[0][0]).toBe(path.join(process.resourcesPath, "elevate.exe"));
+  expect(mocks.spawn).toHaveBeenCalledOnce();
+  expectElevated(mocks.spawn.mock.calls[0], "C:/update cache/RailWatch.exe", "--updated --force-run");
   children[0].emit("exit", code, null);
-  expect(await outcome).toBe(code === 0 ? "launched" : "安装程序提权启动失败或已取消（1）。");
+  expect(await outcome).toBe(code === 0 ? "launched" : "安装程序提权启动失败或已取消（1223）。");
+});
+
+test("a PowerShell launch failure is reported instead of waiting for an exit", async () => {
+  const pending = launchElevated("C:/update cache/RailWatch.exe", ["--updated"]);
+  children[0].emit("error", Object.assign(new Error("missing"), { code: "ENOENT" }));
+  await expect(pending).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("access denial falls back to elevation and waits for that launch", async () => {
-  const pending = updater().launchInstaller();
+  const instance = updater();
+  instance.installDirectory = "C:/RailWatch install";
+  const pending = instance.launchInstaller();
   children[0].emit("error", Object.assign(new Error("denied"), { code: "EACCES" }));
   await new Promise(resolve => setImmediate(resolve));
   expect(children).toHaveLength(2);
-  expect(mocks.spawn.mock.calls[1][1]).toEqual(["C:/update cache/RailWatch.exe", "--updated", "--force-run"]);
+  expect(mocks.spawn).toHaveBeenNthCalledWith(1,
+    "C:/update cache/RailWatch.exe", ["--updated", "--force-run", "/D=C:/RailWatch install"],
+    { detached: true, stdio: "ignore", windowsHide: false },
+  );
+  expectElevated(mocks.spawn.mock.calls[1], "C:/update cache/RailWatch.exe", '--updated --force-run "/D=C:/RailWatch install"');
   children[1].emit("spawn");
   children[1].emit("exit", 0, null);
   await pending;
+});
+
+test("elevated arguments are quoted exactly as a direct launch would pass them", () => {
+  expect(windowsCommandLine(["--updated", "", "a b", 'say "hi"', "C:\\dir with space\\", 'x\\"y', "C:\\plain\\"]))
+    .toBe('--updated "" "a b" "say \\"hi\\"" "C:\\dir with space\\\\" "x\\\\\\"y" C:\\plain\\');
 });

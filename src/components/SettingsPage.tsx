@@ -11,6 +11,7 @@ import {
   FolderOpen,
   Globe,
   HardDrive,
+  KeyRound,
   LogIn,
   Monitor,
   MonitorX,
@@ -34,6 +35,7 @@ import type { RailWatchPreferences } from "../types";
 import { railwatchApi } from "../lib/railwatchApi";
 import { NotificationSettingsPanel } from "./NotificationSettingsPanel";
 import { SettingRow, SettingsSection } from "./SettingsPrimitives";
+import { IDLE_POLICY } from "../lib/idlePolicy";
 
 const SECTIONS: { id: string; label: string; icon: LucideIcon }[] = [
   { id: "settings-environment", label: "环境与登录", icon: Activity },
@@ -150,6 +152,8 @@ export function SettingsPage({
   const setAutoRehearsal = useRailWatchStore(state => state.setRehearsalEnabled);
   const [rehearsalSaving, setRehearsalSaving] = useState(false);
   const [closeToTray, setCloseToTray] = useState(false);
+  const [idleKeepAlive, setIdleKeepAlive] = useState(false);
+  const [idleSaving, setIdleSaving] = useState(false);
   const [traySaving, setTraySaving] = useState(false);
   const [trayReady, setTrayReady] = useState(false);
   const [trayError, setTrayError] = useState("");
@@ -167,7 +171,8 @@ export function SettingsPage({
   useEffect(() => {
     let alive = true;
     void railwatchApi.command<RailWatchPreferences>("loadPreferences").then((value) => {
-      if (alive) { setCloseToTray(value.close_to_tray === true); setAutoRehearsal(value.auto_rehearsal === true); setTrayReady(true); }
+      if (alive) { setCloseToTray(value.close_to_tray === true); setAutoRehearsal(value.auto_rehearsal === true);
+        setIdleKeepAlive(value.idle_keep_alive === true); setTrayReady(true); }
     }).catch((error) => { if (alive) setTrayError(error instanceof Error ? error.message : "无法加载关闭偏好。"); });
     return () => { alive = false; };
   }, [setAutoRehearsal]);
@@ -373,7 +378,7 @@ export function SettingsPage({
         <SettingsSection id="settings-appearance" icon={Palette} title="外观" description="选择界面配色，切换后立即生效。">
           <ThemePicker />
         </SettingsSection>
-        <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式与开售前检查。">
+        <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式、开售前检查与登录保持。">
           <SettingRow
             icon={PanelBottomClose}
             title="关闭到托盘"
@@ -392,6 +397,18 @@ export function SettingsPage({
             }
           >
             <p>在购票监控页提供开售前的只读检查；定时任务距起售超过 15 分钟时自动运行一次。</p>
+          </SettingRow>
+          <SettingRow
+            icon={KeyRound}
+            title="空闲时保持登录"
+            control={
+              <Switch aria-label="空闲时保持登录" checked={idleKeepAlive} disabled={!trayReady || idleSaving} loading={idleSaving}
+                onChange={next => { setIdleSaving(true); void railwatchApi.command<RailWatchPreferences>("savePreferences", { idle_keep_alive: next })
+                  .then(saved => { if (saved.idle_keep_alive !== next) throw new Error("保持登录偏好未保存"); setIdleKeepAlive(next); setTrayError(""); })
+                  .catch(() => setTrayError("空闲保持登录偏好未保存，请重试。")).finally(() => setIdleSaving(false)); }} />
+            }
+          >
+            <p>未在监控时，受控浏览器开着就每 {Math.round(IDLE_POLICY.login_keep_alive_seconds / 60)} 分钟检查一次登录状态，只检查登录、不查余票；已确认的登录失效时按通知设置提醒。</p>
           </SettingRow>
           {trayError && <p role="alert" className="settings-error">{trayError}</p>}
         </SettingsSection>

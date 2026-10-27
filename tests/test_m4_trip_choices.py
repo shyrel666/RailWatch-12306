@@ -157,9 +157,30 @@ class TripChoicesTests(unittest.TestCase):
             items = bridge.read_passengers()["items"]
             self.assertTrue(items[0]["ambiguous"])
             self.assertEqual(items[2]["identity_hint"], "")
+            self.assertEqual([item["default_adult"] for item in items], [False, False, False])
             bridge._browser_busy = True
             with self.assertRaisesRegex(RuntimeError, "浏览器正在操作"):
                 bridge.read_passengers()
+
+    def test_passenger_read_defaults_only_the_account_holder_to_adult(self):
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            bridge = RailWatchBridge(data_dir=data_dir)
+            bridge.driver = PassengerBrowser([passenger_page([
+                # The account holder's row carries no type data at all.
+                {"name": "本人", "ticket_type": "unknown", "type_source": "unavailable", "account_holder": True,
+                 "identity_hint": "11***22"},
+                {"name": "李四", "ticket_type": "unknown", "type_source": "profile_metadata", "identity_hint": "33***44"},
+                {"name": "王五", "ticket_type": "student", "type_source": "profile_metadata", "identity_hint": "55***66"},
+                # A contact whose type could not be read may be a student or child: never assumed adult.
+                {"name": "赵六", "ticket_type": "unknown", "type_source": "unavailable", "account_holder": False,
+                 "identity_hint": "77***88"},
+            ])])
+            items = bridge.read_passengers()["items"]
+        self.assertEqual([(item["name"], item["ticket_type"], item["default_adult"]) for item in items],
+                         [("本人", "adult", True), ("李四", "unknown", False), ("王五", "student", False),
+                          ("赵六", "unknown", False)])
 
     def test_passenger_read_navigates_and_reads_all_pages_then_restores_original(self):
         from railwatch_bridge import RailWatchBridge

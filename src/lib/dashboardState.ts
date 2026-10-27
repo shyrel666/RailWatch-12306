@@ -18,6 +18,16 @@ export function hasUnresolvedOrder(order?: OrderStage) {
   );
 }
 
+/**
+ * Why a manual browser task (a query, reading passengers) cannot run now. The runtime refuses the
+ * same cases: monitoring owns the browser, and a pending order keeps its page for the user.
+ */
+export function browserTaskBlock(monitoring: boolean, order: OrderStage | undefined, action: string) {
+  if (monitoring) return `监控运行中，请停止监控后${action}。`;
+  if (hasUnresolvedOrder(order)) return `有待支付或待核对的订单，受控浏览器需留给订单页，请先处理订单再${action}。`;
+  return "";
+}
+
 export function hasSetupWarning(status: RailWatchStatus) {
   return Boolean(
     status.error_message &&

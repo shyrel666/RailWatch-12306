@@ -225,16 +225,16 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
             priority?: string;
           };
           state.applyNotify(notifyPayload);
-          const notifyApi =
-            notifyPayload.priority === "urgent"
-              ? notification.warning
-              : notification.success;
+          // Notices (a lapsed login, a sale reminder) stay until closed, without the urgent sound loop.
+          const lasting = notifyPayload.priority === "urgent" || notifyPayload.priority === "notice";
+          const notifyApi = lasting ? notification.warning : notification.success;
           notifyApi({
-            key: "railwatch-notify",
+            // Its own slot: a notice must not replace an unclosed urgent alert and its onClose.
+            key: notifyPayload.priority === "notice" ? "railwatch-notice" : "railwatch-notify",
             message: notifyPayload.title,
             description: notifyPayload.message,
             placement: "topRight",
-            duration: notifyPayload.priority === "urgent" ? 0 : 4.5,
+            duration: lasting ? 0 : 4.5,
             onClose:
               notifyPayload.priority === "urgent"
                 ? () => railwatchApi.stopUrgentAlert()

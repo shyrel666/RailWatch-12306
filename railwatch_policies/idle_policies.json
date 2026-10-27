@@ -1,0 +1,5 @@
+{
+  "login_keep_alive_seconds": 300,
+  "sale_reminder_lead_minutes": 30,
+  "max_sale_reminders": 20
+}

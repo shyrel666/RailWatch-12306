@@ -79,31 +79,39 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
     def test_notification_secrets_are_protected_on_disk_and_redacted_from_renderer(self):
         from railwatch_bridge import RailWatchBridge
+        from railwatch_config_contract import NOTIFICATION_FIELDS, NOTIFICATION_SECRET_FIELDS
 
         protect = lambda value, slot="": f"protected:{str(value)[::-1]}" if value else ""
         unprotect = lambda value, slot="": str(value).removeprefix("protected:")[::-1]
+        # Every secret of the channel table, so a channel added later is covered without editing this test.
+        secrets = {field: f"https://secret-{field}.example/hook" if NOTIFICATION_FIELDS[field].get("type") == "url"
+                   else f"secret-{field}" for field in NOTIFICATION_SECRET_FIELDS}
+        self.assertLessEqual({"server_chan_key", "email_password", "wecom_webhook_url", "bark_key", "ntfy_topic_url", "ntfy_token"},
+                             set(secrets))
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("railwatch_bridge.protect_local_secret", side_effect=protect), \
             patch("railwatch_bridge.unprotect_local_secret", side_effect=unprotect):
             bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
-            result = bridge.save_preferences("dark", {
-                "server_chan_enabled": True,
-                "server_chan_key": "send-key",
-                "email_password": "mail-password",
-                "wecom_webhook_url": "https://qyapi.example/secret-hook",
-            })
+            result = bridge.save_preferences("dark", {"server_chan_enabled": True, **secrets})
             with open(os.path.join(temp_dir, "notification_settings.json"), encoding="utf-8") as handle:
-                persisted = handle.read()
-            self.assertNotIn("mail-password", persisted)
-            self.assertNotIn("secret-hook", persisted)
-            self.assertEqual(result["notification_settings"]["server_chan_key"], "")
-            self.assertTrue(result["notification_settings"]["server_chan_key_configured"])
+                raw = handle.read()
+            persisted = json.loads(raw)
+            for field, value in secrets.items():
+                with self.subTest(field=field):
+                    self.assertNotIn(value, raw)
+                    self.assertEqual(persisted[field], protect(value, field))
+                    self.assertEqual(result["notification_settings"][field], "")
+                    self.assertTrue(result["notification_settings"][f"{field}_configured"])
 
             bridge.save_preferences("dark", {"server_chan_key": ""})
-            self.assertEqual(bridge.notification_service.settings["server_chan_key"], "send-key")
+            self.assertEqual(bridge.notification_service.settings["server_chan_key"], secrets["server_chan_key"])
             restored = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
-            self.assertEqual(restored.notification_service.settings["email_password"], "mail-password")
-            self.assertEqual(restored.load_preferences()["notification_settings"]["email_password"], "")
+            loaded = restored.load_preferences()["notification_settings"]
+            for field, value in secrets.items():
+                with self.subTest(field=field):
+                    self.assertEqual(restored.notification_service.settings[field], value)
+                    self.assertEqual(loaded[field], "")
+                    self.assertTrue(loaded[f"{field}_configured"])
 
     def test_default_config_uses_reliability_strategy_and_preserves_trip_defaults(self):
         from railwatch_bridge import default_config
@@ -366,6 +374,23 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "监控运行中"):
                 bridge.analyze_query({"from_station_cn":"北京", "to_station_cn":"上海", "date":"2026-06-10"})
             self.assertTrue(bridge.is_monitoring)
+
+    def test_browser_tasks_leave_a_pending_order_page_alone(self):
+        from railwatch_bridge import RailWatchBridge
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = RailWatchBridge(tmp)
+            bridge._ensure_driver = Mock(side_effect=AssertionError("the browser must not be touched"))
+            bridge.driver = Mock()
+            bridge.order_journal.pending = Mock(return_value={"intent": {"intent_id": "i1"}})
+            with self.assertRaisesRegex(RuntimeError, "待支付或待核对订单.*再查询"):
+                bridge.analyze_query({"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-06-10"})
+            with self.assertRaisesRegex(RuntimeError, "待支付或待核对订单.*再读取乘客"):
+                bridge.read_passengers()
+            bridge.driver.execute.assert_not_called()
+            # The refusal releases the browser reservation, so other work is not blocked afterwards.
+            self.assertFalse(bridge._browser_busy)
+            bridge.driver = None
+            bridge.notification_service.close()
 
     def test_analyze_query_expands_date_range_and_tags_rows(self):
         from railwatch_bridge import RailWatchBridge

@@ -41,9 +41,17 @@ class PassengerBookBrowserTests(unittest.TestCase):
         result = self.read()
         self.assertTrue(result["recognized"] and result["complete"])
         self.assertEqual([p["ticket_type"] for p in result["items"]], ["unknown", "adult"])
+        self.assertEqual([p["account_holder"] for p in result["items"]], [True, False])
         self.assertEqual([p["verification"] for p in result["items"]], ["passed", "passed"])
         self.assertNotIn("SENSITIVE", json.dumps(result))
         self.assertEqual(self.driver.execute_script("return fixture.clicks"), [])
+
+    def test_contact_without_type_data_is_not_the_account_holder(self):
+        # A hidden or missing edit link leaves a contact as untyped as the holder's own row.
+        self.driver.execute_script("document.querySelector('.one-edit').remove()")
+        contact = self.read()["items"][1]
+        self.assertEqual((contact["ticket_type"], contact["type_source"], contact["account_holder"]),
+                         ("unknown", "unavailable", False))
 
     def test_profile_type_codes(self):
         for code, expected in [("1", "adult"), ("2", "child"), ("3", "student"), ("4", "unknown"), ("99", "unknown")]:

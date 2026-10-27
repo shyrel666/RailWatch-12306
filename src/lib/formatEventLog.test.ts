@@ -90,6 +90,20 @@ describe("presentEventLogs", () => {
     expect(events[0]?.detail).toBe("已准备就绪，等待启动监控");
   });
 
+  test("filters rows of renumbered X, N and V trains like any other query row", () => {
+    const events = presentEventLogs(
+      [
+        { time: "09:00:00", level: "INFO", message: "🚄 X1 | 北京南 07:00 -> 上海虹桥 10:30 ..." },
+        { time: "09:00:00", level: "INFO", message: "N12 | 北京 08:00 -> 天津 09:30 ..." },
+        { time: "09:00:00", level: "INFO", message: "🚄 V6001 | 北京 09:00 -> 保定 11:20 ..." },
+        { time: "09:00:01", level: "INFO", message: "系统就绪" },
+      ],
+      "全部",
+    );
+
+    expect(events.map((event) => event.title)).toEqual(["系统就绪"]);
+  });
+
   test("filters train row noise from the event feed", () => {
     const logs: LogEntry[] = [
       { time: "20:02:18", level: "INFO", message: "解析到 53 条车次结果（展示前 10 条）：" },

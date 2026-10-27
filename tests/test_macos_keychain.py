@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from railwatch_bridge import RailWatchBridge
+from railwatch_config_contract import NOTIFICATION_FIELDS, NOTIFICATION_SECRET_FIELDS
 from railwatch_preferences import (
     KEYCHAIN_ACCOUNT,
     KEYCHAIN_SERVICE,
@@ -177,6 +178,20 @@ class KeychainBridgeTests(unittest.TestCase):
         self.assertEqual(persisted["wecom_webhook_url"], "")
         self.assertNotIn("mail-secret", json.dumps(persisted))
         self.assertEqual(store.values, {"email_password": "mail-secret", "server_chan_key": "send"})
+
+        # Every secret of the channel table, so a channel added later is covered without editing this test.
+        secrets = {field: f"https://secret-{field}.example/hook" if NOTIFICATION_FIELDS[field].get("type") == "url"
+                   else f"secret-{field}" for field in NOTIFICATION_SECRET_FIELDS}
+        self.assertLessEqual({"bark_key", "ntfy_topic_url", "ntfy_token"}, set(secrets))
+        result = bridge.save_preferences(notification_settings=secrets)
+        persisted = self.read_settings()
+        for field, value in secrets.items():
+            with self.subTest(field=field):
+                self.assertEqual(persisted[field], f"keychain:{field}")
+                self.assertNotIn(value, json.dumps(persisted))
+                self.assertEqual(result["notification_settings"][field], "")
+                self.assertTrue(result["notification_settings"][f"{field}_configured"])
+        self.assertEqual(store.values, secrets)
         writes = store.calls.count("write_all")
         bridge.save_preferences(notification_settings={"sound_loop": False})
         self.assertEqual(store.calls.count("write_all"), writes)  # Unchanged secrets skip the keychain.

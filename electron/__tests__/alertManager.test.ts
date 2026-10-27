@@ -29,7 +29,7 @@ vi.mock("electron", () => ({
   shell: { openExternal: vi.fn() },
 }));
 
-import { cleanupUrgentAlert, previewAlertSound, showUrgentAlert, stopAlertSoundPreview,
+import { cleanupUrgentAlert, previewAlertSound, showNoticeAlert, showUrgentAlert, stopAlertSoundPreview,
   stopUrgentAlertLoop, updateUrgentAlertSound } from "../alertManager";
 import * as soundFiles from "../alertSoundFiles";
 
@@ -61,6 +61,15 @@ test("desktop notifications can be off while the alert sound remains on", () => 
   });
   expect(constructed.notifications).toBe(0);
   expect(constructed.soundWindows).toBe(1);
+});
+
+test("a notice shows only a system notification, and none when desktop notifications are off", () => {
+  const preferences = { desktop_urgent: true, sound_loop: true, window_attention: true };
+  showNoticeAlert(null, { title: "起售提醒", message: "15:00 起售" }, preferences);
+  expect(constructed.notifications).toBe(1);
+  expect(constructed.soundWindows).toBe(0);
+  showNoticeAlert(null, { title: "起售提醒", message: "15:00 起售" }, { ...preferences, desktop_urgent: false });
+  expect(constructed.notifications).toBe(1);
 });
 
 test("disabling sound stops the existing loop without creating another sound window", () => {

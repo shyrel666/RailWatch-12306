@@ -5,15 +5,16 @@ from __future__ import annotations
 import datetime as dt
 import math
 import re
+import urllib.parse
 from railwatch_dates import validate_travel_date, beijing_now
 from railwatch_alternate_options import canonical_deadline, deadline_minutes, normalize_windows
 from dataclasses import asdict
-from railwatch_policies import DATE_STRATEGIES, ORDER_POLICIES, normalize_strategy, priority_defaults
+from railwatch_policies import (DATE_STRATEGIES, NOTIFICATION_CHANNEL_TABLE, ORDER_POLICIES, TRAIN_CODE_BODY, normalize_strategy,
+                                priority_defaults)
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
 CONFIG_VERSION = 2
-TRAIN_CODE_BODY = r"(?:[GDCZTKYSL]\d{1,5}|\d{4,5})"
 TRAIN_CODE_VALUE_PATTERN = re.compile(TRAIN_CODE_BODY, re.IGNORECASE)
 TRIP_DRAFT_VERSION = 1
 MAX_SAFE_REVISION = 2 ** 53 - 1
@@ -57,6 +58,15 @@ TRIP_FIELD_KEYS = (
     "burst_window_seconds",
     "prewarm_lead_seconds",
 )
+
+# External notification channels and their settings fields, from the table shared with the renderer.
+NOTIFICATION_CHANNELS = tuple(NOTIFICATION_CHANNEL_TABLE["channels"])
+NOTIFICATION_FIELDS = {name: field for spec in NOTIFICATION_CHANNEL_TABLE["channels"].values()
+                       for name, field in spec["fields"].items()}
+NOTIFICATION_SECRET_FIELDS = tuple(name for name, field in NOTIFICATION_FIELDS.items() if field.get("secret"))
+NOTIFICATION_REQUIRED_FIELDS = {channel: tuple(name for name, field in spec["fields"].items() if field.get("required"))
+                                for channel, spec in NOTIFICATION_CHANNEL_TABLE["channels"].items()}
+_LEGACY_EVENT_CHANNELS = ("server_chan", "email", "wecom_webhook")
 
 # Route A (default): compliance-first strong alerts; no captcha bypass.
 # Route B (opt-in, not implemented): would require explicit user consent for auto-captcha.
@@ -272,9 +282,39 @@ def validate_config(raw_config: Optional[Mapping[str, Any]] = None) -> Dict[str,
     return base
 
 
+def _notification_channel_defaults() -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {}
+    for channel, spec in NOTIFICATION_CHANNEL_TABLE["channels"].items():
+        defaults[f"{channel}_enabled"] = False
+        defaults.update({name: field.get("default", "") for name, field in spec["fields"].items()})
+    return defaults
+
+
+def https_url(value: object) -> str:
+    """Return the address when it is a plain https:// URL with a host, else ""."""
+    text = str(value or "").strip()
+    if any(char.isspace() or ord(char) < 32 for char in text):
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return ""
+    return text if parts.scheme == "https" and parts.hostname else ""
+
+
+def ntfy_endpoint(value: object) -> Optional[tuple]:
+    """Split an ntfy topic address into (server root, topic); None unless the sender can use both.
+
+    Self-hosted servers may sit under a path; the topic is the last segment, as ntfy names it.
+    """
+    root, _, topic = https_url(value).rstrip("/").rpartition("/")
+    return (root, topic) if re.fullmatch(r"[-_A-Za-z0-9]{1,64}", topic) and https_url(root) else None
+
+
 def merge_notification_settings(raw: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    events = ("hit", "verification", "payment", "alternate_active", "alternate_fulfilled", "purchase_success")
-    channels = ("server_chan", "email", "wecom_webhook")
+    events = ("hit", "verification", "payment", "alternate_active", "alternate_fulfilled", "purchase_success",
+              "login_expired", "sale_reminder")
+    channels = NOTIFICATION_CHANNELS
     defaults = {
         "desktop_urgent": True,
         "sound_loop": True,
@@ -282,17 +322,9 @@ def merge_notification_settings(raw: Optional[Mapping[str, Any]] = None) -> Dict
         "sound_custom_file": "",
         "sound_custom_name": "",
         "window_attention": True,
-        "server_chan_enabled": False,
-        "server_chan_key": "",
-        "email_enabled": False,
-        "email_smtp_host": "",
-        "email_smtp_port": 465,
-        "email_user": "",
-        "email_password": "",
-        "email_to": "",
-        "wecom_webhook_enabled": False,
-        "wecom_webhook_url": "",
+        **_notification_channel_defaults(),
         "event_channels": {event: list(channels) for event in events},
+        "event_channels_seeded": list(channels),
     }
     if not raw:
         return defaults
@@ -310,13 +342,25 @@ def merge_notification_settings(raw: Optional[Mapping[str, Any]] = None) -> Dict
     if merged["sound_tone"] == "custom" and not merged["sound_custom_file"]:
         merged["sound_tone"] = "beep"
     merged["window_attention"] = _to_bool(merged.get("window_attention"))
-    merged["server_chan_enabled"] = _to_bool(merged.get("server_chan_enabled"))
-    merged["email_enabled"] = _to_bool(merged.get("email_enabled"))
-    merged["wecom_webhook_enabled"] = _to_bool(merged.get("wecom_webhook_enabled"))
+    for channel in channels:
+        merged[f"{channel}_enabled"] = _to_bool(merged.get(f"{channel}_enabled"))
+    for name, field in NOTIFICATION_FIELDS.items():
+        if field.get("type") == "switch":
+            merged[name] = _to_bool(merged.get(name))
     selected = merged.get("event_channels")
     merged["event_channels"] = {event: list(selected[event]) if isinstance(selected, dict) and
                                  isinstance(selected.get(event), list) else list(channels)
                                  for event in events}
+    # A channel these settings have never seen starts on every event, as on a fresh install;
+    # once recorded, later unchecks stay. Settings without a record predate the newer channels.
+    seeded = raw.get("event_channels_seeded")
+    seeded = seeded if isinstance(seeded, list) else _LEGACY_EVENT_CHANNELS
+    for channel in channels:
+        if channel not in seeded:
+            for chosen in merged["event_channels"].values():
+                if channel not in chosen:
+                    chosen.append(channel)
+    merged["event_channels_seeded"] = list(channels)
     return merged
 
 
@@ -324,11 +368,17 @@ def validate_notification_patch(patch: object) -> dict:
     """Validate M3 UI input without changing M0's partial-update semantics."""
     if not isinstance(patch, dict):
         raise ValueError("通知设置必须为对象。")
-    bool_fields = {"desktop_urgent", "sound_loop", "window_attention", "server_chan_enabled", "email_enabled", "wecom_webhook_enabled"}
-    text_fields = {"server_chan_key", "email_smtp_host", "email_user", "email_password", "email_to", "wecom_webhook_url", "sound_custom_file", "sound_custom_name"}
-    known = bool_fields | text_fields | {"email_smtp_port", "event_channels", "sound_tone"}
+    kinds = {name: field.get("type", "text") for name, field in NOTIFICATION_FIELDS.items()}
+    channel_text = {name for name, kind in kinds.items() if kind in ("text", "url")}
+    single_line = {name for name in channel_text if not NOTIFICATION_FIELDS[name].get("allow_newline")}
+    urls = {name for name, kind in kinds.items() if kind == "url"}
+    ports = {name for name, kind in kinds.items() if kind == "port"}
+    bool_fields = {"desktop_urgent", "sound_loop", "window_attention", *(f"{channel}_enabled" for channel in NOTIFICATION_CHANNELS),
+                   *(name for name, kind in kinds.items() if kind == "switch")}
+    text_fields = channel_text | {"sound_custom_file", "sound_custom_name"}
+    known = bool_fields | text_fields | ports | {"event_channels", "sound_tone"}
     events = set(merge_notification_settings()["event_channels"])
-    channels = {"server_chan", "email", "wecom_webhook"}
+    channels = set(NOTIFICATION_CHANNELS)
     cleaned = {}
     for key, value in patch.items():
         if key.endswith("_configured"):
@@ -337,12 +387,16 @@ def validate_notification_patch(patch: object) -> dict:
             raise ValueError(f"未知通知设置字段：{key}")
         if key in bool_fields and type(value) is not bool:
             raise ValueError(f"通知开关必须为布尔值：{key}")
-        if key in text_fields and not (isinstance(value, str) and len(value) <= 512 or value is None and key in ("server_chan_key", "email_password", "wecom_webhook_url")):
+        if key in text_fields and not (isinstance(value, str) and len(value) <= 512 or value is None and key in NOTIFICATION_SECRET_FIELDS):
             raise ValueError(f"通知字段无效：{key}")
-        if key in ("email_smtp_host", "email_user", "email_to", "server_chan_key") and isinstance(value, str) and any(char in value for char in "\r\n"):
+        if key in single_line and isinstance(value, str) and any(char in value for char in "\r\n"):
             raise ValueError(f"通知字段包含非法换行：{key}")
-        if key == "email_smtp_port" and (type(value) is not int or not 1 <= value <= 65535):
-            raise ValueError("SMTP 端口必须在 1 至 65535 之间。")
+        if key in urls and value and not https_url(value):
+            raise ValueError(f"{NOTIFICATION_FIELDS[key]['label']}须为 https:// 开头的完整地址。")
+        if key == "ntfy_topic_url" and value and not ntfy_endpoint(value):
+            raise ValueError("ntfy 主题地址须为 https://服务器/主题名，主题名仅含字母、数字、-、_。")
+        if key in ports and (type(value) is not int or not 1 <= value <= 65535):
+            raise ValueError(f"{NOTIFICATION_FIELDS[key]['label']}必须在 1 至 65535 之间。")
         if key == "sound_tone" and value not in ("beep", "chime", "double", "alarm", "custom"):
             raise ValueError("提示音选择无效。")
         if key == "sound_custom_file" and value and not re.fullmatch(r"[a-f0-9]{64}\.(wav|mp3|ogg|m4a)", value):

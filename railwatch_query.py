@@ -6,7 +6,35 @@ import re
 import time
 import uuid
 
-from railwatch_policies import QUERY_STRATEGIES
+from railwatch_policies import QUERY_STRATEGIES, TRAIN_CODE_TABLE
+
+
+class MissingTargets:
+    """Target trains absent from consecutive complete results of one date while the route lists others.
+
+    12306's 2026 renumbering changes numbers from a given date on, so a saved number
+    silently stops matching; a train that does not run that day looks the same.
+    Counting per date keeps a range that straddles the change date from hiding it.
+    """
+
+    def __init__(self, rounds=None):
+        self.rounds = rounds or TRAIN_CODE_TABLE["missing_target_rounds"]
+        self._misses = {}
+
+    def observe(self, date, targets, listed):
+        """Record one complete, non-empty result; return the targets that just reached the threshold."""
+        reached = []
+        for train in targets:
+            count = 0 if train in listed else self._misses.get((train, date), 0) + 1
+            self._misses[(train, date)] = count
+            if count == self.rounds:
+                reached.append(train)
+        return reached
+
+    def missing(self, dates):
+        """Targets at or past the threshold on the given dates, by date and then train."""
+        return [{"train": train, "date": date} for (train, date), count in sorted(self._misses.items(), key=lambda item: item[0][::-1])
+                if count >= self.rounds and date in dates]
 
 
 def query_conditions(config):

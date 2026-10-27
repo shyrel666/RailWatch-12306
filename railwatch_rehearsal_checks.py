@@ -6,7 +6,8 @@ import math
 import time
 from dataclasses import replace
 from urllib.parse import urlparse
-from railwatch_config_contract import automation_config_issue, parse_codes, parse_passenger_names
+from railwatch_config_contract import (NOTIFICATION_REQUIRED_FIELDS, automation_config_issue, parse_codes,
+                                       parse_passenger_names)
 from railwatch_dates import beijing_now, PRESALE_WINDOW_DAYS
 from railwatch_rehearsal import background, await_diagnostic
 from railwatch_sale_times import official_sale_at
@@ -53,6 +54,19 @@ def check_sale_time(config, official, now, checked_at=None):
                   fix=fix(section="trip-timer", label="设置定时"))
 
 
+def book_ticket_type(person):
+    """The book shows no type for the account holder: that row defaults to adult.
+
+    Only the row the page marks as the holder qualifies, and only while it carries no
+    type data. A contact whose type could not be read stays unknown, so a page change
+    never turns every contact adult. The order page still reads every ticket type back
+    before submitting, so a non-adult passenger never gets submitted.
+    """
+    kind = person.get("ticket_type")
+    return ("adult" if kind == "unknown" and person.get("account_holder") is True
+            and person.get("type_source") == "unavailable" else kind)
+
+
 def check_passengers(config, book):
     repair = fix(label="修改乘车人")
     if not book.get("complete"):
@@ -69,19 +83,19 @@ def check_passengers(config, book):
             status, message = "fail", "存在同名记录，自动勾选会被拒绝，请在官方页面处理"
         else:
             person = matches[0]
-            kind, verification = person.get("ticket_type"), person.get("verification")
+            kind, verification = book_ticket_type(person), person.get("verification")
+            if kind != person.get("ticket_type"):
+                # An assumed type is not adult evidence: only the order page's readback confirms it.
+                status, message = "warn", "唯一匹配，默认成人（官方列表未显示票种），下单页回读确认"
             if kind in ("student", "child") or person.get("unsupported_ticket_type"):
                 status, message = "fail", "自动交易仅支持成人票"
             elif verification == "failed":
                 status, message = "fail", "身份核验未通过，请在官方页面处理"
-            elif kind != "adult" and person.get("type_source") != "unavailable":
+            elif kind != "adult":
                 status = "fail" if config.get("auto_alternate") else "warn"
                 message = "列表未明确成人票种；普通订单将在下单页回读，候补无法预先确认"
             elif verification != "passed":
                 status, message = "warn", "身份状态需按证件情况人工核对，未认定为官方拒绝购票"
-            elif kind != "adult":
-                status = "warn"
-                message = "官方列表未提供票种证据；须在下单页或候补页核对成人票，彩排不能确认"
             saved = selections.get(name, {}).get("identity_hint")
             actual = person.get("identity_hint")
             if saved and actual and saved != actual:
@@ -197,8 +211,7 @@ def check_scheduler(sample):
 
 
 def check_alerts(settings, statuses, credentials_pending=False):
-    required = {"server_chan": ("server_chan_key",), "email": ("email_smtp_host", "email_user", "email_password", "email_to"),
-                "wecom_webhook": ("wecom_webhook_url",)}
+    required = NOTIFICATION_REQUIRED_FIELDS
     if credentials_pending:
         return result("warn", "外部通知凭据尚未授权，命中时无法发送外部提醒",
                       details=["请在系统钥匙串授权弹窗中选择“始终允许”。"],

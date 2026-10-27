@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { createRailWatchStore, defaultStatus } from "./railwatchStore";
 import { queryConfig, querySnapshot, queryTime } from "../test/queryFixtures";
 import type { QuerySnapshot } from "../types";
-import { queryFreshness } from "../lib/queryResults";
+import { missingTargetsNotice, queryFreshness, renumberTimetable, replaceTrainCode } from "../lib/queryResults";
 
 function monitorStore() {
   const store = createRailWatchStore();
@@ -140,4 +140,60 @@ test("freshness accounts for query timeout, multi-date cycles, backoff and stopp
   expect(queryFreshness(view, { ...active, monitoring: false }, queryConfig, queryTime + 2)).toContain("当前未监控");
   expect(queryFreshness(view, { ...active, task: { status: "stopping" } }, queryConfig, queryTime + 2)).toContain("已暂停");
   expect(queryFreshness({ ...view, latest: { ...snap, status: "error", error: "限频" } }, active, queryConfig, queryTime)).toContain("本轮查询失败");
+});
+
+describe("target trains missing from complete results", () => {
+  const report = { rounds: 3, items: [{ train: "K1234", date: "2026-11-25" }, { train: "K1234", date: "2026-11-26" },
+    { train: "T110", date: "2026-11-26" }] };
+
+  test("the notice names each train with its dates and clears when nothing is missing", () => {
+    expect(missingTargetsNotice(report)).toBe("目标车次 K1234（2026-11-25、2026-11-26）、T110（2026-11-26）已连续 3 次不在查询结果中，" +
+      "同区间仍有其他车次：可能已因全国车次调整换号，或当日不开行。请在官方页面核对，确认换号后停止监控并修改车次。");
+    expect(missingTargetsNotice({ rounds: 3, items: [] })).toBeNull();
+    expect(missingTargetsNotice(null)).toBeNull();
+  });
+
+  test("the store keeps the current run's latest report and ignores other runs", () => {
+    const store = monitorStore();
+    const snapshot = querySnapshot();
+    store.getState().applyMonitorTick({ run_id: "run", loop: 1, date: snapshot.conditions.date, rows: snapshot.rows, snapshot,
+      missing_targets: report });
+    expect(store.getState().missingTargets).toEqual({ ...report, run_id: "run" });
+    store.getState().applyMonitorTick({ run_id: "other", loop: 2, date: snapshot.conditions.date, rows: [],
+      missing_targets: { rounds: 3, items: [] } });
+    expect(store.getState().missingTargets?.items).toHaveLength(3);
+    // A round without a complete result keeps the last report instead of clearing it.
+    store.getState().applyMonitorTick({ run_id: "run", loop: 3, date: snapshot.conditions.date, rows: [] });
+    expect(store.getState().missingTargets?.items).toHaveLength(3);
+    store.getState().applyMonitorTick({ run_id: "run", loop: 4, date: snapshot.conditions.date, rows: [],
+      missing_targets: { rounds: 3, items: [] } });
+    expect(store.getState().missingTargets?.items).toEqual([]);
+  });
+});
+
+describe("renumbered train suggestions", () => {
+  const candidate = { train: "N1234", from_station: "上海虹桥", to_station: "南京南", departure_time: "22:10",
+    arrival_time: "06:05", arrival_day_offset: 1, seen_date: "2026-11-20" };
+
+  test("replacing keeps the order and never lists a number twice", () => {
+    expect(replaceTrainCode("g101, K1234，T110", "K1234", "N1234")).toBe("G101, N1234, T110");
+    expect(replaceTrainCode("N1234 K1234", "K1234", "N1234")).toBe("N1234");
+    expect(replaceTrainCode("G101", "K1234", "N1234")).toBe("G101");
+    expect(renumberTimetable(candidate)).toBe("上海虹桥 22:10 → 南京南 次日06:05");
+  });
+
+  test("a manual query's matches live and die with its results", () => {
+    const store = createRailWatchStore();
+    store.getState().setConfig(queryConfig);
+    const snapshot = querySnapshot({ run_id: null });
+    const renumber = [{ train: "K1234", date: snapshot.conditions.date, candidates: [candidate] }];
+    store.getState().beginManualQuery("q", queryConfig);
+    store.getState().applyResults({ request_id: "q", snapshots: [snapshot], rows: snapshot.rows, renumber });
+    expect(store.getState().queryRenumber).toEqual({ request_id: "q", items: renumber });
+    store.getState().beginManualQuery("again", queryConfig);
+    expect(store.getState().queryRenumber).toBeNull();
+    store.getState().applyResults({ request_id: "again", snapshots: [snapshot], rows: snapshot.rows, renumber });
+    store.getState().setConfig({ train_code: "N1234" });
+    expect(store.getState().queryRenumber).toBeNull();
+  });
 });

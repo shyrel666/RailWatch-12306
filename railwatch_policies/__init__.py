@@ -1,10 +1,14 @@
 """Query policy data shared with the renderer and included in runtime builds."""
 import json
+import re
 from importlib.resources import files
 
 QUERY_STRATEGIES = json.loads(files(__package__).joinpath("query_strategies.json").read_text(encoding="utf-8"))
 DATE_STRATEGIES = json.loads(files(__package__).joinpath("date_strategies.json").read_text(encoding="utf-8"))
 ORDER_POLICIES = json.loads(files(__package__).joinpath("order_policies.json").read_text(encoding="utf-8"))
+NOTIFICATION_CHANNEL_TABLE = json.loads(files(__package__).joinpath("notification_channels.json").read_text(encoding="utf-8"))
+TRAIN_CODE_TABLE = json.loads(files(__package__).joinpath("train_codes.json").read_text(encoding="utf-8"))
+IDLE_POLICIES = json.loads(files(__package__).joinpath("idle_policies.json").read_text(encoding="utf-8"))
 
 
 def _check_range(policies, key, low, high, types=(int, float)):
@@ -34,8 +38,62 @@ def validate_query_strategies(strategies):
     return strategies
 
 
+def validate_notification_channels(table):
+    """Field names become settings keys and renderer types; reject ambiguous tables at load.
+
+    Flags appear only when true: the renderer derives secret fields from key presence.
+    Port and switch fields state their default, which also gives the renderer their value type.
+    """
+    seen = set()
+    for channel, spec in table["channels"].items():
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", channel) or not spec.get("label") or not spec.get("fields"):
+            raise ValueError(f"通知渠道 {channel!r} 定义无效")
+        for name, field in spec["fields"].items():
+            kind = field.get("type", "text")
+            value_type = {"text": str, "url": str, "port": int, "switch": bool}.get(kind)
+            if (not name.startswith(f"{channel}_") or name.endswith(("_enabled", "_configured")) or name in seen
+                    or not field.get("label") or value_type is None
+                    or any(field.get(flag, True) is not True for flag in ("secret", "required", "allow_newline"))
+                    or value_type is not str and (field.get("secret") or field.get("required") or "default" not in field)
+                    or field.get("allow_newline") and kind != "text"
+                    or type(field.get("default", "")) is not value_type):
+                raise ValueError(f"通知字段 {name!r} 定义无效")
+            seen.add(name)
+    return table
+
+
+def validate_train_codes(table):
+    """Prefixes become a regex character class here and in the renderer; reject anything else at load.
+
+    12306 renumbers in two batches (late November and late December 2026), so the
+    old prefixes stay listed beside X, N and V until it no longer shows them.
+    """
+    prefixes = table.get("prefixes")
+    if (not isinstance(prefixes, list) or not prefixes or len(set(prefixes)) != len(prefixes)
+            or not all(isinstance(prefix, str) and re.fullmatch(r"[A-Z]", prefix) for prefix in prefixes)):
+        raise ValueError(f"车次字头定义无效：{prefixes!r}")
+    # One missing result can be a page glitch; a saved number that has changed never comes back.
+    _check_range(table, "missing_target_rounds", 2, 20, (int,))
+    return table
+
+
+def validate_idle_policies(policies):
+    """Work done while no task runs: a login probe, never a ticket query, and route reminders."""
+    _check_range(policies, "login_keep_alive_seconds", 120, 900)
+    _check_range(policies, "sale_reminder_lead_minutes", 5, 120, (int,))
+    _check_range(policies, "max_sale_reminders", 1, 50, (int,))
+    return policies
+
+
 validate_order_policies(ORDER_POLICIES)
+validate_idle_policies(IDLE_POLICIES)
 validate_query_strategies(QUERY_STRATEGIES)
+validate_notification_channels(NOTIFICATION_CHANNEL_TABLE)
+validate_train_codes(TRAIN_CODE_TABLE)
+
+# A train number: a listed prefix and up to five digits, or a bare four- or five-digit number.
+TRAIN_CODE_PREFIX = "[" + "".join(TRAIN_CODE_TABLE["prefixes"]) + "]"
+TRAIN_CODE_BODY = r"(?:" + TRAIN_CODE_PREFIX + r"\d{1,5}|\d{4,5})"
 
 
 def priority_defaults(priority=None):

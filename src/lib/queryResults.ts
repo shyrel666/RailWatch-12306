@@ -1,4 +1,4 @@
-import type { QueryConditions, QuerySnapshot, RailWatchConfig, RailWatchStatus } from "../types";
+import type { MissingTargets, QueryConditions, QuerySnapshot, RailWatchConfig, RailWatchStatus, RenumberCandidate } from "../types";
 import { getDateRangeStatus } from "./tripDate";
 
 export type QueryView = { owner: string; latest: QuerySnapshot; success: QuerySnapshot | null };
@@ -6,6 +6,26 @@ export type QueryViews = Record<string, QueryView>;
 
 export function queryTargets(value: string) {
   return [...new Set(value.trim().split(/[,，、;；\s]+/).filter(Boolean))];
+}
+
+/** The train list with `from` replaced in place by `to`, which is never listed twice. */
+export function replaceTrainCode(value: string, from: string, to: string) {
+  return [...new Set(queryTargets(value.toUpperCase()).map(code => code === from ? to : code))].join(", ");
+}
+
+export function renumberTimetable(candidate: RenumberCandidate) {
+  const days = ["", "次日", "第三日", "第四日"][candidate.arrival_day_offset] ?? "";
+  return `${candidate.from_station} ${candidate.departure_time} → ${candidate.to_station} ${days}${candidate.arrival_time}`;
+}
+
+/** Why the run may never match a saved train number; null when every target still appears. */
+export function missingTargetsNotice(report: MissingTargets | null) {
+  if (!report?.items.length) return null;
+  const dates = new Map<string, string[]>();
+  for (const { train, date } of report.items) dates.set(train, [...(dates.get(train) ?? []), date]);
+  const trains = [...dates].map(([train, list]) => `${train}（${list.join("、")}）`).join("、");
+  return `目标车次 ${trains}已连续 ${report.rounds} 次不在查询结果中，同区间仍有其他车次：可能已因全国车次调整换号，或当日不开行。` +
+    "请在官方页面核对，确认换号后停止监控并修改车次。";
 }
 
 export function queryFamily(config: RailWatchConfig) {

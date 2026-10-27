@@ -314,7 +314,8 @@ export function DashboardPage({ onCheckEnvironment }: { onCheckEnvironment?: () 
         <QueryPulseCard status={status} loops={loops} now={now} />
         <RunHistoryCard monitoring={status.monitoring} now={now} />
       </div>
-      <SaleCalendar station={config.from_station_cn} tripDate={config.date} windowDays={windowDays} now={now} />
+      <SaleCalendar station={config.from_station_cn} destination={config.to_station_cn} tripDate={config.date}
+        windowDays={windowDays} now={now} />
       <section className="dashboard-events" aria-label="最近活动">
         <div className="section-heading">
           <h2><ScrollText size={15} /> 最近活动</h2>

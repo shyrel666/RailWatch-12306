@@ -94,6 +94,13 @@ class RailWatchConfigContractTests(unittest.TestCase):
         for module in pyproject.parent.glob("railwatch_*.py"):
             self.assertIn(f'"{module.stem}"', content)
 
+    def test_policy_json_is_packaged_for_both_builds(self):
+        root = Path(__file__).resolve().parents[1]
+        builds = {name: (root / name).read_text(encoding="utf-8") for name in ("pyproject.toml", "RailWatch_runtime.spec")}
+        for policy in (root / "railwatch_policies").glob("*.json"):
+            for name, content in builds.items():
+                self.assertIn(f'"{policy.name}"', content, name)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,27 @@
+{
+  "channels": {
+    "server_chan": {"label": "Server酱", "fields": {
+      "server_chan_key": {"label": "Server酱 SendKey", "secret": true, "required": true}
+    }},
+    "email": {"label": "邮件", "fields": {
+      "email_smtp_host": {"label": "SMTP 服务器", "required": true},
+      "email_smtp_port": {"label": "SMTP 端口", "type": "port", "default": 465},
+      "email_user": {"label": "发件账号", "required": true},
+      "email_password": {"label": "SMTP 密码", "secret": true, "required": true, "allow_newline": true},
+      "email_to": {"label": "收件地址", "required": true}
+    }},
+    "wecom_webhook": {"label": "企业微信", "fields": {
+      "wecom_webhook_url": {"label": "企业微信 Webhook", "secret": true, "required": true, "allow_newline": true}
+    }},
+    "bark": {"label": "Bark", "fields": {
+      "bark_key": {"label": "Bark 设备 Key", "secret": true, "required": true},
+      "bark_server": {"label": "Bark 服务器", "type": "url", "default": "https://api.day.app"},
+      "bark_critical": {"label": "静音也响", "type": "switch", "default": false},
+      "bark_call": {"label": "持续响铃", "type": "switch", "default": false}
+    }},
+    "ntfy": {"label": "ntfy", "fields": {
+      "ntfy_topic_url": {"label": "ntfy 主题地址", "type": "url", "secret": true, "required": true},
+      "ntfy_token": {"label": "ntfy 访问令牌（可选）", "secret": true}
+    }}
+  }
+}

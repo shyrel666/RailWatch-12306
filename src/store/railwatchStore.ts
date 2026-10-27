@@ -7,6 +7,8 @@ import { conditionsMatch, mergeQuerySnapshots, queryFamily, queryRows, type Quer
 import type {
   HumanActionPayload,
   LogEntry,
+  MissingTargets,
+  RenumberSuggestion,
   MonitorTickPayload,
   NotifyPayload,
   QueryResultRow,
@@ -150,6 +152,10 @@ export type RailWatchStore = {
   beginManualQuery: (id: string, config: RailWatchConfig) => void;
   endManualQuery: (id: string, error?: string) => void;
   monitorLoops: number;
+  /** The latest report of the run that sent it; shown only while that run is current. */
+  missingTargets: (MissingTargets & { run_id: string }) | null;
+  /** Renumbering matches of the manual query whose results are shown; cleared with those results. */
+  queryRenumber: { request_id: string; items: RenumberSuggestion[] } | null;
   hits: TicketHit[];
   notifications: NotifyPayload[];
   lastHumanAction: HumanActionPayload | null;
@@ -256,6 +262,8 @@ export function createRailWatchStore() {
     manualQueryPending: false,
     manualQueryError: null,
     monitorLoops: 0,
+    missingTargets: null,
+    queryRenumber: null,
     hits: [],
     notifications: [],
     lastHumanAction: null,
@@ -293,7 +301,7 @@ export function createRailWatchStore() {
         ...(!status.monitoring && !get().manualQueryPending ? { activeQuery: null } : {}),
         ...(orderResolved ? { lastHumanAction: null } : {}),
         ...(changed ? { monitorLoops: 0, results: [], queryViews: {}, activeQuery: null, queryConfig: { ...get().config, ...status.current_config },
-          manualQueryId: null, manualQueryPending: false, manualQueryError: null, lastHumanAction: null,
+          queryRenumber: null, manualQueryId: null, manualQueryPending: false, manualQueryError: null, lastHumanAction: null,
           retiredRuns: current ? [...get().retiredRuns, current].slice(-1000) : get().retiredRuns } : {}),
         ...(changed ? { dismissedHumanActionKey: null } : {}),
         ...(status.human_action && (changed || humanActionKey(status.human_action) !== get().dismissedHumanActionKey)
@@ -313,6 +321,7 @@ export function createRailWatchStore() {
         const merged = mergeQuerySnapshots(get().queryViews, payload.snapshots.filter(s => s.run_id === null),
           `manual:${payload.request_id}`, get().queryConfig!);
         if (merged.accepted) set({ queryViews: merged.views, results: queryRows(merged.views), activePage: "购票监控",
+          queryRenumber: { request_id: payload.request_id!, items: payload.renumber ?? [] },
           ...(payload.snapshots.some(s => s.query_id === get().activeQuery?.query_id) ? { activeQuery: null } : {}) });
         return;
       }
@@ -321,6 +330,7 @@ export function createRailWatchStore() {
     },
     applyMonitorTick: (payload) => {
       if (payload.run_id && payload.run_id !== get().status.task?.run_id) return;
+      if (payload.run_id && payload.missing_targets) set({ missingTargets: { ...payload.missing_targets, run_id: payload.run_id } });
       if (payload.snapshot) {
         if (!payload.run_id || payload.snapshot.run_id !== payload.run_id || get().manualQueryId || !get().status.monitoring) return;
         const config = get().queryConfig ?? { ...get().config, ...get().status.current_config };
@@ -336,6 +346,7 @@ export function createRailWatchStore() {
       if (get().status.monitoring) return;
       const same = get().queryConfig && queryFamily(get().queryConfig!) === queryFamily(config);
       set({ manualQueryId: id, manualQueryPending: true, manualQueryError: null, activeQuery: null, queryConfig: { ...config },
+        queryRenumber: null,
         ...(same ? {} : { queryViews: {}, results: [] }) });
     },
     endManualQuery: (id, error) => {
@@ -375,7 +386,7 @@ export function createRailWatchStore() {
       set({ config, editRevision: get().editRevision + 1, draftSaveState: "editing", draftError: null,
         ...(!get().tripInitialized ? { pendingTripEdits: { ...(get().editRevision ? get().pendingTripEdits : {}), ...patch } } : {}),
         ...(!get().status.monitoring && changed ? { queryViews: {}, results: [], queryConfig: null, activeQuery: null,
-        manualQueryId: null, manualQueryPending: false,
+        queryRenumber: null, manualQueryId: null, manualQueryPending: false,
         manualQueryError: get().manualQueryPending ? "查询条件已改变，本次查询结果已作废" : null } : {}) });
     },
     setActivePage: (page, section) => {

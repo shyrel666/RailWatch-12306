@@ -4,6 +4,8 @@ from datetime import date
 import re
 import time
 
+from railwatch_policies import TRAIN_CODE_BODY
+
 
 def deadline_minutes(value):
     match = re.fullmatch(r"开车前\s*(\d+)\s*(分钟|小时|天)", str(value).strip())
@@ -152,7 +154,7 @@ def added_fulfillment_matches(record, intent, known_id):
     windows = [w for w in intent.new_train_windows if w.date == normalized_date(item.get("date", ""))]
     departure = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", item.get("departure", ""))
     if (len(windows) != 1 or not departure or not item.get("from") or not item.get("to")
-            or not re.fullmatch(r"(?:[GDCZTKYSL]\d{1,5}|\d{4,5})", item.get("train", ""))
+            or not re.fullmatch(TRAIN_CODE_BODY, item.get("train", ""))
             or item.get("seat") not in {choice.seat for choice in intent.combinations}):
         return False
     minutes = int(departure[1]) * 60 + int(departure[2])

@@ -209,11 +209,13 @@ def load_ui_preferences(data_dir: str) -> dict:
             "theme": normalize_theme(data.get("theme", "system")),
             "close_to_tray": data.get("close_to_tray") is True,
             "auto_rehearsal": data.get("auto_rehearsal") is True,
+            # Off unless turned on, like other new features: it probes the 12306 login in the background.
+            "idle_keep_alive": data.get("idle_keep_alive") is True,
         }
 
 
 def save_ui_preferences(data_dir: str, patch: dict) -> dict:
-    if not isinstance(patch, dict) or set(patch) - {"theme", "close_to_tray", "auto_rehearsal"}:
+    if not isinstance(patch, dict) or set(patch) - {"theme", "close_to_tray", "auto_rehearsal", "idle_keep_alive"}:
         raise ValueError("界面偏好更新字段无效。")
     if "theme" in patch and patch["theme"] not in ("system", "light", "dark"):
         raise ValueError("主题必须为 system、light 或 dark。")
@@ -221,6 +223,8 @@ def save_ui_preferences(data_dir: str, patch: dict) -> dict:
         raise ValueError("关闭到托盘必须为布尔值。")
     if "auto_rehearsal" in patch and not isinstance(patch["auto_rehearsal"], bool):
         raise ValueError("自动彩排必须为布尔值。")
+    if "idle_keep_alive" in patch and not isinstance(patch["idle_keep_alive"], bool):
+        raise ValueError("空闲保持登录必须为布尔值。")
     with PREFERENCES_LOCK:
         if patch:
             existing = _read_ui_preferences(data_dir)

@@ -24,6 +24,8 @@ function resetStore() {
     editRevision: 0,
     tripInitialized: true,
     monitorLoops: 0,
+    missingTargets: null,
+    queryRenumber: null,
     hits: [],
     notifications: [],
     lastHumanAction: null,
@@ -219,6 +221,73 @@ describe("MonitorPage", () => {
 
     expect(screen.getByText("12")).toBeTruthy();
     expect(screen.getByText("G55")).toBeTruthy();
+  });
+
+  test("warns about a target train the running task keeps missing, only for that run", () => {
+    const missingTargets = { run_id: "run", rounds: 3, items: [{ train: "K1234", date: "2026-11-25" }] };
+    act(() => {
+      railwatchStore.setState({ status: { ...defaultStatus, monitoring: true, task: { run_id: "run", status: "querying" } }, missingTargets });
+    });
+    const { rerender } = render(<MonitorPage busy={null} runCommand={(async () => undefined) as CommandRunner} />);
+    expect(screen.getByText("目标车次可能已换号")).toBeTruthy();
+    expect(screen.getByText(/K1234（2026-11-25）已连续 3 次不在查询结果中/)).toBeTruthy();
+
+    act(() => {
+      railwatchStore.setState({ status: { ...defaultStatus, monitoring: true, task: { run_id: "next", status: "querying" } } });
+    });
+    rerender(<MonitorPage busy={null} runCommand={(async () => undefined) as CommandRunner} />);
+    expect(screen.queryByText("目标车次可能已换号")).toBeNull();
+  });
+
+  const candidate = { train: "N1234", from_station: "上海虹桥", to_station: "南京南", departure_time: "08:00",
+    arrival_time: "10:05", arrival_day_offset: 0, seen_date: "2026-11-20" };
+
+  test("after the run stops, a matched new number replaces the old one in the trip and the route's favorites", async () => {
+    const calls: [string, Record<string, unknown> | undefined][] = [];
+    const runCommand = (async (command: string, payload?: Record<string, unknown>) => {
+      calls.push([command, payload]);
+      return command === "loadTripChoices" ? { recent_routes: [], favorites: [
+        { from_station: defaultConfig.from_station_cn, to_station: defaultConfig.to_station_cn, trains: ["K1234", "G7"] },
+      ] } : undefined;
+    }) as CommandRunner;
+    act(() => {
+      railwatchStore.setState({ config: { ...defaultConfig, train_code: "K1234, G101" },
+        status: { ...defaultStatus, monitoring: false, task: { run_id: "run", status: "stopped" } },
+        missingTargets: { run_id: "run", rounds: 3, items: [{ train: "K1234", date: "2026-11-25", candidates: [candidate] }] } });
+    });
+    render(<MonitorPage busy={null} runCommand={runCommand} />);
+    expect(screen.getByText("K1234 → N1234")).toBeTruthy();
+    expect(screen.getByText(/上海虹桥 08:00 → 南京南 10:05，与 2026-11-20 记录的 K1234 一致/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "替换为 N1234" }));
+    expect(railwatchStore.getState().config.train_code).toBe("K1234, G101");
+    await userEvent.click(await screen.findByRole("button", { name: /^替\s*换$/ }));
+    expect(railwatchStore.getState().config.train_code).toBe("N1234, G101");
+    await vi.waitFor(() => expect(calls.at(-1)).toEqual(["saveTrainFavorites",
+      { from_station: defaultConfig.from_station_cn, to_station: defaultConfig.to_station_cn, trains: ["N1234", "G7"] }]));
+    expect(screen.queryByText("目标车次可能已换号")).toBeNull();
+  });
+
+  test("a running task's match edits only the draft and says so", () => {
+    act(() => {
+      railwatchStore.setState({ config: { ...defaultConfig, train_code: "K1234" },
+        status: { ...defaultStatus, monitoring: true, task: { run_id: "run", status: "querying" } },
+        missingTargets: { run_id: "run", rounds: 3, items: [{ train: "K1234", date: "2026-11-25", candidates: [candidate] }] } });
+    });
+    render(<MonitorPage busy={null} runCommand={(async () => undefined) as CommandRunner} />);
+    expect(screen.getByRole("button", { name: "替换为 N1234" })).toBeTruthy();
+    expect(screen.getByText(/当前任务仍按原车次运行，停止后重新启动生效/)).toBeTruthy();
+  });
+
+  test("a manual query shows matches only for trains still in the trip", () => {
+    act(() => {
+      railwatchStore.setState({ config: { ...defaultConfig, train_code: "K1234" }, queryConfig: { ...defaultConfig, train_code: "K1234" },
+        queryRenumber: { request_id: "q", items: [{ train: "K1234", date: "2026-11-25", candidates: [candidate] },
+          { train: "K5678", date: "2026-11-25", candidates: [{ ...candidate, train: "N5678" }] }] } });
+    });
+    render(<MonitorPage busy={null} runCommand={(async () => undefined) as CommandRunner} />);
+    const alert = document.getElementById("query-renumber")!;
+    expect(within(alert).getByText("K1234 → N1234")).toBeTruthy();
+    expect(within(alert).queryByText("K5678 → N5678")).toBeNull();
   });
 
   test("pending order blocks new submission and continues only the saved intent", async () => {

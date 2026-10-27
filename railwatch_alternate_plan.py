@@ -4,7 +4,7 @@ from datetime import date
 import re
 
 from railwatch_dates import expand_travel_dates
-from railwatch_policies import ORDER_POLICIES
+from railwatch_policies import ORDER_POLICIES, TRAIN_CODE_BODY
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,7 @@ class AlternateChoice:
                    for value in (self.train_code, self.date, self.from_station, self.to_station, self.seat)):
             raise ValueError("候补组合字段不完整")
         date.fromisoformat(self.date)
-        if not re.fullmatch(r"(?:[GDCZTKYSL]\d{1,5}|\d{4,5})", self.train_code):
+        if not re.fullmatch(TRAIN_CODE_BODY, self.train_code):
             raise ValueError("候补车次无效")
         if self.from_station == self.to_station:
             raise ValueError("候补出发站与到达站不能相同")

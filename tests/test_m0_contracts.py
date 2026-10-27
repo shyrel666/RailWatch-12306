@@ -184,7 +184,8 @@ class PreferencePatchTests(unittest.TestCase):
                 release.set()
             theme.result(timeout=3)
             tray.result(timeout=3)
-        self.assertEqual(load_ui_preferences(self.directory.name), {"theme": "dark", "close_to_tray": True, "auto_rehearsal": False})
+        self.assertEqual(load_ui_preferences(self.directory.name), {"theme": "dark", "close_to_tray": True, "auto_rehearsal": False,
+                                                                    "idle_keep_alive": False})
         self.assertTrue(json.loads(path.read_text(encoding="utf-8"))["future_ui"])
 
 

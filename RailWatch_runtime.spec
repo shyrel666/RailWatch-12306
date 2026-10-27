@@ -22,7 +22,8 @@ if IS_MACOS:
 # The CLI evaluates this spec before adding its directory to the module search
 # path. Resolve local policy data explicitly so console-script builds include it.
 datas = [(os.path.join(SPECPATH, "railwatch_policies", name), "railwatch_policies")
-         for name in ("query_strategies.json", "date_strategies.json", "order_policies.json")]
+         for name in ("query_strategies.json", "date_strategies.json", "order_policies.json",
+                      "notification_channels.json", "train_codes.json", "idle_policies.json")]
 # macOS downloads its driver into the data directory on first environment check.
 for optional_file in (
     *(("chromedriver.exe",) if IS_WINDOWS else ()),

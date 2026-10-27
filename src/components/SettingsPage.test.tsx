@@ -159,6 +159,31 @@ describe("SettingsPage", () => {
     expect(toggle.getAttribute("aria-checked")).toBe("true");
   });
 
+  test("idle login keeping follows the saved preference and a save round-trips", async () => {
+    let saved = false;
+    const command = vi.spyOn(railwatchApi, "command").mockImplementation(async (name, payload = {}) => {
+      if (name === "savePreferences" && "idle_keep_alive" in payload) saved = payload.idle_keep_alive as boolean;
+      return { theme: "light", close_to_tray: false, idle_keep_alive: saved, notification_settings: {} } as never;
+    });
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const toggle = screen.getByRole("switch", { name: "空闲时保持登录" });
+    await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText(/每 5 分钟检查一次登录状态，只检查登录、不查余票/)).toBeTruthy();
+    await userEvent.click(toggle);
+    expect(command).toHaveBeenCalledWith("savePreferences", { idle_keep_alive: true });
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+  });
+
+  test("idle login keeping is off when no preference was ever saved", async () => {
+    vi.spyOn(railwatchApi, "command").mockImplementation(async () => (
+      { theme: "light", close_to_tray: false, notification_settings: {} }) as never);
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const toggle = screen.getByRole("switch", { name: "空闲时保持登录" });
+    await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
   test("rehearsal is opt-in and a failed save preserves the current visibility", async () => {
     const command = vi.spyOn(railwatchApi, "command").mockImplementation(async (_name, payload = {}) => ({
       theme: "light", close_to_tray: false, auto_rehearsal: payload.auto_rehearsal,

@@ -33,7 +33,7 @@ class NotificationTests(unittest.TestCase):
         slow = threading.Event()
         fast = threading.Event()
         service._send_server_chan = Mock(side_effect=lambda *_: slow.wait(2) or True)
-        service._send_wecom = Mock(side_effect=lambda *_: fast.set() or True)
+        service._send_wecom_webhook = Mock(side_effect=lambda *_: fast.set() or True)
         thread = threading.Thread(target=service.test_notification)
         thread.start()
         try:
@@ -48,9 +48,10 @@ class NotificationTests(unittest.TestCase):
                                        "email_user": "from@example.com", "email_password": "secret", "email_to": "to@example.com"})
         service._send_email = Mock(return_value=True)
         result = service.test_notification()
-        title, message, _settings = service._send_email.call_args.args
+        title, message, _settings, urgent = service._send_email.call_args.args
         self.assertEqual(title, "RailWatch 测试通知")
         self.assertNotIn("乘客姓名", message)
+        self.assertTrue(urgent, "测试通知按紧急事件发送，便于确认手机强提醒")
         self.assertEqual(result["email"]["status"], "success")
         self.assertIsInstance(result["email"]["sent_at"], float)
         self.assertEqual(result["server_chan"]["status"], "disabled")

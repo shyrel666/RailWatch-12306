@@ -17,10 +17,11 @@ import {
   getDateRangeStatus,
   useBeijingToday,
 } from "../lib/tripDate";
-import type { TicketHit } from "../types";
+import type { TicketHit, TripChoices } from "../types";
 import type { CommandRunner } from "./componentTypes";
 import { QueryResults } from "./QueryResults";
-import { queryTargets, selectableQueryTrains } from "../lib/queryResults";
+import { missingTargetsNotice, queryTargets, replaceTrainCode, selectableQueryTrains } from "../lib/queryResults";
+import { RenumberSuggestions } from "./RenumberSuggestions";
 import { countdown as saleCountdown } from "../lib/saleCalendar";
 import { DepartureBoard, TrainCodes, type BoardTone } from "./DepartureBoard";
 
@@ -75,6 +76,8 @@ export function MonitorPage({
   const manualError = useRailWatchStore((state) => state.manualQueryError);
   const hits = useRailWatchStore((state) => state.hits);
   const monitorLoops = useRailWatchStore((state) => state.monitorLoops);
+  const missingTargets = useRailWatchStore((state) => state.missingTargets);
+  const queryRenumber = useRailWatchStore((state) => state.queryRenumber);
   const lastHumanAction = useRailWatchStore((state) => state.lastHumanAction);
   const clearHumanAction = useRailWatchStore((state) => state.clearHumanAction);
 
@@ -130,6 +133,23 @@ export function MonitorPage({
   );
   const canStop = status.monitoring;
   const trainCodes = queryTargets(config.train_code.toUpperCase());
+  const draftTrains = queryTargets(draftConfig.train_code.toUpperCase());
+  // A run's report stays after it stops while a matched number is still in the trip, so it can be replaced.
+  const runMissing = missingTargets?.run_id === status.task?.run_id ? missingTargets : null;
+  const runNotice = missingTargetsNotice(runMissing);
+  const showRunMissing = Boolean(runNotice && (status.monitoring ||
+    runMissing!.items.some(item => item.candidates?.length && draftTrains.includes(item.train))));
+  const manualRenumber = !status.monitoring && queryConfig
+    ? (queryRenumber?.items ?? []).filter(item => draftTrains.includes(item.train)) : [];
+  const replaceTrain = async (route: { from: string; to: string }, from: string, to: string) => {
+    setConfig({ train_code: replaceTrainCode(railwatchStore.getState().config.train_code, from, to) });
+    const choices = await runCommand<TripChoices>("loadTripChoices");
+    const favorite = choices?.favorites.find(item => item.from_station === route.from.trim() && item.to_station === route.to.trim());
+    if (favorite?.trains.includes(from)) {
+      await runCommand("saveTrainFavorites", { from_station: favorite.from_station, to_station: favorite.to_station,
+        trains: queryTargets(replaceTrainCode(favorite.trains.join(","), from, to)) }, `已将本路线收藏车次 ${from} 替换为 ${to}`);
+    }
+  };
   const headline = unresolvedOrder
     ? "当前订单待处理"
     : lastHumanAction
@@ -310,6 +330,24 @@ export function MonitorPage({
           description={lastHumanAction.message}
           onClose={clearHumanAction}
         />
+      ) : null}
+      {showRunMissing ? (
+        <Alert id="monitor-missing-targets" type="warning" showIcon message="目标车次可能已换号"
+          description={<>
+            {runNotice}
+            <RenumberSuggestions items={runMissing!.items} trainCode={draftConfig.train_code}
+              onReplace={(from, to) => void replaceTrain({ from: config.from_station_cn, to: config.to_station_cn }, from, to)} />
+            {status.monitoring && runMissing!.items.some(item => item.candidates?.length)
+              ? <small className="field-help">替换只修改行程草稿，当前任务仍按原车次运行，停止后重新启动生效。</small> : null}
+          </>} />
+      ) : null}
+      {manualRenumber.length && queryConfig ? (
+        <Alert id="query-renumber" type="warning" showIcon message="目标车次可能已换号"
+          description={<>
+            以下车次不在本次查询结果中，同区间有一趟出发、到达站和时刻都与此前记录一致的车次。请在官方页面核对后替换。
+            <RenumberSuggestions items={manualRenumber} trainCode={draftConfig.train_code}
+              onReplace={(from, to) => void replaceTrain({ from: queryConfig.from_station_cn, to: queryConfig.to_station_cn }, from, to)} />
+          </>} />
       ) : null}
       <ul className="st-policy-strip" aria-label="本次运行策略">
         <li aria-label="本次日期策略">

@@ -129,6 +129,9 @@ class RailWatchRuntime:
             "stationSaleTimes": lambda: self.bridge.station_sale_times(payload.get("station"), payload.get("force", False)),
             "loadTripChoices": lambda: self.bridge.load_trip_choices(),
             "saveTrainFavorites": lambda: self.bridge.save_train_favorites(payload.get("from_station"), payload.get("to_station"), payload.get("trains")),
+            "saleReminders": lambda: self.bridge.list_sale_reminders(),
+            "addSaleReminder": lambda: self.bridge.add_sale_reminder(payload.get("from_station"), payload.get("to_station"), payload.get("date")),
+            "removeSaleReminder": lambda: self.bridge.remove_sale_reminder(payload.get("id")),
             "readPassengers": lambda: self.bridge.read_passengers(),
             "readAlternateOptions": lambda: self.bridge.read_alternate_options(
                 payload.get("refresh", False), payload.get("from_station"), payload.get("to_station")),
@@ -168,6 +171,7 @@ class RailWatchRuntime:
                 payload.get("notification_settings"),
                 close_to_tray=payload.get("close_to_tray"),
                 auto_rehearsal=payload.get("auto_rehearsal"),
+                idle_keep_alive=payload.get("idle_keep_alive"),
             ),
             "notificationStatus": lambda: self.bridge.notification_status(),
             "testNotification": lambda: self.bridge.test_notification(),
@@ -192,6 +196,7 @@ class RailWatchRuntime:
 def main() -> int:
     configure_stdio()
     runtime = RailWatchRuntime()
+    runtime.bridge.start_idle_watch()
     try:
         for line in getattr(sys.stdin, "buffer", sys.stdin):
             line = line.strip()
@@ -199,6 +204,7 @@ def main() -> int:
                 continue
             runtime.handle_line(line)
     finally:
+        runtime.bridge.stop_idle_watch()
         runtime.shutdown()
     return 0
 

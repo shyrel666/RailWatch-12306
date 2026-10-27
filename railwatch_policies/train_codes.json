@@ -1,0 +1,4 @@
+{
+  "prefixes": ["X", "G", "T", "K", "D", "C", "S", "Z", "N", "V", "Y", "L"],
+  "missing_target_rounds": 3
+}

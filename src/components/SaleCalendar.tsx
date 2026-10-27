@@ -1,15 +1,19 @@
 import { useState } from "react";
 import { Button } from "antd";
-import { ArrowUpRight, CalendarDays, RefreshCw } from "lucide-react";
+import { ArrowUpRight, BellPlus, BellRing, CalendarDays, RefreshCw, X } from "lucide-react";
 import { beijingTimestamp, calendarDays, countdown, presaleDays, SALE_TIME_SOURCE, saleDay, saleStateLabels } from "../lib/saleCalendar";
 import { todayIso, isoDaysFromToday, getTripDateStatus } from "../lib/tripDate";
 import { useStationSaleTimes } from "../lib/useStationSaleTimes";
+import { useSaleReminders } from "../lib/useSaleReminders";
+import { IDLE_POLICY } from "../lib/idlePolicy";
 import { railwatchApi } from "../lib/railwatchApi";
 import { Hint } from "./DisplayPrimitives";
 
-type Props = { station: string; tripDate: string; windowDays?: number; now: number };
-export function SaleCalendar({ station: rawStation, tripDate, windowDays, now }: Props) {
+type Props = { station: string; destination?: string; tripDate: string; windowDays?: number; now: number };
+export function SaleCalendar({ station: rawStation, destination: rawDestination = "", tripDate, windowDays, now }: Props) {
   const station = rawStation.trim();
+  const destination = rawDestination.trim();
+  const reminders = useSaleReminders(Boolean(station && destination));
   const days = presaleDays(windowDays);
   const today = todayIso(new Date(now));
   const dates = calendarDays(now, days);
@@ -60,6 +64,9 @@ export function SaleCalendar({ station: rawStation, tripDate, windowDays, now }:
           {detail.saleAt !== null && detail.saleAt > now && detail.state !== "expired" && <p className="sale-calendar-countdown">
             距起售 <strong>{countdown(detail.saleAt, now)}</strong>
           </p>}
+          {station && destination && detail.saleAt !== null && detail.saleAt > now ? (
+            <SaleReminderControl station={station} destination={destination} date={selected} reminders={reminders} />
+          ) : null}
           {!station ? <p>在行程设置中填写出发站后显示起售时间。</p>
             : loading && !info ? <p>正在核对官方起售时间…</p>
               : issue ? <p className="sale-calendar-warning" role="status">{issue}</p>
@@ -76,5 +83,33 @@ export function SaleCalendar({ station: rawStation, tripDate, windowDays, now }:
         </aside>
       </div>
     </section>
+  );
+}
+
+function SaleReminderControl({ station, destination, date, reminders }: {
+  station: string; destination: string; date: string; reminders: ReturnType<typeof useSaleReminders>;
+}) {
+  const lead = reminders.list?.lead_minutes ?? IDLE_POLICY.sale_reminder_lead_minutes;
+  const items = reminders.list?.items ?? [];
+  const current = items.find(item => item.from_station === station && item.to_station === destination && item.date === date);
+  const others = items.filter(item => item !== current);
+  return (
+    <div className="sale-calendar-reminder" aria-label="起售提醒">
+      {current ? <span className="sale-calendar-reminder-set">
+        <BellRing size={13} aria-hidden="true" />
+        {current.notified_at !== null ? "已发送起售提醒" : `将在起售前 ${lead} 分钟提醒`}
+        <Button type="link" size="small" disabled={reminders.busy} onClick={() => void reminders.remove(current.id)}>取消提醒</Button>
+      </span> : <Button size="small" icon={<BellPlus size={13} />} loading={reminders.busy} disabled={!reminders.list}
+        onClick={() => void reminders.add(station, destination, date)}>起售前 {lead} 分钟提醒我</Button>}
+      <small>不用先建任务；按通知设置推送到桌面和手机。</small>
+      {reminders.error && <span className="sale-calendar-warning" role="alert">{reminders.error}</span>}
+      {others.length ? <ul aria-label="其他起售提醒">
+        {others.map(item => <li key={item.id}>
+          <span>{item.from_station}→{item.to_station} {item.date.slice(5)} · {beijingTimestamp(item.sale_at * 1000).slice(5, 16)} 起售</span>
+          <Button type="text" size="small" aria-label={`取消 ${item.from_station}→${item.to_station} ${item.date} 的起售提醒`}
+            disabled={reminders.busy} icon={<X size={12} />} onClick={() => void reminders.remove(item.id)} />
+        </li>)}
+      </ul> : null}
+    </div>
   );
 }

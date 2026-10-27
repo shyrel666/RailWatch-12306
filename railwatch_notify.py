@@ -14,10 +14,29 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from email.mime.text import MIMEText
 from typing import Callable, Dict, Mapping, Optional
 
-from railwatch_config_contract import merge_notification_settings, redact_sensitive_text
+from railwatch_config_contract import (NOTIFICATION_CHANNELS, NOTIFICATION_FIELDS, NOTIFICATION_REQUIRED_FIELDS,
+                                       https_url, merge_notification_settings, ntfy_endpoint, redact_sensitive_text)
 
-CHANNELS = ("server_chan", "email", "wecom_webhook")
+CHANNELS = NOTIFICATION_CHANNELS
 CHANNEL_CAPACITY = 4  # One active send and at most three waiting, per channel.
+# Events that must reach the phone even when it is silenced; the rest are ordinary updates.
+URGENT_EVENTS = frozenset({"hit", "verification", "payment"})
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+  def redirect_request(self, *_args, **_kwargs):
+    return None  # A push endpoint never redirects; do not carry a key or token elsewhere.
+
+
+_PUSH_OPENER = urllib.request.build_opener(_RefuseRedirect)
+
+
+def _post_json(url: str, payload: dict, headers: Optional[Mapping[str, str]] = None) -> dict:
+  request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                   headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
+  with _PUSH_OPENER.open(request, timeout=8) as response:
+    body = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+  return body if isinstance(body, dict) else {}
 
 
 class NotificationService:
@@ -53,14 +72,14 @@ class NotificationService:
     enabled = settings.get(f"{channel}_enabled")
     if not enabled:
       return "disabled"
-    required = {"server_chan": ("server_chan_key",), "email": ("email_smtp_host", "email_user", "email_password", "email_to"),
-                "wecom_webhook": ("wecom_webhook_url",)}[channel]
+    required = NOTIFICATION_REQUIRED_FIELDS[channel]
     return "ready" if all(settings.get(field) for field in required) else "not_configured"
 
-  def _send_channel(self, channel: str, title: str, message: str, settings: dict, sequence=None) -> dict:
-    sender = {"server_chan": self._send_server_chan, "email": self._send_email, "wecom_webhook": self._send_wecom}[channel]
+  def _deliver(self, channel: str, title: str, message: str, settings: dict, sequence=None, urgent=False) -> dict:
+    # Looked up on the instance at send time so tests can replace one channel's sender.
+    sender = getattr(self, f"_send_{channel}")
     try:
-      ok = sender(title, message, settings)
+      ok = sender(title, message, settings, urgent)
     except Exception:
       ok = False
       self.log(f"{channel} 通知失败，请检查渠道配置与网络。")
@@ -70,7 +89,7 @@ class NotificationService:
         self._status[channel] = result
     return result
 
-  def _submit(self, channel, title, message, settings, state, event_key=None):
+  def _submit(self, channel, title, message, settings, state, event_key=None, urgent=False):
     """Admission and dedup share one lock; rejected sends never claim delivery."""
     key = (channel, event_key) if event_key is not None else None
     with self._lock:
@@ -88,7 +107,7 @@ class NotificationService:
           if key is not None:
             self._pending.add(key)
           try:
-            future = self._executors[channel].submit(self._send_channel, channel, title, message, settings, sequence)
+            future = self._executors[channel].submit(self._deliver, channel, title, message, settings, sequence, urgent)
           except RuntimeError:
             self._pending.discard(key)
             self._capacity[channel].release()
@@ -117,20 +136,25 @@ class NotificationService:
       settings = dict(self.settings)
     results = {}
     selected = settings.get("event_channels", {}).get(event_type, [])
+    urgent = event_type in URGENT_EVENTS
     for channel in CHANNELS:
       state = "disabled" if channel not in selected else self._channel_state(channel, settings)
-      results[channel], _ = self._submit(channel, title, message, settings, state, event_key)
+      results[channel], _ = self._submit(channel, title, message, settings, state, event_key, urgent)
     return results
 
   def test_notification(self) -> Dict[str, dict]:
-    """Send fixed content on configured channels, independent of event filters."""
+    """Send fixed content on configured channels, independent of event filters.
+
+    Sent as urgent, so a phone channel demonstrates the alert level a hit would use.
+    """
     with self._lock:
       settings = dict(self.settings)
     futures = {}
     results = {}
     for channel in CHANNELS:
       state = self._channel_state(channel, settings)
-      results[channel], future = self._submit(channel, "RailWatch 测试通知", "这是一条不包含行程或乘客信息的测试通知。", settings, state)
+      results[channel], future = self._submit(channel, "RailWatch 测试通知", "这是一条不包含行程或乘客信息的测试通知。", settings, state,
+                                              urgent=True)
       if future is not None:
         futures[channel] = future
     # One shared waiting deadline; a slow channel does not add twelve seconds
@@ -145,17 +169,15 @@ class NotificationService:
     results = {
       "desktop_urgent": bool(self.settings.get("desktop_urgent")),
       "sound_loop": bool(self.settings.get("sound_loop")) and urgent,
-      "server_chan": False,
-      "email": False,
-      "wecom_webhook": False,
+      **{channel: False for channel in CHANNELS},
     }
     settings = dict(self.settings)
-    for channel in ("server_chan", "email", "wecom_webhook"):
+    for channel in CHANNELS:
       if self._channel_state(channel, settings) == "ready":
-        results[channel] = self._send_channel(channel, title, message, settings)["status"] == "success"
+        results[channel] = self._deliver(channel, title, message, settings, urgent=urgent)["status"] == "success"
     return results
 
-  def _send_server_chan(self, title: str, message: str, settings: dict) -> bool:
+  def _send_server_chan(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
     key = str(settings.get("server_chan_key", "")).strip()
     if not key:
       return False
@@ -175,7 +197,7 @@ class NotificationService:
       self.log("Server酱通知异常，请检查网络或渠道配置。")
       return False
 
-  def _send_wecom(self, title: str, message: str, settings: dict) -> bool:
+  def _send_wecom_webhook(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
     url = str(settings.get("wecom_webhook_url", "")).strip()
     if not url:
       return False
@@ -202,7 +224,7 @@ class NotificationService:
       self.log("企业微信 webhook 通知异常，请检查网络或渠道配置。")
       return False
 
-  def _send_email(self, title: str, message: str, settings: dict) -> bool:
+  def _send_email(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
     host = str(settings.get("email_smtp_host", "")).strip()
     user = str(settings.get("email_user", "")).strip()
     password = str(settings.get("email_password", "")).strip()
@@ -224,3 +246,46 @@ class NotificationService:
     except (smtplib.SMTPException, OSError) as exc:
       self.log("邮件通知异常，请检查 SMTP 配置与网络。")
       return False
+
+  def _send_bark(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
+    key = str(settings.get("bark_key", "")).strip()
+    server = https_url(settings.get("bark_server") or NOTIFICATION_FIELDS["bark_server"]["default"])
+    if not key or not server:
+      return False
+    payload = {"device_key": key, "title": title, "body": message, "group": "RailWatch", "level": "active"}
+    if urgent:
+      # timeSensitive breaks through Focus; critical also rings on silent and needs the user's opt-in.
+      payload["level"] = "critical" if settings.get("bark_critical") else "timeSensitive"
+      if settings.get("bark_call"):
+        payload["call"] = "1"
+    try:
+      ok = _post_json(f"{server.rstrip('/')}/push", payload).get("code") == 200
+      self.log("Bark 通知已发送。" if ok else "Bark 通知失败，请检查渠道配置。")
+      return ok
+    except (urllib.error.URLError, OSError, ValueError):
+      self.log("Bark 通知异常，请检查网络或渠道配置。")
+      return False
+
+  def _send_ntfy(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
+    endpoint = ntfy_endpoint(settings.get("ntfy_topic_url"))
+    token = str(settings.get("ntfy_token", "")).strip()
+    if endpoint is None:
+      self.log("ntfy 主题地址格式无效，请检查渠道配置。")
+      return False
+    # JSON goes to the server root with the topic in the body.
+    root, topic = endpoint
+    payload = {"topic": topic, "title": title, "message": message, "priority": 5 if urgent else 3}
+    try:
+      body = _post_json(f"{root}/", payload, {"Authorization": f"Bearer {token}"} if token else None)
+      ok = bool(body.get("id"))
+      self.log("ntfy 通知已发送。" if ok else "ntfy 通知失败，请检查渠道配置。")
+      return ok
+    except (urllib.error.URLError, OSError, ValueError):
+      self.log("ntfy 通知异常，请检查网络或渠道配置。")
+      return False
+
+
+# Every channel in the shared table needs exactly one ``_send_<channel>`` sender.
+_SENDERS = {name[len("_send_"):] for name in vars(NotificationService) if name.startswith("_send_")}
+if _SENDERS != set(CHANNELS):
+  raise RuntimeError(f"通知渠道表与发送函数不一致：{sorted(_SENDERS ^ set(CHANNELS))}")

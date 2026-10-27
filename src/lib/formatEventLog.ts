@@ -1,3 +1,4 @@
+import trainCodes from "../../railwatch_policies/train_codes.json";
 import type { LogEntry } from "../types";
 
 export function formatEventTime(value: string) {
@@ -83,7 +84,8 @@ const technicalDetailPatterns = [
   /^提示: /,
 ];
 
-const queryRowPattern = /^[GDCKTZS]\d+[A-Z0-9]*\s+\|/;
+// Query rows start with a train number; prefixes come from the table railwatch_row_parser.py uses.
+const queryRowPattern = new RegExp(`^[${trainCodes.prefixes.join("")}]\\d+[A-Z0-9]*\\s+\\|`);
 const queryStepPatterns = [
   /^正在打开 12306/,
   /^等待查询输入框/,

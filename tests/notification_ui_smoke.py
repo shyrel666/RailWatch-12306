@@ -82,7 +82,8 @@ def main():
                     driver.save_screenshot(str(OUTPUT / f"notifications-top-{width}.png"))
                     assert driver.find_element("css selector", '[aria-label="循环声音"]').get_attribute("aria-checked") == "true"
                     driver.find_element("xpath", '//button[normalize-space()="发送测试通知"]').click()
-                    wait.until(lambda d: "已禁用" in d.find_element("css selector", "#settings-notifications").text)
+                    # Disabled channels show no delivery pill; the notice confirms the round trip.
+                    wait.until(lambda d: "测试已完成" in d.find_element("css selector", "#settings-notifications").text)
                     driver.save_screenshot(str(OUTPUT / f"notifications-{width}.png"))
                     severe = [item for item in driver.get_log("browser") if item.get("level") == "SEVERE" and "favicon.ico" not in item.get("message", "")]
                     if severe:

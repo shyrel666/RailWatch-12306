@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from selenium.common.exceptions import ElementClickInterceptedException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from railwatch_orders import OrderResult
-from railwatch_policies import ORDER_POLICIES
+from railwatch_policies import ORDER_POLICIES, TRAIN_CODE_PREFIX
 from railwatch_task import TaskCancelled
 from railwatch_alternate_options import FORM_OPTIONS_JS, canonical_deadline, deadline_minutes, form_review, new_train_summary_matches
 
@@ -56,7 +56,7 @@ function trainCodes(root) {
   const sources=all('[data-train-code],.train-num,.train-number,.ticket-number',root)
     .flatMap(node=>[node.getAttribute('data-train-code')||'',txt(node)]);
   return [...new Set(sources.flatMap(source=>[...source.matchAll(
-    /(?:^|[^0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})(?![0-9A-Za-z])/gi
+    /(?:^|[^0-9A-Za-z])(""" + TRAIN_CODE_PREFIX + r"""\d{1,5}|\d{1,5})(?![0-9A-Za-z])/gi
   )].map(match=>match[1].toUpperCase())))];
 }
 function passengers(root) {
@@ -265,14 +265,15 @@ for(const row of rows){
   const edit=cells[6].querySelector('.one-edit[data-val]');
   const self=!!cells[0].querySelector('input.UserSelf');
   // Non-self rows embed the profile type in the edit link; never click it.
-  // For self there is no edit link, so the type must remain unknown.
+  // For self there is no edit link, so the type must remain unknown. A non-self
+  // row can lack type data too (hidden link, changed data-val), so self is reported apart.
   const fields=!self&&visible(edit)?edit.getAttribute('data-val').split('#'):[];
   const code=fields.length===7&&fields[0]===nameNode.title.trim()?fields[3]:'';
   const ticket_type=({'1':'adult','2':'child','3':'student'})[code]||'unknown';
   const documentText=text(cells[3]);
   const hint=documentText.length>5 ? documentText.slice(0,2)+'***'+documentText.slice(-2):'';
   items.push({name:nameNode.title.trim(),ticket_type,unsupported_ticket_type:code==='4',
-    type_source:code?'profile_metadata':'unavailable',verification,
+    type_source:code?'profile_metadata':'unavailable',account_holder:self,verification,
     identity_hint:/^[^*＊\s]{1,2}\*{3}[^*＊\s]{1,2}$/.test(hint)?hint:''});
 }
 const pager=document.querySelector('.pagination');
@@ -419,12 +420,12 @@ def record_matches(record, intent, *, known_id=""):
                   for value in [record.get("train_code", ""), *record.get("train_codes", [])]
                   if str(value).strip()}
     suffixed = {value.upper() for value in re.findall(
-        r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5}|\d{1,5})\s*次(?![0-9A-Za-z])", clean_text, re.I
+        r"(?<![0-9A-Za-z])(" + TRAIN_CODE_PREFIX + r"\d{1,5}|\d{1,5})\s*次(?![0-9A-Za-z])", clean_text, re.I
     )}
     # Combine independent evidence instead of letting one field hide a second
     # train. Bare numbers outside dedicated train fields may still be fares.
     prefixed = {value.upper() for value in re.findall(
-        r"(?<![0-9A-Za-z])([GDCZTKYSL]\d{1,5})(?![0-9A-Za-z])", clean_text, re.I
+        r"(?<![0-9A-Za-z])(" + TRAIN_CODE_PREFIX + r"\d{1,5})(?![0-9A-Za-z])", clean_text, re.I
     )}
     trains = structured | suffixed | prefixed
     if record.get("checkout"):

@@ -332,6 +332,20 @@ describe("TripSetupPage", () => {
     expect(screen.queryByText("张三 成人")).toBeNull();
   });
 
+  test("account holder without an official type is offered and saved as a default adult", async () => {
+    const user = userEvent.setup();
+    const runCommand = vi.fn(async (command: string) => command === "readPassengers" ? { items: [
+      { name: "本人", ticket_type: "adult", identity_hint: "11***22", ambiguous: false, default_adult: true },
+    ], warning: null } : undefined) as CommandRunner;
+    render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
+    await user.click(screen.getByRole("button", { name: "从官方页面读取乘客" }));
+    await user.click(await screen.findByRole("button", { name: /本人.*默认成人/ }));
+    expect(railwatchStore.getState().config.passengers).toBe("本人");
+    expect(railwatchStore.getState().config.passenger_selections).toEqual([
+      { name: "本人", ticket_type: "adult", identity_hint: "11***22" },
+    ]);
+  });
+
   test("passenger import disables repeat clicks, clears stale candidates and recovers after failure", async () => {
     const user = userEvent.setup();
     let rejectRead!: (reason: Error) => void;
@@ -361,6 +375,22 @@ describe("TripSetupPage", () => {
     await user.click(screen.getByRole("button", { name: "从官方页面读取乘客" }));
     expect(vi.mocked(runCommand).mock.calls.some(([command]) => command === "readPassengers")).toBe(false);
     expect(screen.getByText("监控运行中，请停止监控后读取乘客。")).toBeTruthy();
+  });
+
+  test("a pending order keeps the browser on its page: no queries or passenger reads", async () => {
+    const user = userEvent.setup();
+    railwatchStore.setState({ status: { ...defaultStatus, order: { status: "pending_payment" } } });
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
+    for (const name of ["查询余票", "查询全部车次", "从官方页面读取乘客"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button.hasAttribute("disabled")).toBe(true);
+      await user.click(button);
+    }
+    expect(runCommand).not.toHaveBeenCalledWith("analyzeQuery", expect.anything());
+    expect(runCommand).not.toHaveBeenCalledWith("readPassengers");
+    expect(screen.getByText("有待支付或待核对的订单，受控浏览器需留给订单页，请先处理订单再查询。")).toBeTruthy();
+    expect(screen.getByText("有待支付或待核对的订单，受控浏览器需留给订单页，请先处理订单再读取乘客。")).toBeTruthy();
   });
 
   test("draft recovery changes editing config without starting a task", async () => {

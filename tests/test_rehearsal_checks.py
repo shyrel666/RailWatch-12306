@@ -38,21 +38,43 @@ class RehearsalChecksTests(unittest.TestCase):
         self.assertEqual(check_passengers(config, {"complete": True, "items": [person, person]})["status"], "fail")
         self.assertEqual(check_passengers({**config, "auto_alternate": True}, {"complete": True, "items": [{**person, "ticket_type": "unknown"}]})["status"], "fail")
 
-    def test_account_holder_type_gap_and_missing_identity_hint_are_not_failures(self):
+    def test_account_holder_without_type_defaults_to_adult_and_missing_identity_hint_is_not_a_failure(self):
         config = {"passengers": "测试甲", "auto_alternate": True,
                   "passenger_selections": [{"name": "测试甲", "ticket_type": "adult", "identity_hint": "11***99"}]}
-        holder = {"name": "测试甲", "ticket_type": "unknown", "type_source": "unavailable",
+        holder = {"name": "测试甲", "ticket_type": "unknown", "type_source": "unavailable", "account_holder": True,
                   "verification": "passed", "identity_hint": "11***99"}
-        # A missing type is a warning, never affirmative adult evidence.
+        # The book never shows the holder's type; an assumed adult is a warning, never adult evidence.
         verdict = check_passengers(config, {"complete": True, "items": [holder]})
         self.assertEqual(verdict["status"], "warn")
-        self.assertIn("未提供票种证据", verdict["details"][0])
+        self.assertIn("默认成人", verdict["details"][0])
+        self.assertIn("下单页回读确认", verdict["details"][0])
         self.assertEqual(check_passengers(config, {"complete": True, "items": [{**holder, "verification": "pending"}]})["status"], "warn")
+        # Another row without type data is a gap, not the holder: it is not assumed adult.
+        unread = check_passengers(config, {"complete": True, "items": [{**holder, "account_holder": False}]})
+        self.assertEqual(unread["status"], "fail")
+        self.assertNotIn("默认成人", unread["details"][0])
+        # Profile metadata that names no known type is not a gap: it still blocks waitlists.
         contact = {**holder, "type_source": "profile_metadata"}
         self.assertEqual(check_passengers(config, {"complete": True, "items": [contact]})["status"], "fail")
         adult = {**holder, "ticket_type": "adult", "type_source": "profile_metadata"}
         self.assertEqual(check_passengers(config, {"complete": True, "items": [{**adult, "identity_hint": ""}]})["status"], "pass")
         self.assertEqual(check_passengers(config, {"complete": True, "items": [{**adult, "identity_hint": "12***99"}]})["status"], "warn")
+
+    def test_only_the_marked_account_holder_defaults_to_adult(self):
+        from railwatch_rehearsal_checks import book_ticket_type
+        unread = {"ticket_type": "unknown", "type_source": "unavailable"}
+        self.assertEqual(book_ticket_type({**unread, "account_holder": True}), "adult")
+        # A hidden edit link or a changed data-val also leaves a contact without type data.
+        for marker in ({"account_holder": False}, {}, {"account_holder": "true"}):
+            with self.subTest(marker=marker):
+                self.assertEqual(book_ticket_type({**unread, **marker}), "unknown")
+        # Type data that names no known type is never replaced, even on the holder's row.
+        self.assertEqual(book_ticket_type({**unread, "type_source": "profile_metadata", "account_holder": True}), "unknown")
+        # Readable types are never overridden.
+        for kind in ("student", "child", "adult"):
+            with self.subTest(kind=kind):
+                self.assertEqual(book_ticket_type({"ticket_type": kind, "type_source": "profile_metadata",
+                                                   "account_holder": True}), kind)
 
     def test_train_separators_match_monitor(self):
         from railwatch_rehearsal import public_trip

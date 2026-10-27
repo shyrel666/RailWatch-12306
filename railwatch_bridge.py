@@ -27,9 +27,12 @@ from typing import Callable, Dict, List, Optional
 
 from railwatch_config_contract import (
     AUTOMATION_ROUTE,
+    NOTIFICATION_CHANNELS,
+    NOTIFICATION_SECRET_FIELDS,
     config_for_persistence,
     default_config as contract_default_config,
     merge_notification_settings,
+    parse_codes,
     validate_notification_patch,
     validate_config as contract_validate_config,
 )
@@ -51,6 +54,9 @@ from railwatch_preferences import (
     uses_system_keychain,
 )
 from railwatch_trip_choices import load_trip_choices, remember_route, save_train_favorites
+from railwatch_train_schedules import TrainSchedules
+from railwatch_sale_reminders import SaleReminders
+from railwatch_policies import IDLE_POLICIES
 from railwatch_seats import public_seat_capabilities, validate_automation_seats
 from railwatch_dates import expand_travel_dates, eligible_travel_dates, beijing_now, PRESALE_WINDOW_DAYS
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, AppPhase, RailWatchState, TicketHit
@@ -122,13 +128,21 @@ MAX_LOG_ENTRIES = 1000
 # Local observation budget, not an official payment deadline.
 ORDER_OBSERVATION_SECONDS = 600
 MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
+IDLE_TICK_SECONDS = 15.0
+SCHEDULE_FLUSH_SECONDS = 300.0
 MONITOR_PREWARM_INTERVAL_SECONDS = 30.0
 NOTIFICATION_SETTINGS_FILE = "notification_settings.json"
-NOTIFICATION_SECRET_FIELDS = ("server_chan_key", "email_password", "wecom_webhook_url")
-NOTIFICATION_CHANNELS = ("server_chan", "email", "wecom_webhook")
+VERIFICATION_PUSH_HINT = "需要回到电脑上的受控浏览器完成。"
 KEYCHAIN_PENDING_HINT = "外部通知凭据尚未授权，命中时无法发送外部提醒；请在系统钥匙串授权弹窗中选择“始终允许”。"
 KEYCHAIN_BUSY_MESSAGE = "macOS 钥匙串授权尚未完成，请先处理系统授权弹窗后重试。"
 CHROMEDRIVER_NAME = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
+
+
+def order_push_summary(intent) -> str:
+    """Order essentials for a phone push: train, date, seat and route, never passengers."""
+    extra = len(intent.combinations) - 1 if intent.kind == "alternate" else 0
+    summary = f"{intent.train_code} {intent.date} {intent.seat} {intent.from_station}→{intent.to_station}"
+    return f"{summary} 等 {extra + 1} 个候补组合" if extra else summary
 
 
 def public_notification_settings(settings: dict, pending=()) -> dict:
@@ -290,6 +304,15 @@ class RailWatchBridge:
         self.server_time_sync: ServerTimeSync = get_server_time_sync(log_callback=self.log)
         self.notification_service = NotificationService(self._load_notification_settings(), log_callback=self.log)
         self.order_journal = OrderJournal(os.path.join(data_dir, "orders.sqlite3"))
+        self.train_schedules = TrainSchedules(data_dir)
+        self.sale_reminders = SaleReminders(data_dir)
+        # Background work while the app is open; the runtime starts it, tests call _idle_tick.
+        self._idle_lock = threading.Lock()
+        self._idle_stop = threading.Event()
+        self._idle_thread: Optional[threading.Thread] = None
+        self._idle_login_checked_at = float("-inf")
+        self._schedules_flushed_at = time.monotonic()
+        self._idle_error = ""
         self._observing_intent_id: Optional[str] = None
         self._order_next_check_at = None
         self._order_check_failures = 0
@@ -355,6 +378,7 @@ class RailWatchBridge:
             self._shutdown_browser()
             self.order_journal.flush_checks()
             self.order_journal.flush_telemetry()
+            self._flush_train_schedules()
         except Exception:
             with self._task_lock:
                 self._admission_closed = False
@@ -585,11 +609,144 @@ class RailWatchBridge:
     def save_train_favorites(self, from_station: str, to_station: str, trains: list) -> dict:
         return save_train_favorites(self.data_dir, from_station, to_station, trains)
 
+    def _official_sale_at(self, station, travel_date, now) -> Optional[float]:
+        from railwatch_sale_times import official_sale_at
+        sale_at = official_sale_at(station, travel_date, now, PRESALE_WINDOW_DAYS)
+        return sale_at.timestamp() if sale_at is not None else None
+
+    def _sale_reminder_list(self, now) -> dict:
+        return {"items": self.sale_reminders.items(now), "lead_minutes": IDLE_POLICIES["sale_reminder_lead_minutes"]}
+
+    def list_sale_reminders(self) -> dict:
+        return self._sale_reminder_list(time.time())
+
+    def add_sale_reminder(self, from_station, to_station, travel_date) -> dict:
+        now = time.time()
+        if not isinstance(from_station, str) or not isinstance(travel_date, str):
+            raise ValueError("请先设置出发站和乘车日期。")
+        sale_at = self._official_sale_at(from_station.strip(), travel_date, now)
+        if sale_at is None:
+            raise ValueError("未能确定该日期的官方起售时间，请在购票日历中刷新起售时间后重试。")
+        self.sale_reminders.add(from_station, to_station, travel_date, sale_at, now, IDLE_POLICIES["max_sale_reminders"])
+        return self._sale_reminder_list(now)
+
+    def remove_sale_reminder(self, reminder_id) -> dict:
+        now = time.time()
+        self.sale_reminders.remove(reminder_id, now)
+        return self._sale_reminder_list(now)
+
+    def start_idle_watch(self) -> None:
+        if self._idle_thread is None:
+            self._idle_stop.clear()
+            self._idle_thread = threading.Thread(target=self._idle_watch, name="railwatch-idle", daemon=True)
+            self._idle_thread.start()
+
+    def stop_idle_watch(self) -> None:
+        self._idle_stop.set()
+
+    def _idle_watch(self) -> None:
+        while not self._idle_stop.wait(IDLE_TICK_SECONDS):
+            self._idle_tick()
+
+    def _idle_tick(self) -> None:
+        # Clearing local data takes the same lock, so no step writes into a directory being reset.
+        with self._idle_lock:
+            for step in (self._remind_sales, self._idle_keep_alive, self._flush_schedules_periodically):
+                try:
+                    step()
+                except Exception as exc:
+                    message = f"后台检查失败：{exc}"
+                    if message != self._idle_error:
+                        self.log(message, "WARN")
+                    self._idle_error = message
+
+    def _flush_schedules_periodically(self) -> None:
+        if time.monotonic() - self._schedules_flushed_at >= SCHEDULE_FLUSH_SECONDS:
+            self._schedules_flushed_at = time.monotonic()
+            self._flush_train_schedules()
+
+    def _remind_sales(self) -> None:
+        now = time.time()
+        lead = IDLE_POLICIES["sale_reminder_lead_minutes"] * 60
+        for entry in self.sale_reminders.due(now, lead):
+            # The reminder was set from the official schedule; recheck it once before sending.
+            try:
+                official = self._official_sale_at(entry["from_station"], entry["date"], now)
+            except ValueError:
+                official = None
+            if official is not None and abs(official - entry["sale_at"]) >= 60:
+                self.sale_reminders.update(entry["id"], now, sale_at=official)
+                if now < official - lead or official <= now:
+                    continue
+                entry = {**entry, "sale_at": official}
+            self.sale_reminders.update(entry["id"], now, notified_at=now)
+            self._announce_sale(entry, now)
+
+    def _announce_sale(self, entry, now) -> None:
+        clock = beijing_now(entry["sale_at"]).strftime("%H:%M")
+        minutes = max(1, round((entry["sale_at"] - now) / 60))
+        task = self._task if self.is_monitoring else None
+        covered = bool(task and task.config.get("from_station_cn") == entry["from_station"]
+                       and task.config.get("to_station_cn") == entry["to_station"]
+                       and entry["date"] in expand_travel_dates(task.config.get("date", ""), task.config.get("date_range", "单日")))
+        hints = ["当前监控任务已包含该日期" if covered else "如需抢票，请提前设置定时任务"]
+        if not self.state.login_ready:
+            hints.insert(0, "受控浏览器尚未确认登录，请提前登录 12306")
+        title = "起售提醒"
+        message = (f"{entry['from_station']}→{entry['to_station']} {entry['date']} 的车票将在 {clock} 起售"
+                   f"（约 {minutes} 分钟后）。{'；'.join(hints)}。")
+        self.log(message)
+        self.emit("notify", {"title": title, "message": message, "priority": "notice", "event_id": f"sale_reminder:{entry['id']}"})
+        self._notify_async(title, message, event_type="sale_reminder", event_key=f"sale_reminder:{entry['id']}")
+
+    def _idle_keep_alive(self) -> None:
+        """Probe the login while the browser sits idle, and say so when a confirmed login lapses.
+
+        A login probe, never a ticket query. It skips any time the browser is in use or holds an order page.
+        """
+        if time.monotonic() - self._idle_login_checked_at < IDLE_POLICIES["login_keep_alive_seconds"]:
+            return
+        if not load_ui_preferences(self.data_dir)["idle_keep_alive"]:
+            return
+        with self._task_lock:
+            if (self.driver is None or self._admission_closed or self.is_monitoring or self._browser_busy
+                    or self._rehearsal_cancel is not None):
+                return
+        if self.order_journal.pending():
+            return
+        # Never wait for the browser: a command that reserves it waits at most one probe instead.
+        if not self._driver_lock.acquire(blocking=False):
+            return
+        try:
+            with self._task_lock:
+                if self.driver is None or self._admission_closed or self.is_monitoring or self._browser_busy:
+                    return
+            self._idle_login_checked_at = time.monotonic()
+            try:
+                result = self._verify_login_session()
+            except Exception:
+                result = "unknown"
+        finally:
+            self._driver_lock.release()
+        if result == "ok" and not self.state.login_ready:
+            self.emit_state(replace(self.state, login_ready=True))
+        elif result == "expired" and self.state.login_ready:
+            title, message = "12306 登录已失效", "空闲时检查发现 12306 登录已失效，请在受控浏览器中重新登录。"
+            self.log(message, "WARN")
+            # A warning, not an error: nothing failed, and the monitor page must not read "监控异常".
+            self.emit_state(replace(self.state, login_ready=False, status_message=message, risk_level="warning"))
+            key = f"login_expired:{uuid.uuid4().hex}"
+            self.emit("notify", {"title": title, "message": message, "priority": "notice", "event_id": key})
+            self._notify_async(title, message, event_type="login_expired", event_key=key)
+
     @idle_browser_command
     def read_passengers(self) -> dict:
         """Read the account's passenger book in a temporary tab, preserving the trip page."""
         from selenium.common.exceptions import TimeoutException
-        from railwatch_rehearsal_checks import read_passenger_book
+        from railwatch_rehearsal_checks import book_ticket_type, read_passenger_book
+        # The browser stays with the order or verification page the user still has to finish.
+        if self.order_journal.pending():
+            raise RuntimeError("存在待支付或待核对订单，受控浏览器需留给订单页，请先处理原订单再读取乘客。")
         if self.driver is None or not driver_session_alive(self.driver):
             return {"items": [], "warning": "受控浏览器未打开；请先打开登录页并完成登录，再点击读取乘客。"}
         driver = self.driver
@@ -640,10 +797,11 @@ class RailWatchBridge:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name", "")).strip()[:40]
-            ticket_type = item.get("ticket_type")
+            ticket_type = book_ticket_type(item)
             hint = str(item.get("identity_hint", ""))[:20]
             if name and not any(character.isdigit() for character in name) and ticket_type in ("adult", "student", "child", "unknown"):
                 items.append({"name": name, "ticket_type": ticket_type,
+                              "default_adult": ticket_type != item.get("ticket_type"),
                               "identity_hint": hint if re.fullmatch(r"[^*]{1,2}\*{3}[^*]{1,2}", hint) else ""})
         counts = {item["name"]: sum(candidate["name"] == item["name"] for candidate in items) for item in items}
         for item in items:
@@ -992,15 +1150,19 @@ class RailWatchBridge:
         request_id = request_id or uuid.uuid4().hex
         if self.is_monitoring:
             raise RuntimeError("监控运行中，请先停止监控后再分析。")
+        # A query navigates the browser away from the order or verification page the user still has to finish.
+        if self.order_journal.pending():
+            raise RuntimeError("存在待支付或待核对订单，受控浏览器需留给订单页，请先处理原订单再查询。")
         config = validate_config(raw_config)
         # A query may broaden the train filter or use unsaved edits. It must
         # never replace the explicitly saved trip or invalidate its draft.
         self.state = self.state.with_safety(config["auto_submit"], config["auto_alternate"])
         self.emit_state()
         with self._driver_lock:
-            rows, queries, snapshots = [], [], []
+            rows, queries, snapshots, renumber = [], [], [], []
             date_config = config
             sequence = 0
+            targets = parse_codes(config.get("train_code", ""), upper=True)
             try:
                 if not CORE_AVAILABLE or PageAnalyzer is None:
                     raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
@@ -1018,14 +1180,40 @@ class RailWatchBridge:
                                                     fetched_at=getattr(analyzer, "last_query", {}).get("fetched_at")))
                     if date_rows:
                         rows.extend([{**row, "date": travel_date} for row in date_rows])
+                        renumber.extend(self._renumber_suggestions(targets, date_rows, travel_date))
                 self.query_results = rows
-                self.emit("results", {"rows": rows, "queries": queries, "snapshots": snapshots, "request_id": request_id})
+                self.emit("results", {"rows": rows, "queries": queries, "snapshots": snapshots, "request_id": request_id,
+                                      "renumber": renumber})
                 return self.emit_state(self.state.with_query_ready(True, config, f"已解析 {len(rows)} 行查询结果"))
             except Exception as exc:
                 snapshots.append(query_snapshot(date_config, [], query_id=f"{request_id}:{sequence}", sequence=sequence, error=f"查询失败：{exc}"))
                 self.query_results = rows
-                self.emit("results", {"rows": rows, "queries": queries, "snapshots": snapshots, "request_id": request_id})
+                self.emit("results", {"rows": rows, "queries": queries, "snapshots": snapshots, "request_id": request_id,
+                                      "renumber": renumber})
                 return self.emit_state(self.state.with_error(f"查询分析失败: {exc}"))
+            finally:
+                self._flush_train_schedules()
+
+    def _renumber_suggestions(self, targets, rows, travel_date):
+        """Saved trains absent from one complete manual result, matched by remembered stations and times.
+
+        One manual result is enough here: a suggestion changes nothing until the user confirms it.
+        """
+        self.train_schedules.observe(rows, travel_date)
+        listed = {row.get("train") for row in rows}
+        suggestions = []
+        for train in targets:
+            if train not in listed and (found := self.train_schedules.candidates(train, rows)):
+                suggestions.append({"train": train, "date": travel_date, "candidates": found})
+                self.log(f"💡 {train} 不在 {travel_date} 的查询结果中，可能已改为 {'、'.join(entry['train'] for entry in found)}："
+                         "出发、到达站和时刻与此前记录一致。")
+        return suggestions
+
+    def _flush_train_schedules(self):
+        try:
+            self.train_schedules.flush()
+        except Exception as exc:
+            self.log(f"车次时刻记录保存失败：{exc}", "WARN")
 
     def start_monitor(self, raw_config: dict, confirmed: bool = False, expected_dates: Optional[list] = None) -> dict:
         requested_at = time.time()
@@ -1182,7 +1370,10 @@ class RailWatchBridge:
         else:
             self.emit_state()
         if result.status in ("pending_payment", "active", "fulfilled"):
-            message = "请在官方页面立即完成预付款；支付后候补才生效。" if stage == "alternate_pending_payment" else "请在官方页面完成支付。" if stage == "pending_payment" else "已根据匹配的官方订单确认状态。"
+            message = (f"{order_push_summary(intent)}。请立即完成预付款，支付后候补才生效；可在官方页面或手机 12306 App 的候补订单里支付。"
+                       if stage == "alternate_pending_payment" else
+                       f"{order_push_summary(intent)}。请在官方页面或手机 12306 App 的未完成订单里完成支付。"
+                       if stage == "pending_payment" else "已根据匹配的官方订单确认状态。")
             self.emit("notify", {"title": STAGES[stage], "message": message, "priority": "urgent",
                                  "event_id": f"order:{intent.intent_id}:{stage}"})
             event_type = "payment" if stage in ("pending_payment", "alternate_pending_payment") else "alternate_active" if stage == "active" else "alternate_fulfilled" if intent.kind == "alternate" else "purchase_success"
@@ -1390,6 +1581,10 @@ class RailWatchBridge:
                 "title": "清除本地数据",
                 "message": "将关闭 RailWatch 受控浏览器，并删除本地配置、登录信息、订单与复盘记录、日志和下载的驱动。不会取消官方订单。是否继续？",
             }
+        with self._idle_lock:
+            return self._clear_local_data()
+
+    def _clear_local_data(self) -> dict:
         if self.is_monitoring:
             raise RuntimeError("监控运行中，请先停止监控后再清除本地数据。")
         if self.order_journal.pending():
@@ -1413,6 +1608,7 @@ class RailWatchBridge:
                 self.notification_service = NotificationService(previous_notifications, log_callback=self.log)
                 raise
             self.order_journal = journal
+            self.train_schedules = TrainSchedules(self.data_dir)
             self.notification_service = NotificationService(log_callback=self.log)
             self.config_manager = ConfigManager(self.data_dir) if CORE_AVAILABLE and ConfigManager else None
         keychain_warning = self._clear_keychain_secrets()
@@ -1474,8 +1670,13 @@ class RailWatchBridge:
             }
 
     def save_preferences(self, theme: Optional[str] = None, notification_settings: Optional[dict] = None,
-                         close_to_tray: Optional[bool] = None, auto_rehearsal: Optional[bool] = None) -> dict:
+                         close_to_tray: Optional[bool] = None, auto_rehearsal: Optional[bool] = None,
+                         idle_keep_alive: Optional[bool] = None) -> dict:
         ui_patch = {}
+        if idle_keep_alive is not None:
+            if not isinstance(idle_keep_alive, bool):
+                raise ValueError("空闲保持登录必须为布尔值。")
+            ui_patch["idle_keep_alive"] = idle_keep_alive
         if auto_rehearsal is not None:
             if not isinstance(auto_rehearsal, bool):
                 raise ValueError("自动彩排必须为布尔值。")
@@ -1789,6 +1990,7 @@ class RailWatchBridge:
                         session_check=lambda: self._check_session_for_task(task),
                         date_provider=task_dates,
                         order_journal=self.order_journal, on_order=self._handle_order, run_id=task.run_id,
+                        train_schedules=self.train_schedules,
                     )
                     if config.get("timer_enabled") and not monitor.prepare():
                         return
@@ -1817,6 +2019,7 @@ class RailWatchBridge:
                 self.order_journal.flush_telemetry()
             except Exception as exc:
                 self.log(f"查询遥测写入失败: {exc}", "WARN")
+            self._flush_train_schedules()
             self._record_task_finished(task)
             task.done.set()
             if task.thread is None:
@@ -2191,6 +2394,7 @@ $targets.Count
             self._task.cancel.set()
             self._transition(self._task, "human_action", message=status)
         self.log(f"{title}: {message}", "WARN")
+        push_message = f"{message}\n{VERIFICATION_PUSH_HINT}" if message else VERIFICATION_PUSH_HINT
         self.emit(
             "humanAction",
             {
@@ -2201,7 +2405,8 @@ $targets.Count
                 "event_id": f"verification:{self._task.run_id if self._task else 'idle'}:{title}:{message}",
             },
         )
-        self._notify_async(title, message)
+        # The push reaches a phone; verification can only be finished on the computer.
+        self._notify_async(title, push_message)
         # 非错误的警示状态，让界面在停止后仍显示「需要人工核验」，而不是普通的「监控已停止」
         self.emit_state(replace(self.state.with_human_action(status), monitoring=self.is_monitoring) if stop_task else self.state)
 
