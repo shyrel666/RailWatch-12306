@@ -166,24 +166,6 @@
 不会。订单意图和官方订单号保存在本机，重新打开后会恢复原订单并提示你继续核对，确认结果之前不会重复提交。
 </details>
 
-<a id="development"></a>
-
-## 源码运行
-
-**技术栈**：Electron · React · Ant Design · TypeScript · Vite（界面）＋ Python · Selenium（运行时）
-
-需要 **Node.js 22.13+、Python 3.10+、Chrome** 及匹配的 ChromeDriver。以 Windows PowerShell 为例：
-
-```powershell
-git clone https://github.com/shyrel666/RailWatch-12306.git
-cd RailWatch-12306
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-npm ci
-npm run dev
-```
-
 ## 参与贡献
 
 欢迎提交 [Issue](https://github.com/shyrel666/RailWatch-12306/issues) 与 Pull Request，开始前请阅读[贡献指南](CONTRIBUTING.md)；安全问题请按[安全策略](SECURITY.md)报告。反馈时请隐去姓名、证件号和订单号。
