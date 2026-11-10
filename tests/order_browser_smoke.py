@@ -11,7 +11,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from railwatch_bridge import CHROMEDRIVER_PATH
 from railwatch_order_page import OrderPage, ConfirmationOutcome
-from railwatch_orders import OrderIntent, OrderJournal
+from railwatch_orders import OrderIntent, OrderJournal, OrderResult
 from railwatch_task import MonitorTask, TaskCancelled, guard_browser
 from selenium.webdriver.remote.command import Command
 from railwatch_submit_flow import SubmitFlow
@@ -134,7 +134,7 @@ class OrderBrowserTests(unittest.TestCase):
     def js(self, script, *args):
         return self.driver.execute_script(script, *args)
 
-    def test_delivered_confirmation_losing_its_dom_receipt_never_replays(self):
+    def test_delivered_confirmation_survives_button_replacement_and_never_replays(self):
         self.driver.find_element("id", "book").click()
         self.driver.find_element("id", "submitOrder_id").click()
         self.js("""el('qr_submit_id').onclick=()=>{
@@ -143,7 +143,7 @@ class OrderBrowserTests(unittest.TestCase):
           setTimeout(()=>record(),400);
         };""")
         outcome = self.page._click_regular_confirmation(self.driver.find_element("id", "qr_submit_id"), self.intent)
-        self.assertIs(outcome, ConfirmationOutcome.UNKNOWN)
+        self.assertIs(outcome, ConfirmationOutcome.DISPATCHED)
         self.page.reconcile = Mock()
         result = self.page._post_submit(self.intent, False)
         self.assertEqual(result.status, "pending_payment")
@@ -351,6 +351,125 @@ class OrderBrowserTests(unittest.TestCase):
         snap = self.page.snapshot()
         self.assertEqual(snap['dialogs'], [])
         self.assertFalse(snap['processing'])
+
+    def test_order_page_queue_failure_is_not_an_active_queue(self):
+        self.js("""document.body.innerHTML='<div class="order-queue" id="paiduierror"><div class="queue-state"><div class="queue-info"><h2>排队失败</h2></div></div></div>';""")
+        self.assertFalse(self.page.snapshot()['processing'])
+        self.assertTrue(self.page.snapshot()['queueFailed'])
+        with patch.object(self.driver, 'get') as navigation:
+            result = self.page.reconcile(self.intent, navigate=True)
+            self.assertEqual(result.status, 'verification')
+            self.assertFalse(result.no_order)
+            navigation.assert_not_called()
+
+    # Shape recorded read-only on 2026-11-10 (tmp/sale-acceptance-20261110/m0-order-structure.before-payment.json);
+    # the wording is reconstructed, only "没有未完成" is known to be part of the official statement.
+    EMPTY_UNFINISHED = ('<div class="order-item" id="not_complete"><div class="order-empty"><div class="empty-pic"><img></div>'
+                        '<div class="empty-txt"><p>您没有未完成的订单哦～</p><p>您可以通过<a class="txt-primary underline">车票预订</a>'
+                        '功能，来制定出行计划。</p></div></div></div>')
+
+    def test_official_empty_placeholder_is_not_an_order_record(self):
+        self.js("document.body.innerHTML=arguments[0]", self.EMPTY_UNFINISHED)
+        snap = self.page.snapshot()
+        self.assertEqual(snap['orders'], [])
+        self.assertTrue(snap['pendingEmpty'])
+        self.assertEqual(self.page.result(self.intent, submitted=True).status, 'unknown')
+        # A real card beside the placeholder is still read.
+        self.js("document.body.insertAdjacentHTML('beforeend', arguments[0])", self.live_untraveled_card())
+        snap = self.page.snapshot()
+        self.assertEqual([record['order_id'] for record in snap['orders']], ['EDEMOORDER1'])
+        self.assertFalse(snap['pendingEmpty'])
+
+    def live_untraveled_card(self):
+        html = (Path(__file__).parent / 'fixtures/order-untraveled-live-20261110.html').read_text(encoding='utf-8')
+        return html.split('</title>', 1)[1]
+
+    def test_trip_check_reads_the_live_card_across_tabs_and_leaves_the_browser_as_it_was(self):
+        from railwatch_trip_check import read_existing_orders, trip_conflicts
+        recovery = (Path(__file__).parent / 'fixtures/order-recovery.html').resolve().as_uri()
+        original, handles = self.driver.current_window_handle, self.driver.window_handles
+        before = self.driver.current_url
+        navigate = self.driver.get
+        def load(url):
+            navigate(url)
+            self.js("""const panels=document.querySelectorAll('.tab-item');
+              panels[0].innerHTML=arguments[0]; panels[1].innerHTML=arguments[1];
+              window.orderActions=0;
+              document.addEventListener('click',e=>{ if(!e.target.closest('.tab-hd-list')) window.orderActions++; },true);""",
+                    self.EMPTY_UNFINISHED, self.live_untraveled_card())
+        clicks = []
+        real_close = self.driver.close
+        def close():
+            # Read what was clicked on the temporary tab just before it goes away.
+            clicks.append(self.js('return [tabClicks, window.orderActions]'))
+            real_close()
+        with patch.object(self.driver, 'get', side_effect=load) as navigation, \
+                patch.object(self.driver, 'close', side_effect=close):
+            orders = read_existing_orders(self.page, url=recovery, settle=.5)
+        navigation.assert_called_once_with(recovery)
+        self.assertEqual(clicks, [[['未出行订单'], 0]])
+        self.assertEqual((self.driver.current_window_handle, self.driver.window_handles, self.driver.current_url),
+                         (original, handles, before))
+        self.assertEqual([(o['order_id'], o['kind'], o['passengers'], o['train_codes']) for o in orders],
+                         [('EDEMOORDER1', 'regular', ['样本乘客1'], ['G8846'])])
+        self.assertIn('已支付', orders[0]['state'])
+        config = {'passengers': '样本乘客1', 'train_code': 'G8846', 'from_station_cn': '天津西', 'to_station_cn': '大兴机场'}
+        self.assertEqual(trip_conflicts(orders, config, ['2026-11-24']),
+                         [{'train': 'G8846', 'date': '2026-11-24', 'from_station': '天津西', 'to_station': '大兴机场'}])
+        self.assertEqual(trip_conflicts(orders, {**config, 'train_code': 'G8848'}, ['2026-11-24'])[0]['to_station'], '大兴机场')
+        for changes in ({'passengers': '别人'}, {'train_code': 'G8848', 'from_station_cn': '天津'},
+                        {'train_code': 'G8848', 'from_station_cn': '大兴机场', 'to_station_cn': '天津西'}):
+            self.assertEqual(trip_conflicts(orders, {**config, **changes}, ['2026-11-24']), [])
+        self.assertEqual(trip_conflicts(orders, config, ['2026-11-25']), [])
+
+    def test_trip_check_reads_the_paid_ticket_behind_a_leftover_failure_panel_without_waiting_on_it(self):
+        # The first live check (2026-11-10) spent its budget on the unfinished tab, which kept
+        # this panel from an earlier refused purchase. Its DOM was not sampled; only the text is real.
+        import json
+        import time
+        from railwatch_trip_check import read_existing_orders
+        sample = json.loads((Path(__file__).parent / 'fixtures/order-conflict-live-20261110.json').read_text(encoding='utf-8'))
+        recovery = (Path(__file__).parent / 'fixtures/order-recovery.html').resolve().as_uri()
+        navigate = self.driver.get
+        def load(url):
+            navigate(url)
+            self.js("""const panels=document.querySelectorAll('.tab-item');
+              panels[0].innerText=arguments[0]; panels[1].innerHTML=arguments[1];""",
+                    sample['subsequent_order_page_failure']['text'], self.live_untraveled_card())
+        timing = {}
+        started = time.monotonic()
+        with patch.object(self.driver, 'get', side_effect=load):
+            orders = read_existing_orders(self.page, url=recovery, settle=3.0, timing=timing)
+        self.assertEqual([order['order_id'] for order in orders], ['EDEMOORDER1'])
+        # Far less than the three seconds a tab without any statement is given.
+        self.assertLess(time.monotonic() - started - timing['navigation_ms'] / 1000, 1.5)
+        self.assertEqual(set(timing), {'navigation_ms', 'tabs_ms', 'untraveled_ms'})
+
+    def test_trip_check_cannot_conclude_from_a_page_that_is_not_the_order_tabs(self):
+        from railwatch_trip_check import read_existing_orders
+        original, handles = self.driver.current_window_handle, self.driver.window_handles
+        orders = read_existing_orders(self.page, url=(Path(__file__).parent / 'fixtures/orders.html').resolve().as_uri(), settle=.3)
+        self.assertIsNone(orders)
+        self.assertEqual((self.driver.current_window_handle, self.driver.window_handles), (original, handles))
+
+    def test_live_trip_conflict_notice_is_named_and_keeps_the_order_lock(self):
+        import json
+        sample = json.loads((Path(__file__).parent / 'fixtures/order-conflict-live-20261110.json').read_text(encoding='utf-8'))
+        outer, inner = sample['observations'][0]['dialogs']
+        # The same notice is visible as the window and as its inner box, as observed live.
+        self.js("""const outer=document.createElement('div'); outer.className=arguments[0];
+          const inner=document.createElement('div'); inner.id=arguments[1]; inner.className=arguments[2];
+          inner.innerText=arguments[3]; outer.append(inner); document.body.append(outer);""",
+                outer['classes'], inner['id'], inner['classes'], inner['text'])
+        snap = self.page.snapshot()
+        self.assertEqual(len(snap['dialogs']), 2)
+        with patch.object(self.driver, 'get') as navigation:
+            result = self.page._post_submit(self.intent, True)
+            navigation.assert_not_called()
+        self.assertEqual(result.status, 'verification')
+        self.assertIn('行程冲突', result.reason)
+        self.assertTrue(result.evidence['trip_conflict'])
+        self.assertFalse(result.no_order)
 
     def test_official_anchor_waits_for_delayed_handler_binding_before_click(self):
         # Official passengerInfo_js.js unbinds click and uses btn92 while its
@@ -1002,6 +1121,7 @@ class OrderBrowserTests(unittest.TestCase):
         self.driver.get('about:blank')
         navigate = self.driver.get
         self.page.RECOVERY_TAB_TIMEOUT = .15
+        self.page.RESULT_UNKNOWN_TIMEOUT = .15
         def load(_url):
             navigate((Path(__file__).parent / 'fixtures/order-recovery.html').resolve().as_uri())
             self.js('configure(arguments[0],arguments[1],arguments[2],arguments[3])', kind, target, state, order)
@@ -1036,10 +1156,11 @@ class OrderBrowserTests(unittest.TestCase):
 
     def test_recovery_keeps_current_official_queue_or_confirmation(self):
         for marker in ('confirmation', 'processing'):
-            with self.subTest(marker=marker), patch.object(self.page, 'snapshot', return_value={marker:True}), patch.object(self.driver, 'get') as navigation:
+            with self.subTest(marker=marker), patch.object(self.page, 'snapshot', return_value={marker:True}), patch.object(self.driver, 'get') as navigation, patch.object(self.page, 'wait_result', return_value=OrderResult('unknown')) as waiting:
                 result = self.page.reconcile(self.intent, known_id='E123456', navigate=True)
                 self.assertEqual(result.status,'unknown')
                 navigation.assert_not_called()
+                self.assertEqual(waiting.call_count, int(marker == 'processing'))
 
     def test_real_cancel_guard_preserves_submitted_intent_and_never_replays(self):
         for stop_at, expected_confirm in (('#submitOrder_id', 0), ('#qr_submit_id', 1), ('#toPayBtn', 0)):

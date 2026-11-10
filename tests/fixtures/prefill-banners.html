@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>RailWatch prefill banners fixture</title>
+<style>
+  .fill-advance-entry { padding: 8px; border: 1px solid #d0e2ff; margin-bottom: 8px; }
+  .entry-btn { display: inline-block; padding: 4px 12px; }
+</style>
+<div id="banners">
+  <div id="preFilled1" style="" class="fill-advance-entry">
+    <div class="entry-icon"><i class="icon icon-fill"></i></div>
+    <div class="entry-tit">购票信息预填</div>
+    <div class="entry-text">提前填写购票信息，车票起售时快速提交。</div>
+    <a id="preFilled1href" href="./prefill-remaining.html" class="entry-btn">去填写</a>
+  </div>
+  <div id="preFilled2" style="display: none;" class="fill-advance-entry mt10">
+    <div class="entry-icon"><i class="icon icon-fill"></i></div>
+    <div class="entry-text">您已预填 <strong id="pref2station" class="ft16">北京 - 上海</strong> 的购票信息，点击
+      <a id="preFilled2href" href="./prefill-editor.html" style="text-decoration: underline;">查看/修改预填单</a>
+    </div>
+  </div>
+  <div id="preFilled3" style="display: none;" class="fill-advance-entry mt10">
+    <div class="entry-icon"><i class="icon icon-fill"></i></div>
+    <div class="entry-text"><span id="pref3station"></span>站车票 <strong class="ft16">已开售</strong> 请快速前往购票。</div>
+    <a id="preFilled3href" href="./prefill-order.html" class="entry-btn">去购票</a>
+  </div>
+</div>
+
+<input id="fromStationText" value="北京南"><input id="fromStation" type="hidden" value="VNP">
+<input id="toStationText" value="天津"><input id="toStation" type="hidden" value="TJP">
+<input id="train_date" value="2026-11-21">
+<button id="query_ticket">查询</button>
+<table>
+  <thead>
+    <tr><th>车次</th><th>出发站/到达站</th><th>出发时间/到达时间</th><th>历时</th><th>备注</th></tr>
+  </thead>
+  <tbody id="queryLeftTable">
+    <tr id="ticket_G8821">
+      <td><a class="number">G8821</a></td>
+      <td class="cdz"><strong>大兴机场</strong><br><strong>天津西</strong></td>
+      <td class="cds"><strong>07:22</strong><br><strong>08:22</strong></td>
+      <td class="ls"><strong>01:00</strong><br><span>当日到达</span></td>
+      <td>16点起售</td>
+    </tr>
+    <tr id="ticket_G8863">
+      <td><a class="number">G8863</a></td>
+      <td class="cdz"><strong>北京大兴</strong><br><strong>天津西</strong></td>
+      <td class="cds"><strong>16:10</strong><br><strong>17:01</strong></td>
+      <td class="ls"><strong>00:51</strong><br><span>当日到达</span></td>
+      <td>16点起售</td>
+    </tr>
+    <tr id="ticket_C2551">
+      <td><a class="number">C2551</a></td>
+      <td class="cdz"><strong>北京南</strong><br><strong>天津</strong></td>
+      <td class="cds"><strong>06:00</strong><br><strong>06:30</strong></td>
+      <td class="ls"><strong>00:30</strong><br><span>当日到达</span></td>
+      <td>12点45分起售</td>
+    </tr>
+    <tr id="ticket_K7731">
+      <td><a class="number">K7731</a></td>
+      <td class="cdz"><strong>北京丰台</strong><br><strong>天津</strong></td>
+      <td class="cds"><strong>00:22</strong><br><strong>02:05</strong></td>
+      <td class="ls"><strong>01:43</strong><br><span>当日到达</span></td>
+      <td>8点起售</td>
+    </tr>
+  </tbody>
+</table>
+<div id="dialogs"></div>
+
+<script>
+function renderQueryRows(raw) {
+  const tbody = document.getElementById('queryLeftTable');
+  const items = String(raw || '').split(';').filter(Boolean).map(entry => {
+    const [code, from, to, sale] = entry.split('|');
+    return { code: code || '', from: from || '', to: to || '', sale: sale || '16点起售' };
+  });
+  tbody.innerHTML = items.map(row => `
+    <tr id="ticket_${row.code}">
+      <td><a class="number">${row.code}</a></td>
+      <td class="cdz"><strong>${row.from}</strong><br><strong>${row.to}</strong></td>
+      <td class="cds"><strong>08:00</strong><br><strong>08:50</strong></td>
+      <td class="ls"><strong>00:50</strong><br><span>当日到达</span></td>
+      <td>${row.sale}</td>
+    </tr>`).join('');
+}
+
+const bannerParams = new URLSearchParams(location.search);
+if (bannerParams.has('rows')) {
+  renderQueryRows(bannerParams.get('rows'));
+}
+
+window.fixture = {
+  queries: 0,
+  setRows: renderQueryRows,
+  setState(mode) {
+    const p1 = document.getElementById('preFilled1');
+    const p2 = document.getElementById('preFilled2');
+    const p3 = document.getElementById('preFilled3');
+    if (mode === 'released') {
+      p1.style.display = 'none';
+      p2.style.display = 'none';
+      p3.style.display = 'none';
+    } else if (mode === 'armed_same_station') {
+      p1.style.display = 'block';
+      p2.style.display = 'block';
+      document.getElementById('pref2station').textContent = '大兴机场 - 天津西';
+      p3.style.display = 'none';
+    } else {
+      // Includes armed_other_station: querying 北京南-天津 while 大兴机场-天津西 is saved.
+      p1.style.display = '';
+      p2.style.display = 'none';
+      p3.style.display = 'none';
+    }
+  }
+};
+document.getElementById('query_ticket').onclick = () => {
+  window.fixture.queries += 1;
+};
+</script>
+</html>

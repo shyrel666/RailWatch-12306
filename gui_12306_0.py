@@ -706,6 +706,7 @@ class TicketMonitor(BaseHandler):
         self._sale_retries = 0
         self._sale_retry_disabled = False
         self._sale_retry = None
+        self._temporary_query_failures = 0
         self._resettles = []
         self.query_executor = QueryExecutor(driver, self.should_stop, self._poll_wait, lambda: self.tick()) if param_filler else None
         self.notify = notify_callback or (lambda title, msg: print(title, msg, flush=True) if title.isascii() and msg.isascii() else _safe_print(title, msg))
@@ -1228,6 +1229,84 @@ class TicketMonitor(BaseHandler):
         except Exception:
             pass  # A display callback must not alter transaction decisions.
 
+    def _apply_server_backoff(self, status: str, result: dict, interval: float) -> bool:
+        """Apply official cooldowns before any new navigation or query."""
+        self._sale_retry_disabled = True
+        reason = result.get("reason", f"查询收到 HTTP {result.get('http_status')}")
+        if self.rate_limiter:
+            if status == "rate_limited":
+                self.rate_limiter.on_error("操作过快：" + reason)
+                self.rate_limiter.consume_risk_alert()  # Handled by this branch.
+            else:
+                self.rate_limiter.on_timeout()
+        retry_after = result.get("retry_after_seconds")
+        if retry_after is None:
+            self._signal_human_action("", reason + "，未提供有效等待时间，已暂停自动查询，请检查官方页面后再启动。")
+            return False
+        delay = max(interval, retry_after,
+                    self.rate_limiter.get_interval() if self.rate_limiter else interval)
+        self.log(f"{reason}，服务端要求等待 {retry_after:.1f}s；将在至少 {delay:.1f}s 后重试。")
+        # Server cooldown is independent of smart-rate settings and its
+        # local upper bound. Do not reload, query or submit while waiting.
+        self._sleep(delay)
+        self._needs_navigation = True
+        return True
+
+    def absorb_prefill_query_failure(self, result: dict) -> bool:
+        """Carry preparation query limits into the normal monitor."""
+        status = result.get("status")
+        if status in ("rate_limited", "server_backoff"):
+            interval = (self.rate_limiter.get_interval() if self.rate_limiter else
+                        get_random_interval(max(1.0, _read_float(self.cfg.get("interval", 3), 3.0))))
+            return self._apply_server_backoff(status, result, interval)
+        if status == "transient_error":
+            return self._recover_transient_query(result, float(self.cfg.get("interval", 6)))
+        if status in ("human_action", "unknown"):
+            self._signal_human_action("", result.get("reason", "请检查浏览器页面"))
+            return False
+        return True
+
+    def _recover_transient_query(self, result: dict, interval: float) -> bool:
+        """Acknowledge only a known query error; retry with bounded cadence.
+
+        Submitted orders never enter this path. Repeated temporary outages
+        back off to a minute instead of asking an unattended user to restart.
+        """
+        if not (self.cfg.get("timer_enabled") and self.auto_submit):
+            self._signal_human_action("", result.get("reason", "请检查浏览器页面"))
+            return False
+        if self.should_stop():
+            return False
+        executor = self.query_executor or QueryExecutor(self.driver, self.should_stop)
+        if not executor.dismiss_transient_error():
+            if not self.should_stop():
+                self._signal_human_action("", "查询提示已变化或无法安全关闭，请检查官方页面")
+            return False
+        if self.should_stop():
+            return False
+        dialog = executor.inspect_dialog()
+        if dialog["kind"] not in ("none", "transient_error"):
+            self._signal_human_action("", dialog["text"] or "请检查官方页面")
+            return False
+        self._temporary_query_failures += 1
+        self._sale_retry_disabled = True
+        if self.rate_limiter:
+            self.rate_limiter.on_timeout()
+        delay = max(interval, min(60.0, max(6.0, interval) * 2 ** min(self._temporary_query_failures - 1, 6)),
+                    self.rate_limiter.get_interval() if self.rate_limiter else interval)
+        self.log(f"官网查询暂时繁忙或网络超时，已自动确认提示，{delay:.1f} 秒后重查（连续 {self._temporary_query_failures} 次）。")
+        self._mark("query_auto_retry", {"attempt": self._temporary_query_failures, "delay_seconds": delay})
+        self._sleep(delay)
+        if self.should_stop():
+            return False
+        # A captcha may replace the error during the cooldown. Do not let the
+        # preparation fallback navigate past it after this method returns.
+        dialog = executor.inspect_dialog()
+        if dialog["kind"] not in ("none", "transient_error"):
+            self._signal_human_action("", dialog["text"] or "请检查官方页面")
+            return False
+        return True
+
     def _query_loop(self, loop_count: int, interval: float) -> bool:
         """单次监控循环，返回是否命中（风控优化版）"""
         self._row_snapshot = None
@@ -1273,26 +1352,9 @@ class TicketMonitor(BaseHandler):
             if status not in ("ok", "empty"):
                 self._publish_query(error=result.get("reason") or {"not_on_sale": "尚未起售", "rate_limited": "查询限频", "server_backoff": "服务端要求等待"}.get(status, "本轮查询未完成"))
             if status in ("rate_limited", "server_backoff"):
-                self._sale_retry_disabled = True
-                reason = result.get("reason", f"查询收到 HTTP {result.get('http_status')}")
-                if self.rate_limiter:
-                    if status == "rate_limited":
-                        self.rate_limiter.on_error("操作过快：" + reason)
-                        self.rate_limiter.consume_risk_alert()  # Handled by this branch.
-                    else:
-                        self.rate_limiter.on_timeout()
-                retry_after = result.get("retry_after_seconds")
-                if retry_after is None:
-                    self._signal_human_action("", reason + "，未提供有效等待时间，已暂停自动查询，请检查官方页面后再启动。")
-                    return True
-                delay = max(interval, retry_after,
-                            self.rate_limiter.get_interval() if self.rate_limiter else interval)
-                self.log(f"{reason}，服务端要求等待 {retry_after:.1f}s；将在至少 {delay:.1f}s 后重试。")
-                # Server cooldown is independent of smart-rate settings and its
-                # local upper bound. Do not reload, query or submit while waiting.
-                self._sleep(delay)
-                self._needs_navigation = True
-                return False
+                return not self._apply_server_backoff(status, result, interval)
+            if status == "transient_error":
+                return not self._recover_transient_query(result, interval)
             if status in ("human_action", "unknown"):
                 self._signal_human_action("", result.get("reason", "请检查浏览器页面"))
                 return True
@@ -1333,6 +1395,7 @@ class TicketMonitor(BaseHandler):
                     self.rate_limiter.on_timeout()
                 self._sleep(max(interval, self.rate_limiter.get_interval() if self.rate_limiter else interval))
                 return False
+        self._temporary_query_failures = 0
         if self.rate_limiter:
             self.rate_limiter.on_success()
 

@@ -1,0 +1,42 @@
+{
+  "captured_at": "2026-11-10T16:26:37.511780+08:00",
+  "run_id": "f6a4b8998cdc4395aa1627bd2a0b85f4",
+  "case": "same adult, same paid train/date/route/seat; one normal attempt",
+  "observations": [
+    {
+      "route": "/otn/confirmPassenger/initDc",
+      "dialogs": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "classes": "dhtmlx_window_active",
+          "text": "提示\n订票失败!\n\n原因： 尊敬的旅客，为更好维护购票和乘车秩序，不能购买行程冲突车票。乘车人＜身份已脱敏＞已订车票与本次购票行程冲突，请将已购车票办理改签，或办理退票后重新购票。谢谢您的合作。\n\n请点击[我的12306]办理其他业务。您也可以点击[预订车票]，重新规划您的旅程。"
+        },
+        {
+          "tag": "DIV",
+          "id": "content_transforNotice_id",
+          "classes": "up-box",
+          "text": "提示\n订票失败!\n\n原因： 尊敬的旅客，为更好维护购票和乘车秩序，不能购买行程冲突车票。乘车人＜身份已脱敏＞已订车票与本次购票行程冲突，请将已购车票办理改签，或办理退票后重新购票。谢谢您的合作。\n\n请点击[我的12306]办理其他业务。您也可以点击[预订车票]，重新规划您的旅程。"
+        }
+      ],
+      "processing": false,
+      "confirmation": false,
+      "verification": false,
+      "endpoints": [
+        "checkOrderInfo",
+        "confirmSingleForQueue"
+      ]
+    }
+  ],
+  "phase": "after regular_confirm_dispatched",
+  "production_status": "verification; lock retained; no automatic retry",
+  "identity_redacted": true,
+  "subsequent_order_page_failure": {
+    "route": "/otn/view/train_order.html",
+    "active_tab": [
+      "未完成订单"
+    ],
+    "container": ".panel-tab .tab-bd",
+    "text": "哎呀，出票失败了！\n尊敬的旅客，为更好维护购票和乘车秩序，不能购买行程冲突车票。乘车人＜身份已脱敏＞已订车票与本次购票行程冲突，请将已购车票办理改签，或办理退票后重新购票。谢谢您的合作。\n车次信息\n2026-11-24 (周二) G8846 车次 天津西站 （13:24）开 - 大兴机场站\n重新购票"
+  }
+}

@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from railwatch_orders import OrderJournal
-from railwatch_run_review import build_run_review, build_prediction, duration
+from railwatch_run_review import build_run_review, build_prediction, duration, sale_path
 
 
 def event(sequence, stage, at, detail=None):
@@ -292,3 +292,77 @@ class RunReviewTests(unittest.TestCase):
             self.assertIsNone(stages["first_query"]["duration_ms"])
             self.assertIsNone(review["query_median_ms"])
             self.assertGreater(stages["query"]["start_ms"], 0)
+
+
+class SalePathTests(unittest.TestCase):
+    """起售 → 确认送达：只用交易本来就写的标记，缺哪一步就留空。"""
+
+    @staticmethod
+    def of(intent, sequence, stage, at, detail=None):
+        return {**event(sequence, stage, at, detail), "intent_id": intent}
+
+    def start(self):
+        return [event(1, "target_sale", 0, {"target_at": 1020}), event(2, "scheduler_wake", 20, {"late_ms": 5}),
+                event(3, "prefill_armed", 5)]
+
+    def test_prefill_direct_reports_every_step_from_the_sale_time(self):
+        events = self.start() + [
+            self.of("a", 4, "inventory_found", 21.0), self.of("a", 5, "prefill_submit", 21.06, {"unlock_wait_ms": 980.5}),
+            self.of("a", 6, "regular_submit", 23.0), self.of("a", 7, "regular_confirm_attempt", 23.1),
+            self.of("a", 8, "regular_confirm_dispatched", 25.418),
+            self.of("a", 9, "order_result", 26.0, {"status": "verification", "official": False}),
+            self.of("a", 10, "order_result", 85.2, {"status": "pending_payment", "official": True})]
+        path = build_run_review(events)["sale_path"]
+        self.assertEqual(path, {"path": "prefill", "fallback": False, "entry_attempts": 1, "unlock_wait_ms": 980.5,
+                                "entry_click_ms": 1060.0, "submit_ms": 3000.0, "confirm_click_ms": 3100.0,
+                                "confirm_delivered_ms": 5418.0, "official_result_ms": 65200.0})
+
+    def test_presale_retry_follows_the_intent_that_confirmed_and_keeps_the_first_unlock_wait(self):
+        events = self.start() + [
+            self.of("a", 4, "prefill_submit", 20.6, {"unlock_wait_ms": 600}),
+            self.of("a", 5, "prefill_official_rejected", 20.9, {"kind": "not_on_sale"}),
+            self.of("b", 6, "prefill_submit", 21.4, {"unlock_wait_ms": 20}),
+            self.of("b", 7, "regular_submit", 22.0), self.of("b", 8, "regular_confirm_attempt", 22.2),
+            self.of("b", 9, "regular_confirm_dispatched", 22.9)]
+        path = sale_path(events, 1020)
+        self.assertEqual((path["entry_attempts"], path["unlock_wait_ms"], path["entry_click_ms"]), (2, 600, 1400.0))
+        self.assertEqual(path["confirm_delivered_ms"], 2900.0)
+
+    def test_regular_order_after_a_prefill_fallback_is_a_regular_path(self):
+        events = self.start() + [
+            event(4, "prefill_fallback", 21.5, {"stage": "unlock_timeout"}),
+            self.of("r", 5, "inventory_found", 24.0), self.of("r", 6, "regular_submit", 30.0),
+            self.of("r", 7, "regular_confirm_attempt", 31.0), self.of("r", 8, "regular_confirm_dispatched", 31.5)]
+        path = sale_path(events, 1020)
+        self.assertEqual((path["path"], path["fallback"], path["entry_attempts"], path["unlock_wait_ms"]),
+                         ("regular", True, 0, None))
+        self.assertEqual((path["entry_click_ms"], path["confirm_delivered_ms"]), (4000.0, 11500.0))
+
+    def test_missing_steps_stay_empty_and_runs_without_a_sale_time_or_an_order_have_no_path(self):
+        reached_entry = sale_path(self.start() + [self.of("a", 4, "prefill_submit", 21.0)], 1020)
+        self.assertEqual(reached_entry["entry_click_ms"], 1000.0)
+        self.assertEqual([reached_entry[key] for key in ("unlock_wait_ms", "submit_ms", "confirm_click_ms",
+                                                         "confirm_delivered_ms", "official_result_ms")], [None] * 5)
+        self.assertIsNone(sale_path(self.start(), 1020))
+        self.assertIsNone(sale_path([self.of("a", 1, "regular_confirm_dispatched", 5)], None))
+        self.assertIsNone(build_run_review([self.of("a", 1, "regular_confirm_dispatched", 5)])["sale_path"])
+
+    def test_run_list_carries_the_confirmation_offset_from_conclusion_markers_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            from railwatch_bridge import RailWatchBridge
+            from railwatch_orders import OrderIntent
+            bridge = RailWatchBridge(directory)
+            self.addCleanup(bridge.notification_service.close)
+            journal = bridge.order_journal
+            journal.mark("timed", "target_sale", detail={"target_at": 1.0})
+            intent = OrderIntent("regular", "G1", "2026-11-21", "北京南", "上海虹桥", "二等座", ("测试乘客",))
+            journal.begin("timed", intent, {}, "inventory_found")
+            for stage in ("prefill_submit", "regular_submit", "regular_confirm_attempt", "regular_confirm_dispatched"):
+                journal.mark("timed", stage, intent.intent_id)
+            journal.mark("idle", "target_sale", detail={"target_at": 1.0})
+            listed = {item["run_id"]: item["sale_confirm"] for item in bridge.run_reviews(10)["items"]}
+            self.assertIsNone(listed["idle"])
+            self.assertEqual(listed["timed"]["path"], "prefill")
+            detail = bridge.run_review("timed")["sale_path"]
+            self.assertEqual(listed["timed"]["confirm_delivered_ms"], detail["confirm_delivered_ms"])
+            self.assertGreater(detail["confirm_delivered_ms"], 0)

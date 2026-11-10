@@ -43,6 +43,7 @@ export type RailWatchConfig = {
   date_scan_budget_seconds?: number;
   smart_rate: boolean;
   timer_enabled: boolean;
+  prefill_enabled?: boolean;
   target_time: string;
   sale_at?: string;
   sale_time_source?: string;
@@ -162,6 +163,7 @@ export type TicketHit = {
 };
 
 export type RailWatchStatus = {
+  prefill?: PrefillProgress | null;
   human_action?: HumanActionPayload | null;
   activity?: TaskActivity;
   order?: OrderStage;
@@ -180,6 +182,14 @@ export type RailWatchStatus = {
   current_config: Record<string, unknown>;
   hits: TicketHit[];
   summary: string;
+};
+
+export type PrefillProgress = {
+  run_id: string;
+  fallback: boolean;
+  submissions: number;
+  candidates: { train: string; date: string; from: string; to: string; seat: string;
+    status: string; confirmed: boolean; bound: boolean }[];
 };
 
 export type OrderStage = {

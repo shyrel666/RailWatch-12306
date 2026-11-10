@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "antd";
 import { History, RefreshCw } from "lucide-react";
-import type { RunReviewDetail, RunReviewSummary } from "../lib/rehearsal";
+import type { RunReviewDetail, RunReviewSummary, SalePath } from "../lib/rehearsal";
 import { millis, seconds, span } from "../lib/chartScale";
 import { railwatchApi } from "../lib/railwatchApi";
 import { conclusionTone } from "../lib/runConclusion";
@@ -26,6 +26,22 @@ function day(value?: string) {
   if (!match) return null;
   const weekday = "日一二三四五六"[new Date(Date.UTC(+match[1], +match[2] - 1, +match[3])).getUTCDay()];
   return `${Number(match[2])}月${Number(match[3])}日 周${weekday}`;
+}
+
+const pathLabel = { prefill: "官方预填", regular: "常规下单" };
+
+function salePathNote(path: SalePath) {
+  const route = pathLabel[path.path] + (path.fallback && path.path === "regular" ? "（预填回退后）" : "");
+  const steps = [
+    path.unlock_wait_ms !== null ? `等待解锁 ${seconds(path.unlock_wait_ms)}` : "",
+    path.entry_click_ms !== null ? `${path.path === "prefill" ? "入口点击" : "命中"} +${seconds(path.entry_click_ms)}` : "",
+    path.entry_attempts > 1 ? `入口共点击 ${path.entry_attempts} 次` : "",
+    path.confirm_click_ms !== null ? `确认点击 +${seconds(path.confirm_click_ms)}` : "",
+    path.official_result_ms !== null ? `官方订单 +${seconds(path.official_result_ms)}` : "",
+  ].filter(Boolean).join("，");
+  return path.confirm_delivered_ms !== null
+    ? `起售 → 确认送达：${seconds(path.confirm_delivered_ms)}（${route}${steps ? `；${steps}` : ""}）。确认送达是浏览器点击返回并读到送达回执的时刻，晚于排队请求结束，不代表已成功入队。`
+    : `起售 → 确认送达未记录：本次${route}未走到确认送达${steps ? `（${steps}）` : ""}。`;
 }
 
 function Conclusion({ value }: { value: string }) {
@@ -71,6 +87,7 @@ function Detail({ detail, busy }: { detail: RunReviewDetail; busy: boolean }) {
       {timed ? <p className="rv-section-note">{firstValid
         ? `首个有效查询：起售后 ${seconds(firstValid.offset_ms)}，第 ${firstValid.round} 轮取得；此前 ${firstValid.presale_rounds} 轮仍显示未开售，其中快速重查 ${firstValid.sale_retries} 次。`
         : "首个有效查询未记录：起售后的查询记录不完整，或尚未取得已开售的有效结果。"}</p> : null}
+      {detail.sale_path ? <p className="rv-section-note">{salePathNote(detail.sale_path)}</p> : null}
       <TimelineWaterfall segments={segments} prediction={detail.prediction ?? []} origin={timed ? "距起售" : undefined} />
     </section>
     {orders.length ? <section className="rv-section" aria-label="下单分步耗时">
@@ -177,7 +194,8 @@ export function RunReviews() {
             aria-label="查看复盘" aria-pressed={item.run_id === selected} onClick={() => void open(item.run_id)}>
             <Conclusion value={item.conclusion} />
             <time>{clock(item.target_at ?? item.started_at, {})}</time>
-            <span className="rv-run-trip">{route(item.trip)} · {item.target_at != null ? "定时" : "即时"}</span>
+            <span className="rv-run-trip">{route(item.trip)} · {item.target_at != null ? "定时" : "即时"}
+              {item.sale_confirm ? ` · ${pathLabel[item.sale_confirm.path]} +${seconds(item.sale_confirm.confirm_delivered_ms)} 确认` : ""}</span>
           </button>
         </li>)}</ol>
         {cursor || page.next_cursor ? <div className="rv-pager">

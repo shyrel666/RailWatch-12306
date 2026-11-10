@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>RailWatch prefill remaining fixture</title>
+<style>
+  .btn { display: inline-block; padding: 4px 10px; border: 1px solid #3b99fc; text-decoration: none; cursor: pointer; }
+  .btn-disabled { opacity: 0.6; cursor: no-drop; }
+  .is-active { background: #3b99fc; color: #fff; }
+  .ticket-result-item { border-bottom: 1px solid #eee; padding: 8px 0; }
+  .ticket-item-buy-item { margin: 4px 0; }
+</style>
+
+<div class="search-bar">
+  <input id="fromStationText" name="leftTicketDTO.from_station_name" class="input inp-txt" value="北京南">
+  <input id="toStationText" name="leftTicketDTO.to_station_name" class="input inp-txt" value="天津">
+  <input id="train_date" class="input" value="2026-11-21">
+  <a id="query_ticket" class="btn btn-primary" href="javascript:;">查询</a>
+</div>
+
+<div class="tips-bar">
+  <span>预填单提醒：当前页面仅显示未到起售时间的车次，已起售的车次可在余票列表页中操作购票。</span>
+  <a id="saveBtn" href="javascript:;" class="btn btn-primary btn-disabled" disabled="" style="display: inline-block; width: 80px;">提交</a>
+</div>
+
+<div class="ticket-result-bd" id="trainList"></div>
+
+<script>
+const TRAINS = [
+  {
+    code: 'K7731', depTime: '00:22', depBadge: '过', depStation: '北京丰台',
+    arrTime: '02:05', arrBadge: '过', arrStation: '天津', duration: '1小时43分钟',
+    sale: '11月7日8点起售',
+    seats: [
+      { name: '硬座', price: '19.5' },
+      { name: '硬卧', price: '65.5', berths: [['上铺', '65.5'], ['中铺', '70.5'], ['下铺', '73.5']] },
+      { name: '无座', price: '19.5' }
+    ]
+  },
+  {
+    code: 'C2551', depTime: '06:00', depBadge: '始', depStation: '北京南',
+    arrTime: '06:30', arrBadge: '过', arrStation: '天津', duration: '30分钟',
+    sale: '11月7日12点45分起售',
+    seats: [
+      { name: '一等座', price: '88.0' },
+      { name: '二等座', price: '54.5' }
+    ]
+  },
+  {
+    code: 'G8821', depTime: '07:22', depBadge: '始', depStation: '大兴机场',
+    arrTime: '08:22', arrBadge: '过', arrStation: '天津西', duration: '1小时',
+    sale: '11月7日16点起售',
+    seats: [
+      { name: '一等座', price: '63.5' },
+      { name: '二等座', price: '39.5' }
+    ]
+  },
+  {
+    code: 'G8863', depTime: '16:10', depBadge: '过', depStation: '北京大兴',
+    arrTime: '17:01', arrBadge: '终', arrStation: '天津西', duration: '51分钟',
+    sale: '11月7日16点起售',
+    seats: [
+      { name: '商务座', price: '142.0' },
+      { name: '一等座', price: '71.5' },
+      { name: '二等座', price: '45.5' },
+      { name: '无座', price: '45.5' }
+    ]
+  }
+];
+
+const selected = new Set();
+window.fixture = { selected, renderCount: 0 };
+
+function keyOf(train, seat) {
+  return `${train.code}|${train.depStation}|${train.arrStation}|${seat}`;
+}
+
+function updateSaveBtn() {
+  const btn = document.getElementById('saveBtn');
+  if (selected.size > 0) {
+    btn.className = 'btn btn-primary';
+    btn.removeAttribute('disabled');
+    btn.style.cursor = 'pointer';
+  } else {
+    btn.className = 'btn btn-primary btn-disabled';
+    btn.setAttribute('disabled', '');
+    btn.style.cursor = 'no-drop';
+  }
+}
+
+function renderList() {
+  window.fixture.renderCount += 1;
+  const host = document.getElementById('trainList');
+  host.innerHTML = TRAINS.map(train => {
+    const seatsHtml = train.seats.map((seat, idx) => {
+      const k = keyOf(train, seat.name);
+      const active = selected.has(k) ? ' is-active' : '';
+      const saleHtml = idx === 0 ? `<span class="txt-lighter">${train.sale}</span>` : '<span class="txt-lighter"></span>';
+      const berthsHtml = (seat.berths || []).map(([bName, bPrice]) => `
+        <div class="ticket-item-buy-item">
+          <div class="ticket-price">
+            <div class="ticket-price-seat">${bName}</div>
+            <div class="ticket-price-num"><span class="txt-price"><i class="rmb">¥</i>${bPrice}</span></div>
+          </div>
+        </div>`).join('');
+      return `
+        <div class="ticket-item-buy-item">
+          <div class="ticket-price">
+            <div class="ticket-price-seat">${seat.name}</div>
+            <div class="ticket-price-num"><span class="txt-price"><i class="rmb">¥</i>${seat.price}</span></div>
+          </div>
+          <div class="ticket-discount"></div>
+          <div class="ticket-state">${saleHtml}</div>
+          <div class="ticket-btn">
+            <a href="javascript:;" data-key="${k}" class="btn btn-hollow btn-sm${active}">选择</a>
+          </div>
+        </div>
+        <div class="ticket-item-buy-item-group" style="display: none">${berthsHtml}</div>`;
+    }).join('');
+    return `
+      <div class="ticket-result-item">
+        <div class="ticket-item-info">
+          <div class="ticket-number"><div class="ticket-number-num">${train.code}</div></div>
+          <div class="ticket-time">
+            <div class="ticket-time-num txt-primary">${train.depTime}</div>
+            <div class="ticket-time-info"><span class="label-guo">${train.depBadge}</span>${train.depStation}</div>
+          </div>
+          <div class="ticket-alltime"><div class="ticket-alltime-txt">${train.duration}</div></div>
+          <div class="ticket-time">
+            <div class="ticket-time-num">${train.arrTime}</div>
+            <div class="ticket-time-info"><span class="label-zhong">${train.arrBadge}</span>${train.arrStation}</div>
+          </div>
+        </div>
+        <div class="ticket-item-buy">
+          <div class="ticket-item-buy-item-drop">${seatsHtml}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  for (const link of host.querySelectorAll('.ticket-btn > a.btn')) {
+    link.onclick = (e) => {
+      e.preventDefault();
+      const k = link.getAttribute('data-key');
+      if (selected.has(k)) selected.delete(k);
+      else selected.add(k);
+      // Official 12306 re-renders #trainList on every toggle, invalidating old WebElements.
+      renderList();
+    };
+  }
+  updateSaveBtn();
+}
+
+document.getElementById('saveBtn').onclick = (e) => {
+  e.preventDefault();
+  if (selected.size === 0) return;
+  const encoded = encodeURIComponent([...selected].join(';'));
+  location.href = `./prefill-editor.html?date=2026-11-21&selected=${encoded}`;
+};
+
+renderList();
+</script>
+</html>

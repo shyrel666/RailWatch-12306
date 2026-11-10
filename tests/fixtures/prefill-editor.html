@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>RailWatch prefill editor fixture</title>
+<style>
+  .btn, .btn-primary, .btn-prev, .order-toggle-btn { display: inline-block; padding: 4px 10px; cursor: pointer; }
+  .passenger-list { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; }
+  .check-inline { display: inline-block; position: relative; padding-left: 20px; cursor: pointer; }
+  .icheckbox { display: inline-block; width: 16px; height: 16px; position: relative; vertical-align: middle; }
+</style>
+
+<div class="order-tobuy mt">
+  <div class="panel-order" id="panel-order-con">
+    <div class="panel-order-hd">
+      <div class="pull-right">
+        <span class="sail-time0">距离开售时间还有 <strong class="txt-num" id="cd-h">0</strong> 小时 <strong class="txt-num" id="cd-m">10</strong> 分 <strong class="txt-num" id="cd-s">0</strong> 秒</span>
+      </div>
+      <strong id="editor-date">乘车日期：2026年11月21日 星期五</strong>
+    </div>
+    <div class="panel-order-bd" id="editor-trains"></div>
+  </div>
+
+  <div class="panel-order mt-lg">
+    <div class="panel-order-hd"><strong class="mr">乘客信息</strong></div>
+    <div class="panel-order-bd padding">
+      <div class="passenger-list-box">
+        <div class="passenger-list-type">乘车人</div>
+        <ul class="passenger-list" id="passenge_list">
+          <li style="width: 130px;" class="name-yichu">
+            <label class="check-inline" title="张三">
+              <div class="icheckbox">
+                <input class="chose-pass-dom" type="checkbox" passengerinfo="1#张三#1#1101" data-ticket-label="成人票" style="position: absolute; opacity: 0; width: 14px; height: 14px;">
+                <ins class="iCheck-helper" style="position: absolute; top: 0; left: 0; display: block; width: 100%; height: 100%; opacity: 0;"></ins>
+              </div>张三
+            </label>
+          </li>
+          <li style="width: 130px;" class="name-yichu">
+            <label class="check-inline" title="李四">
+              <div class="icheckbox">
+                <input class="chose-pass-dom" type="checkbox" passengerinfo="1#李四#1#1101" data-ticket-label="成人票" style="position: absolute; opacity: 0; width: 14px; height: 14px;">
+                <ins class="iCheck-helper" style="position: absolute; top: 0; left: 0; display: block; width: 100%; height: 100%; opacity: 0;"></ins>
+              </div>李四
+            </label>
+          </li>
+          <li style="width: 130px; display: none;" class="name-yichu collapsed-person">
+            <label class="check-inline" title="赵六">
+              <div class="icheckbox">
+                <input class="chose-pass-dom" type="checkbox" passengerinfo="1#赵六#1#1101" data-ticket-label="成人票" style="position: absolute; opacity: 0; width: 14px; height: 14px;">
+                <ins class="iCheck-helper" style="position: absolute; top: 0; left: 0; display: block; width: 100%; height: 100%; opacity: 0;"></ins>
+              </div>赵六
+            </label>
+          </li>
+          <li style="width: 130px;" class="name-yichu">
+            <label class="check-inline" title="王小明">
+              <div class="icheckbox">
+                <input class="chose-pass-dom" type="checkbox" passengerinfo="3#王小明#1#1101" data-ticket-label="学生票" style="position: absolute; opacity: 0; width: 14px; height: 14px;">
+                <ins class="iCheck-helper" style="position: absolute; top: 0; left: 0; display: block; width: 100%; height: 100%; opacity: 0;"></ins>
+              </div>王小明(学生)
+            </label>
+          </li>
+        </ul>
+      </div>
+    </div>
+    <div class="order-toggle-btn" id="order_toggle"><span>展开</span></div>
+
+    <div class="panel-order-bd order-add-addpassenger">
+      <div id="on_chick_passenger">
+        <table class="list-table list-table-horizontal-mini">
+          <tbody id="selected-passengers-body">
+            <tr><th>序号</th><th>票种</th><th>姓名</th><th>证件类型</th><th>证件号码</th><th></th></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="order-detail">
+    <div class="order-detail-bd">
+      <ul class="order-detail-list"><li><span class="detail-list-name">成人票</span><span class="detail-list-price"><span class="txt-price"><span id="man_money_num">0</span>人</span></span></li></ul>
+    </div>
+    <div class="order-detail-ft">
+      <a href="./prefill-remaining.html" class="btn-prev">上一步</a>
+      <a href="javascript:;" class="btn-primary" id="confirmEditorBtn">确定</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawSelected = params.get('selected') || 'G8821|大兴机场|天津西|二等座;G8821|大兴机场|天津西|一等座;G8863|北京大兴|天津西|二等座';
+const dateStr = params.get('date') || '2026-11-21';
+
+function groupTrains(raw) {
+  const map = new Map();
+  for (const item of raw.split(';').filter(Boolean)) {
+    const [code, from, to, seat, sale] = item.split('|');
+    const key = `${code}|${from}|${to}`;
+    if (!map.has(key)) map.set(key, { code, from, to, sale: sale || '11月7日16点起售', seats: [] });
+    else if (sale) map.get(key).sale = sale;
+    map.get(key).seats.push(seat);
+  }
+  return [...map.values()];
+}
+
+let trainRows = groupTrains(rawSelected);
+
+function renderTrains() {
+  const container = document.getElementById('editor-trains');
+  container.innerHTML = trainRows.map((row, idx) => `
+    <table class="ticket-fill-advance-table">
+      <tbody><tr>
+        <td class="td-order">${idx + 1}</td>
+        <td class="td-train-number"><strong>${row.code}</strong></td>
+        <td class="td-station"><div><strong>${row.from}</strong></div><div>08:00</div></td>
+        <td class="td-to"><i class="to-icon"></i></td>
+        <td class="td-station"><div><strong>${row.to}</strong></div><div>08:50</div></td>
+        <td class="td-state"><div class="txt-lighter">${row.sale}</div></td>
+        <td class="td-seat">
+          ${row.seats.map(seat => `
+            <div class="seat-item is-active">
+              <div class="seat-name">${seat}</div>
+              <div class="seat-price"><span class="txt-price"><i class="rmb">¥</i>50.0</span></div>
+              <div class="seat-check"></div>
+            </div>`).join('')}
+        </td>
+        <td class="td-link"><a href="javascript:;" class="txt-primary underline list-del">删除</a></td>
+      </tr></tbody>
+    </table>`).join('') + '<div class="btn-center mt"><a href="./prefill-remaining.html" class="btn btn-addpassenger list-add">添加更多车次</a></div>';
+}
+
+function syncSelectedTable() {
+  const tbody = document.getElementById('selected-passengers-body');
+  const checked = [...document.querySelectorAll('#passenge_list input.chose-pass-dom')].filter(el => el.checked);
+  document.getElementById('man_money_num').textContent = String(checked.length);
+  tbody.innerHTML = '<tr><th>序号</th><th>票种</th><th>姓名</th><th>证件类型</th><th>证件号码</th><th></th></tr>' +
+    checked.map((input, idx) => {
+      const name = input.closest('label').getAttribute('title');
+      const ticketLabel = input.getAttribute('data-ticket-label') || '成人票';
+      return `<tr>
+        <td>${idx + 1}</td>
+        <td><div class="sel w100"><div class="sel-hd"><div class="sel-inner typetext">${ticketLabel}</div></div></div></td>
+        <td><div class="input-box w100"><input readonly type="text" class="input txt-lighter name-input" value="${name}"></div></td>
+        <td><div class="input-box form-block"><input readonly type="text" class="input txt-lighter" value="居民身份证"></div></td>
+        <td><div class="input-box w170"><input readonly type="text" class="input txt-lighter" value="1101***********123"></div></td>
+        <td><a href="javascript:;" class="txt-danger remove-this">×</a></td>
+      </tr>`;
+    }).join('');
+}
+
+// Simulate iCheck: clicking label or ins.iCheck-helper toggles checkbox and syncs table.
+for (const label of document.querySelectorAll('#passenge_list label.check-inline')) {
+  const input = label.querySelector('input.chose-pass-dom');
+  const box = label.querySelector('.icheckbox');
+  label.addEventListener('click', (e) => {
+    e.preventDefault();
+    input.checked = !input.checked;
+    box.classList.toggle('checked', input.checked);
+    syncSelectedTable();
+  });
+}
+
+document.getElementById('order_toggle').onclick = () => {
+  for (const li of document.querySelectorAll('.collapsed-person')) li.style.display = '';
+  document.getElementById('order_toggle').style.display = 'none';
+};
+
+document.getElementById('confirmEditorBtn').onclick = (e) => {
+  e.preventDefault();
+  const names = [...document.querySelectorAll('#passenge_list input.chose-pass-dom')]
+    .filter(el => el.checked)
+    .map(el => el.closest('label').getAttribute('title'));
+  const items = trainRows.flatMap(r => r.seats.map(s =>
+    r.sale && r.sale !== '11月7日16点起售'
+      ? `${r.code}|${r.from}|${r.to}|${s}|${r.sale}`
+      : `${r.code}|${r.from}|${r.to}|${s}`
+  ));
+  const nextParams = new URLSearchParams({
+    date: dateStr,
+    selected: items.join(';'),
+    passengers: names.join('、'),
+  });
+  for (const extraKey of ['countdown', 'dialog']) {
+    if (params.has(extraKey)) nextParams.set(extraKey, params.get(extraKey));
+  }
+  location.href = `./prefill-order.html?${nextParams.toString()}`;
+};
+
+window.fixture = {
+  setCountdown(h, m, s) {
+    document.getElementById('cd-h').textContent = String(h);
+    document.getElementById('cd-m').textContent = String(m);
+    document.getElementById('cd-s').textContent = String(s);
+  },
+  precheckPassenger(name, ticketLabel) {
+    for (const label of document.querySelectorAll('#passenge_list label.check-inline')) {
+      if (label.getAttribute('title') === name) {
+        const input = label.querySelector('input.chose-pass-dom');
+        if (ticketLabel) input.setAttribute('data-ticket-label', ticketLabel);
+        input.checked = true;
+        label.querySelector('.icheckbox').classList.add('checked');
+      }
+    }
+    syncSelectedTable();
+  },
+  addExtraTrain(code, from, to, seat, sale) {
+    trainRows.push({ code, from, to, sale: sale || '11月7日14点起售', seats: [seat] });
+    renderTrains();
+  }
+};
+
+renderTrains();
+const initialPassengers = params.get('passengers') || '';
+for (const name of initialPassengers.split(/[、,，\s]+/).filter(Boolean)) {
+  window.fixture.precheckPassenger(name);
+}
+syncSelectedTable();
+</script>
+</html>

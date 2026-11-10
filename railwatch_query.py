@@ -7,6 +7,7 @@ import time
 import uuid
 
 from railwatch_policies import QUERY_STRATEGIES, TRAIN_CODE_TABLE
+from railwatch_selectors import TRANSIENT_ERROR_TEXT_JS
 
 
 class MissingTargets:
@@ -121,31 +122,45 @@ const values = ids.map(id => document.getElementById(id)?.value ?? null);
 return {page:window.__railwatchPageId, values};
 """
 
-DIALOG_INSPECT_JS = r"""
-const visible = el => !!(el && el.getClientRects().length);
-const dialogs = [...document.querySelectorAll('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"]')].filter(visible);
-let safe = null;
+DIALOG_INSPECT_JS = TRANSIENT_ERROR_TEXT_JS + r"""
+const visible = el => !!(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+const verification = [...document.querySelectorAll('#nc_1_n1z,.nc_scale,.nc-container,.slide-verify,#J-loginImg,#randCode')].some(visible);
+if (verification || /login\.html|\/otn\/login\/init/.test(location.href))
+  return {kind:'human_action',text:'请在浏览器中完成登录或核验'};
+const dialogs = [...document.querySelectorAll('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up-box')].filter(visible);
+const safe = [];
 for (const dialog of dialogs) {
   const text = (dialog.innerText || dialog.textContent || '').replace(/\s+/g,' ').trim();
+  if (rwTransientError(text)) {
+    safe.push({kind:'transient_error',text});
+    continue;
+  }
   const sensitive = /登录|核验|验证|订单|提交|支付|频繁|操作过快|稍后再试/.test(text);
   const allowed = /未到起售时间|尚未起售/.test(text) && !sensitive;
   const result = {kind: sensitive ? 'human_action' : allowed ? 'not_on_sale' : 'unknown', text};
   if (!allowed) return result;
-  safe = result;
+  safe.push(result);
 }
-const verification = document.querySelector('#nc_1_n1z,.nc_scale,.nc-container,.slide-verify,#J-loginImg,#randCode');
-if (visible(verification) || /login\.html|\/otn\/login\/init/.test(location.href))
-  return {kind:'human_action',text:'请在浏览器中完成登录或核验'};
-return safe || {kind:'none',text:''};
+if (new Set(safe.map(item=>item.kind)).size > 1)
+  return {kind:'unknown',text:'页面同时出现多种提示，请检查官方页面'};
+return safe[0] || {kind:'none',text:''};
 """
 
 DISMISS_DIALOG_JS = r"""
 const expected = arguments[0];
-const visible = el => !!(el && el.getClientRects().length);
-for (const dialog of document.querySelectorAll('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"]')) {
+const kind = arguments[1] || 'not_on_sale';
+const current = (() => {
+""" + DIALOG_INSPECT_JS + r"""
+})();
+if (!['not_on_sale','transient_error'].includes(kind) || current.kind !== kind || current.text !== expected) return false;
+// A temporary query error can only be acknowledged on the query form, never
+// on an order confirmation or payment page with a similarly named button.
+if (kind === 'transient_error' && !['fromStation','toStation','train_date','query_ticket'].every(id=>document.getElementById(id))) return false;
+const visible = el => !!(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+for (const dialog of document.querySelectorAll('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up-box')) {
   if (!visible(dialog)) continue;
   const text = (dialog.innerText || dialog.textContent || '').replace(/\s+/g,' ').trim();
-  if (text !== expected || !/未到起售时间|尚未起售/.test(text) || /登录|核验|验证|订单|提交|支付|频繁|操作过快|稍后再试/.test(text)) continue;
+  if (text !== expected) continue;
   for (const button of dialog.querySelectorAll('a,button,input[type="button"]')) {
     if (visible(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
         && /^(确定|确认|知道了|好|关闭)$/.test((button.innerText || button.textContent || button.value || '').trim())) {
@@ -330,6 +345,15 @@ class QueryExecutor:
         result = self.driver.execute_script(DIALOG_INSPECT_JS)
         return result if isinstance(result, dict) else {"kind": "unknown", "text": "无法确认页面状态"}
 
+    def dismiss_transient_error(self):
+        if self.stop_check():
+            return False
+        dialog = self.inspect_dialog()
+        if dialog["kind"] == "none":
+            return True  # It already closed; no click is needed.
+        return (dialog["kind"] == "transient_error" and not self.stop_check()
+                and self.driver.execute_script(DISMISS_DIALOG_JS, dialog["text"], "transient_error") is True)
+
     def snapshot_form(self):
         return self.driver.execute_script(FORM_SNAPSHOT_JS, uuid.uuid4().hex)
 
@@ -417,16 +441,27 @@ class QueryExecutor:
                 return {"status": "invalid", "reason": "页面或查询条件已改变"}
             dialog = observation.get("dialog") or {"kind": "unknown", "text": "无法确认页面状态"}
             result = observation.get("status")
-            if dialog["kind"] != "none":
-                # Whether the page sent this round's query before showing the prompt.
-                return {"status": dialog["kind"], "reason": dialog["text"],
-                        "requests": result.get("requests") if isinstance(result, dict) else None}
-            if isinstance(result, dict) and result.get("status") == "invalid":
+            # A generic busy/timeout banner must not mask the server's actual
+            # cooldown. Login, verification and unknown dialogs still stop.
+            if dialog["kind"] in ("none", "transient_error") and isinstance(result, dict) and result.get("status") == "invalid":
                 http_status = result.get("http_status")
                 retry_after = parse_retry_after(result.get("retry_after"), result.get("response_date"))
                 if http_status == 429 or (http_status == 503 and retry_after is not None):
                     return {**result, "status": "rate_limited" if http_status == 429 else "server_backoff",
                             "reason": f"查询收到 HTTP {http_status}", "retry_after_seconds": retry_after}
+            if dialog["kind"] != "none":
+                if (dialog["kind"] == "transient_error" and isinstance(result, dict)
+                        and result.get("status") == "pending" and result.get("requests", 0) > 0
+                        and result.get("responseFinished") is not True):
+                    # Keep observing the in-flight response before allowing a
+                    # retry: its eventual Retry-After must not be lost merely
+                    # because the page displayed a timeout banner first.
+                    self.wait(slow)
+                    continue
+                # Whether the page sent this round's query before showing the prompt.
+                return {"status": dialog["kind"], "reason": dialog["text"],
+                        "requests": result.get("requests") if isinstance(result, dict) else None}
+            if isinstance(result, dict) and result.get("status") == "invalid":
                 return {**result, "reason": "本轮请求失败或有其他查询响应干扰"}
             if isinstance(result, dict) and result.get("status") in ("ok", "empty"):
                 return self._completed_result(result)

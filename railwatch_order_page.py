@@ -17,6 +17,7 @@ from selenium.common.exceptions import ElementClickInterceptedException, StaleEl
 from selenium.webdriver.common.by import By
 from railwatch_orders import OrderResult
 from railwatch_policies import ORDER_POLICIES, TRAIN_CODE_PREFIX
+from railwatch_selectors import CONFIRM_DIALOG_HELPER_JS, TRANSIENT_ERROR_PATTERN
 from railwatch_task import TaskCancelled
 from railwatch_alternate_options import FORM_OPTIONS_JS, canonical_deadline, deadline_minutes, form_review, new_train_summary_matches
 
@@ -44,7 +45,7 @@ class _OrderTiming:
         self.current, self.last = name, now
 
 
-SNAPSHOT_JS = r"""
+SNAPSHOT_JS = CONFIRM_DIALOG_HELPER_JS + r"""
 const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).visibility === 'visible');
 const txt = e => (e?.innerText || '').replace(/\s+/g,' ').trim();
 const all = (s,r=document) => [...r.querySelectorAll(s)].filter(visible);
@@ -91,7 +92,9 @@ const cardDetail=c=>({train:txt(c.querySelector('.ticket-number')),
  fulfilled:c.classList.contains('success'),
  seat:txt(c.querySelector('.ticket-info-txt span'))});
 const details=all('#ticket_card_list .ticket-card').map(cardDetail);
-const orders=all('.order-item').map(root=>{
+// An empty tab keeps one visible .order-item that only wraps the official
+// "no orders" placeholder (observed 2026-11-10). It is not an order record.
+const orders=all('.order-item').filter(root=>!root.querySelector(':scope > .order-empty')).map(root=>{
  const header=txt(root.querySelector('.order-item-hd'));
  const ids=[...header.matchAll(/(?:候补单号|订单号码?)\s*[：:]\s*([A-Za-z0-9]+)/g)].map(m=>m[1]);
  // The regular unpaid card shows only its booking date in the header. Its
@@ -153,6 +156,11 @@ const dialogs=all('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up
 const officialProgress = all('#orderResultInfo_id .tit').some(e =>
  /^(?:正在处理[，,]请稍候[。.]?|订单已经提交[，,](?:系统正在处理中[，,]请稍等[。.]?|(?:预计等待时间超过30分钟|最新预估等待时间.+)[，,]请耐心等待[。.]?))$/.test(txt(e))) &&
  all('#iamge_status_id.i-work,#iamge_status_id.i-queue').length > 0;
+// The current train_order page uses .order-queue for BOTH waiting and failure.
+// A failed queue must not extend observation indefinitely or permit resubmission.
+const queueFailed = all('.order-queue').some(e => /排队失败|排队已取消|排队超时/.test(txt(e)));
+const queueWaiting = !queueFailed && all('.order-queue').some(e =>
+ /排队|处理中/.test(txt(e)) && !/失败|取消成功|已取消|超时|异常/.test(txt(e)));
 return {url:location.href, orders, dialogs, details,
  alternateCheckout:/(?:^|\/)lineUp_payConfirm\.html$/.test(location.pathname) &&
    visible(document.querySelector('#J-payConfirm')) && visible(document.querySelector('#J-lineUp-toPay')) &&
@@ -171,10 +179,11 @@ return {url:location.href, orders, dialogs, details,
  addedTrain:!!document.querySelector('#addTrainInput:checked,#addTrainInput input:checked,#contact_train:checked'),
  standing:txt(document.querySelector('#is_open')),
  pendingEmpty:all('#J-order-payment,#not_complete').some(e=>/您没有待支付|没有未完成|暂无待支付/.test(txt(e))) && orders.length===0 && !all('.loading,.loading-box,#J-loading').length,
- formReady:visible(document.querySelector('#normal_passenger_id')) || visible(document.querySelector('#passenge_list')),
- confirmation:visible(document.querySelector('#qr_submit_id')),
+ formReady:!(/(?:^|\/)prefill_list\.html$|(?:^|\/)prefill-editor\.html$/.test(location.pathname)) &&
+   (visible(document.querySelector('#normal_passenger_id')) || visible(document.querySelector('#passenge_list'))),
+ confirmation:visible(document.querySelector('#qr_submit_id')) || !!rwPrefillConfirmModal(),
  verification:all('#nc_1_n1z,.nc_scale,.slide-verify,#randCode,#J-loginImg').length>0,
- processing:officialProgress || all('.order-queue').some(e=>/排队|处理中/.test(txt(e))) };
+ queueFailed, processing:!queueFailed && (officialProgress || queueWaiting) };
 """
 
 PASSENGER_FIELDS_JS = r"""
@@ -326,28 +335,71 @@ return actual.length === count && actual.every(e => picked.includes(e));
 
 # Observe the DOM event, independently of WebDriver's command acknowledgement.
 # The marker belongs to RailWatch, never to 12306's private application state.
-CONFIRM_RECEIPT_JS = r"""
-const button = document.querySelector('#qr_submit_id');
+CONFIRM_RECEIPT_JS = CONFIRM_DIALOG_HELPER_JS + r"""
 const token = arguments[0], action = arguments[1];
-if (!button) return null;
 if (action === 'observe') {
-  const receipt = {token, delivered:false};
-  button.__railwatchClickReceipt = receipt;
+  const qr = rwQrConfirm();
+  const prefill = qr ? null : rwPrefillConfirmModal();
+  const button = qr ? qr.button : (prefill ? prefill.button : null);
+  if (!button) return null;
+  const receipt = {token, button, delivered: false, kind: qr ? 'qr' : 'prefill'};
+  // The official handler can remove its modal synchronously. Keep one receipt
+  // on this document so reading a delivered event does not depend on live DOM.
+  // A navigation creates a new document and intentionally loses this evidence.
+  document.__railwatchConfirmReceipt = receipt;
   button.addEventListener('click', () => { receipt.delivered = true; }, {capture:true, once:true});
   return true;
 }
-const receipt = button.__railwatchClickReceipt;
+const receipt = document.__railwatchConfirmReceipt;
 if (!receipt || receipt.token !== token) return null;
 if (action === 'read') return receipt.delivered;
-if (action === 'dispatch' && !receipt.delivered && button.isConnected &&
-    button.getClientRects().length && getComputedStyle(button).visibility === 'visible' &&
-    button.classList.contains('btn92s') && !button.classList.contains('btn92') &&
-    !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+const button = receipt.button;
+if (!button?.isConnected) return null;
+const canDispatch = receipt.kind === 'qr'
+  ? (rwQrConfirm()?.button === button && rwActionReady(button) && button.classList.contains('btn92s') && !button.classList.contains('btn92'))
+  : (rwPrefillConfirmModal()?.button === button && rwPrefillSubmitReady(button));
+if (action === 'dispatch' && !receipt.delivered && canDispatch) {
   HTMLElement.prototype.click.call(button);
   return receipt.delivered;
 }
 return null;
 """
+
+
+def needs_person(snap):
+    """Identify login, verification and official limits from one snapshot."""
+    return bool(snap.get("verification") or re.search(
+        r"登录|核验|验证码|滑块|频繁|操作过快|稍后再试|候补.*(?:上限|限额)", " ".join(snap.get("dialogs", [])))
+        or re.search(r"login\.html|/login/init", snap.get("url", "")))
+
+
+def transient_order_error(snap):
+    """Allow only observed temporary errors, never login/rate limits or mixed dialogs."""
+    if (any(snap.get(key) for key in ("verification", "confirmation", "quietCar", "queueFailed", "processing", "orders"))
+            or re.search(r"login\.html|/login/init", snap.get("url", ""))):
+        return False
+    dialogs = snap.get("dialogs", [])
+    if not dialogs:
+        return False
+    for dialog in dialogs:
+        text = re.sub(r"\s+", "", dialog)
+        if not re.fullmatch(TRANSIENT_ERROR_PATTERN, text):
+            return False
+    return True
+
+
+# Observed on 2026-11-10 after a delivered confirmation for a passenger who already
+# held a ticket for the same trip (tests/fixtures/order-conflict-live-20261110.json).
+# The same notice is listed by its outer window and its inner box.
+TRIP_CONFLICT_PATTERN = r"订票失败.*不能购买行程冲突车票。乘车人.{1,80}已订车票与本次购票行程冲突"
+
+
+def trip_conflict_rejection(snap):
+    """The official refusal to sell a ticket that overlaps one the passenger holds."""
+    if any(snap.get(key) for key in ("verification", "confirmation", "quietCar", "queueFailed", "processing")):
+        return False
+    dialogs = snap.get("dialogs", [])
+    return bool(dialogs) and all(re.search(TRIP_CONFLICT_PATTERN, re.sub(r"\s+", "", dialog)) for dialog in dialogs)
 
 
 def normalized_date(value):
@@ -541,12 +593,23 @@ class OrderPage:
         dialogs = " ".join(snap.get("dialogs", []))
         if snap.get("quietCar"):
             return OrderResult("verification", "官网提示可能候补到静音车厢，请在官网确认是否接受；处理后继续原候补")
-        if snap.get("verification") or re.search(r"登录|核验|验证码|滑块|频繁|操作过快|稍后再试|候补.*(?:上限|限额)", dialogs) or re.search(r"login\.html|/login/init", snap.get("url", "")):
+        if transient_order_error(snap):
+            return OrderResult("verification", "官网暂时繁忙或网络超时，请核对原订单结果",
+                               evidence={"transient_order_error": True})
+        if needs_person(snap):
             return OrderResult("verification", "请在官方页面完成登录、核验或处理限制")
+        if snap.get("queueFailed"):
+            return OrderResult("verification", "官方显示排队失败，请核对原订单结果，请勿重复提交", order_id=known_id)
         if snap.get("processing"):
             return OrderResult("unknown", "官方仍在处理订单，请勿重复提交")
+        if trip_conflict_rejection(snap):
+            # Name the cause without the passenger. Ownership stays until a person
+            # has checked the official orders; nothing is retried automatically.
+            return OrderResult("verification",
+                               "官方提示订票失败：乘车人已订车票与本次购票行程冲突。请在官方订单中核对已购车票；本工具不会自动重试",
+                               evidence={"trip_conflict": True})
         # An explicit rejection before final submission cannot have created an order.
-        if re.search(r"余票不足|车票已售罄|没有足够的余票|席位已售完", dialogs):
+        if re.search(r"余票不足|车票已售罄|没有足够的余票|席位已售完|票已售完|已售完|已售罄|无余票", dialogs):
             return OrderResult("sold_out" if not submitted else "unknown", "官方提示余票不足",
                                no_order=not submitted)
         if dialogs and not snap.get("confirmation"):
@@ -584,6 +647,17 @@ class OrderPage:
             """, list(selectors))
         except Exception:
             return None
+
+    def _prefill_confirmation_button(self):
+        try:
+            return self.driver.execute_script(
+                CONFIRM_DIALOG_HELPER_JS + "return rwPrefillConfirmModal()?.button || null;"
+            )
+        except Exception:
+            return None
+
+    def confirmation_button(self):
+        return self.button(("#qr_submit_id",)) or self._prefill_confirmation_button()
 
     def form_mismatch_report(self, intent):
         """Expected/actual diff for the pre-submit readback, safe for the event log."""
@@ -917,7 +991,7 @@ class OrderPage:
                 result = self.result(intent, submitted=True)
                 if result.status != "unknown":
                     return result
-                confirm = self.button(("#qr_submit_id",))
+                confirm = self.confirmation_button()
             if confirm is None:
                 return None
             token = uuid.uuid4().hex
@@ -970,39 +1044,62 @@ class OrderPage:
         completed confirmation can be reconciled on the official order page.
         """
         result = self.wait_result(intent, submitted=True)
-        if result.status != "unknown":
+        temporary_error = (intent.kind == "regular" and confirmed_clicked
+                           and result.status == "verification"
+                           and result.evidence.get("transient_order_error") is True)
+        if result.status != "unknown" and not temporary_error:
             return result
         snap = self.snapshot()
         if snap.get("processing"):
+            if temporary_error:
+                return self.wait_result(intent, submitted=True)
             return result  # Do not navigate away while the official queue is active.
         if snap.get("confirmation"):
             return OrderResult("verification",
                                "官方确认流程尚未结束，请保留当前页面核对官方订单，再点击“继续处理”；请勿重复提交。")
         if confirmed_clicked and not self.stop():
-            reconciled = self.reconcile(intent, navigate=True)
-            if reconciled.status != "unknown":
+            if temporary_error:
+                # Re-read before navigating: a captcha or queue may have replaced
+                # the error. Only a delivered confirmation permits this one read.
+                if not transient_order_error(snap):
+                    return self._result_from_snapshot(snap, intent, submitted=True)
+                self.mark("regular_auto_reconcile")
+                self.log("官网暂时繁忙或网络超时，已确认提交点击送达，正在自动核对原订单。")
+            reconciled = self.reconcile(intent, navigate=True, automatic=temporary_error)
+            if temporary_error or reconciled.status != "unknown":
                 return reconciled
         return result
 
-    def reconcile(self, intent, known_id="", navigate=False, allow_empty=False):
+    def reconcile(self, intent, known_id="", navigate=False, allow_empty=False, *, automatic=False):
         snap = self.snapshot()
         result = self._result_with_alternate_details(snap, intent, known_id=known_id, allow_empty=allow_empty)
         if result.status not in ("unknown", "verification") or not navigate:
             return result
         if snap.get("quietCar"):
             return result
+        if automatic and not transient_order_error(snap):
+            return self.wait_result(intent, known_id=known_id) if snap.get("processing") else result
         if intent.kind == "alternate" and snap.get("alternateCheckout"):
             return self.probe_submitted_alternate(intent, known_id)
-        if snap.get("processing") or snap.get("confirmation"):
-            return OrderResult("unknown", "官方处理或确认流程尚未结束，请保留当前页面核对，请勿重复提交", order_id=known_id)
-        # Explicit recovery action only: normal payment observation never navigates away.
+        if snap.get("processing"):
+            return self.wait_result(intent, known_id=known_id)
+        if snap.get("confirmation"):
+            return OrderResult("unknown", "官方确认流程尚未结束，请保留当前页面核对，请勿重复提交", order_id=known_id)
+        if snap.get("queueFailed"):
+            return result
+        # Explicit recovery or a delivered confirmation with a temporary error;
+        # normal payment observation never navigates away.
         if self.stop():
             return result
         url = "https://kyfw.12306.cn/otn/view/" + ("lineUp_order.html" if intent.kind == "alternate" else "train_order.html")
         try:
             self.driver.get(url)
-            result = self.poll(lambda: self._resolved(intent, known_id, allow_empty), self.RECOVERY_TAB_TIMEOUT)
-            if result:
+            # An unbound submitted regular order may still be entering the
+            # official queue. Give it the normal result-loading grace period,
+            # and extend observation while the SAME snapshot shows a queue.
+            timeout = self.RESULT_UNKNOWN_TIMEOUT if intent.kind == "regular" and not known_id else self.RECOVERY_TAB_TIMEOUT
+            result = self.wait_result(intent, known_id=known_id, timeout=timeout)
+            if result.status != "unknown" or self.stop():
                 return result
             # Only a previously bound identity may be sought in paid/history
             # tabs. A similar historical trip cannot establish a new order.
@@ -1013,18 +1110,22 @@ class OrderPage:
                     if self.stop():
                         break
                     current = self.snapshot()
-                    if current.get("processing") or current.get("confirmation"):
-                        return OrderResult("unknown", "官方仍在处理或确认订单，请保留当前页面核对", order_id=known_id)
+                    if current.get("processing"):
+                        return self.wait_result(intent, known_id=known_id)
+                    if current.get("confirmation"):
+                        return OrderResult("unknown", "官方仍在确认订单，请保留当前页面核对", order_id=known_id)
                     tab = self._recovery_tab(label, url)
                     if tab is None:
                         break
                     tab.click()
-                    result = self.poll(lambda: self._resolved(intent, known_id, allow_empty), self.RECOVERY_TAB_TIMEOUT)
-                    if result:
+                    result = self.wait_result(intent, known_id=known_id, timeout=self.RECOVERY_TAB_TIMEOUT)
+                    if result.status != "unknown" or self.stop():
                         return result
             return OrderResult("unknown", "未找到匹配订单；请在官方未完成／未出行／历史订单中核对后继续处理"
                                if intent.kind == "regular" else "未找到匹配候补；请在官方待支付／待兑现／已处理订单中核对后继续处理",
                                order_id=known_id)
+        except TaskCancelled:
+            raise
         except Exception:
             return OrderResult("unknown", "订单核对失败，请保留当前订单并在官方页面核查", order_id=known_id)
 

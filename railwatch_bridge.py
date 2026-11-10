@@ -64,6 +64,8 @@ from railwatch_system import get_app_version, inspect_data_dir, probe_connectivi
 from railwatch_time import ServerTimeSync, get_server_time_sync, resolve_sale_timestamp
 from railwatch_orders import OrderJournal, OrderIntent, OrderResult, STAGES
 from railwatch_order_page import OrderPage
+from railwatch_prefill import PrefillAdapter, PrefillFallback, prefill_eligible_reason
+from railwatch_trip_check import describe_trip, read_existing_orders, trip_conflicts
 from railwatch_cleanup import checked_data_path, release_orphan_browsers, reset_directory
 
 try:
@@ -230,6 +232,7 @@ def state_to_payload(state: RailWatchState) -> dict:
         "task": dict(state.task),
         "order": dict(state.order),
         "human_action": dict(state.human_action) or None,
+        "prefill": dict(state.prefill) or None,
     }
 
 
@@ -322,6 +325,7 @@ class RailWatchBridge:
             self.state = replace(self.state, order={**pending["result"], "stage": stage, "label": STAGES[stage], "intent": pending["intent"], "recovery_required": True},
                                  phase=AppPhase.ORDER, human_action={"title": "需要核对订单", "message": "发现未完成订单，请继续处理并核对官方订单"},
                                  status_message="发现未完成订单，请继续处理并核对官方订单", risk_level="warning")
+            self._refresh_prefill_progress(pending["run_id"])
         self._monitor_last_tick = 0.0
         self._monitor_heartbeat_thread: Optional[threading.Thread] = None
         self._param_filler: Optional[Callable[[str, str, str], bool]] = None
@@ -1130,12 +1134,16 @@ class RailWatchBridge:
         return review
 
     def run_reviews(self, limit=20, cursor=None):
-        from railwatch_run_review import run_conclusion
+        from railwatch_run_review import run_conclusion, sale_path
         page = self.order_journal.recent_runs(limit, cursor)
         outcomes = self.order_journal.run_outcomes([item["run_id"] for item in page["items"]])
         active = self._task.run_id if self._task and self._task.active else None
         for item in page["items"]:
             item["conclusion"] = "进行中" if item["run_id"] == active else run_conclusion(outcomes[item["run_id"]])
+            # Enough to compare runs at a glance; the full path is in the detail.
+            path = sale_path(outcomes[item["run_id"]], item.get("target_at")) or {}
+            item["sale_confirm"] = ({"path": path["path"], "confirm_delivered_ms": path["confirm_delivered_ms"]}
+                                    if path.get("confirm_delivered_ms") is not None else None)
         return page
 
     def query_pulse(self, limit=60):
@@ -1241,7 +1249,7 @@ class RailWatchBridge:
             self.order_journal.mark(task.run_id, "target_sale", detail={"target_at": target, "trip": public_trip(config)})
             # Publish ownership only after the required startup record succeeds.
             self._task = task
-            self.state = replace(self.state.with_safety(config["auto_submit"], config["auto_alternate"]).with_monitoring(True), human_action={})
+            self.state = replace(self.state.with_safety(config["auto_submit"], config["auto_alternate"]).with_monitoring(True), human_action={}, prefill={})
             self._transition(task, "preparing")
             task.thread = threading.Thread(target=lambda: self._run_task_worker(task, lambda: self._monitor_worker(deepcopy(config), task)), name=f"railwatch-monitor-{task.run_id[:8]}", daemon=True)
             task.thread.start()
@@ -1354,6 +1362,22 @@ class RailWatchBridge:
         finally:
             self._event_context.run_id = None
 
+    def _refresh_prefill_progress(self, run_id):
+        from railwatch_prefill_progress import read_prefill_progress
+        try:
+            self.state = replace(self.state, prefill=read_prefill_progress(self.order_journal, run_id))
+        except Exception:
+            self.log("预填进度暂时无法读取，订单处理继续。", "WARN")
+
+    def _publish_prefill_progress(self, run_id, stage=None):
+        if not self._owns_context():
+            return
+        self._refresh_prefill_progress(run_id)
+        if stage == "regular_auto_reconcile" and self._task:
+            self._transition(self._task, "reconciling", message="官网暂时异常，正在自动核对原订单")
+        else:
+            self.emit_state()
+
     def _handle_order(self, intent, result):
         stage = "alternate_pending_payment" if result.status == "pending_payment" and intent.kind == "alternate" else result.status
         payload = {**result.payload(), "stage": stage, "label": STAGES[stage],
@@ -1363,6 +1387,8 @@ class RailWatchBridge:
                               "choices": [asdict(choice) for choice in intent.combinations] if intent.kind == "alternate" else []},
                    "updated_at": time.time(), "recovery_required": result.status in ("unknown", "verification")}
         self.state = replace(self.state, order=payload, status_message=STAGES[stage])
+        if self.state.prefill:
+            self._refresh_prefill_progress(self.state.prefill["run_id"])
         if result.status not in ("unknown", "verification"):
             self.state = replace(self.state, human_action={})
         if self._task:
@@ -1970,6 +1996,8 @@ class RailWatchBridge:
                             return
                     if not self._check_session_for_task(task):
                         return
+                    if self._existing_trip_blocks(driver, config, task):
+                        return
                     if config.get("timer_enabled"):
                         config["_target_timestamp"] = task.target_timestamp
                     def task_dates(announce=False):
@@ -1994,6 +2022,73 @@ class RailWatchBridge:
                     )
                     if config.get("timer_enabled") and not monitor.prepare():
                         return
+                    armed_prefill = None
+                    prefill_adapter = None
+                    if prefill_eligible_reason(config, task.target_timestamp, now=time.time()) is None:
+                        prefill_adapter = PrefillAdapter(
+                            driver,
+                            stop=task.cancel.is_set,
+                            wait=lambda seconds: self._task_wait(task, seconds),
+                            log=self.log,
+                            now=time.time,
+                        )
+                        try:
+                            armed_prefill = prefill_adapter.prepare(
+                                config,
+                                task.target_timestamp,
+                                param_filler=self._param_filler,
+                            )
+                            monitor._needs_navigation = True
+                            self.order_journal.mark(
+                                task.run_id,
+                                "prefill_armed",
+                                detail={
+                                    "date": armed_prefill.date,
+                                    "count": len(armed_prefill.candidates),
+                                    "candidates": [
+                                        {"train": c.train_code, "seat": c.seat, "from": c.from_station, "to": c.to_station}
+                                        for c in armed_prefill.candidates
+                                    ],
+                                },
+                            )
+                            self._publish_prefill_progress(task.run_id)
+                        except TaskCancelled:
+                            raise
+                        except PrefillFallback as fb:
+                            self.log(f"官方预填未启用，回退常规查询：{fb.reason}", "WARN")
+                            detail = {"stage": fb.stage, "reason": fb.reason}
+                            if fb.query_result is not None:
+                                detail.update(query_status=fb.query_result.get("status"),
+                                              retry_after_seconds=fb.query_result.get("retry_after_seconds"))
+                            self.order_journal.mark(
+                                task.run_id,
+                                "prefill_fallback",
+                                detail=detail,
+                            )
+                            if fb.query_result is not None and not monitor.absorb_prefill_query_failure(fb.query_result):
+                                return
+                            if not self._prepare_query_page(driver, config, task):
+                                return
+                            monitor._apply_loop_date(1, force=True)
+                            if not monitor._fill_query_params(force=True):
+                                raise ValueError("定时首轮查询参数未就绪，请检查官方页面后重新启动。")
+                        except Exception as exc:
+                            if is_session_lost(exc):
+                                raise
+                            # The plan may already be armed when its record or display fails.
+                            # A recorded fallback must not also buy through the pre-fill.
+                            armed_prefill = None
+                            self.log(f"官方预填准备异常（{type(exc).__name__}），已自动回退常规查询。", "WARN")
+                            self.order_journal.mark(
+                                task.run_id,
+                                "prefill_fallback",
+                                detail={"stage": "exception", "reason": type(exc).__name__},
+                            )
+                            if not self._prepare_query_page(driver, config, task):
+                                return
+                            monitor._apply_loop_date(1, force=True)
+                            if not monitor._fill_query_params(force=True):
+                                raise ValueError("定时首轮查询参数未就绪，请检查官方页面后重新启动。")
                     prepared_at = time.time()
                     self.order_journal.mark(task.run_id, "prepared", detail={"prepared_at": prepared_at, "target_at": task.target_timestamp})
                     if task.target_timestamp and prepared_at > task.target_timestamp - 10:
@@ -2002,7 +2097,43 @@ class RailWatchBridge:
                         return
                     if task.cancel.is_set():
                         return
-                    monitor.run()
+                    run_query_loop = True
+                    if armed_prefill is not None and prefill_adapter is not None:
+                        outcome = prefill_adapter.execute_armed(
+                            armed_prefill,
+                            self.order_journal,
+                            task.run_id,
+                            config,
+                            on_order=self._handle_order,
+                            on_stage=lambda stage: self._publish_prefill_progress(task.run_id, stage),
+                            seat_preference=str(config.get("seat_prefer", "无偏好")),
+                        )
+                        if outcome.action == "sold_out_all":
+                            self.order_journal.mark(task.run_id, "prefill_fallback", detail={"stage": outcome.action})
+                        self._publish_prefill_progress(task.run_id)
+                        for sold in outcome.sold_out_candidates:
+                            monitor._cool_down_candidate(sold.train_code, sold.seat, "book")
+                        if outcome.action == "handled":
+                            run_query_loop = False
+                            if (
+                                outcome.last_result is not None
+                                and not task.cancel.is_set()
+                                and outcome.last_result.status in ("unknown", "verification", "not_submitted", "sold_out")
+                            ):
+                                self._handle_human_action(
+                                    {
+                                        "train_code": outcome.last_intent.train_code if outcome.last_intent else "",
+                                        "message": outcome.last_result.reason or "请检查官方订单状态",
+                                    }
+                                )
+                        else:
+                            monitor._needs_navigation = True
+                            if outcome.action == "sold_out_all" and config.get("auto_alternate"):
+                                monitor._prefer_alternate = True
+                                monitor._fallback_date = armed_prefill.date
+                                self.log("预填席别均确认售罄，立即切回余票页执行自动候补。")
+                    if run_query_loop:
+                        monitor.run()
                     pending = self.order_journal.pending()
                     if pending and not task.cancel.is_set() and (
                             pending["result"]["status"] == "pending_payment"
@@ -2025,6 +2156,74 @@ class RailWatchBridge:
             if task.thread is None:
                 self._finish_task(task)
             self._event_context.run_id = None
+
+    def _existing_trip_blocks(self, driver, config, task) -> bool:
+        """Stop a task that would buy a trip its passengers already hold in the official account.
+
+        Once, before the first query and before any pre-fill preparation. An
+        unreadable order page only warns: the check must never keep a task from
+        its sale, and the official side still refuses most conflicting purchases.
+        """
+        from railwatch_policies import ORDER_POLICIES
+        if not ORDER_POLICIES["trip_check_enabled"] or not (config.get("auto_submit") or config.get("auto_alternate")):
+            return False
+        if self.order_journal.pending():
+            return False  # The browser belongs to the unresolved order.
+        def record(result, **detail):
+            self.order_journal.mark(task.run_id, "trip_check", detail={"result": result, **detail})
+        target = task.target_timestamp
+        lead = ORDER_POLICIES["trip_check_min_lead_seconds"]
+        if target is not None and target - time.time() < lead:
+            self.log(f"距起售不足 {lead:g} 秒，跳过启动前已购行程检查；请自行确认未重复购票。", "WARN")
+            record("skipped")
+            return False
+        try:
+            dates = self._valid_dates(task.config, max(time.time(), target or 0))
+        except ValueError:
+            return False  # The date check that follows reports this to the user.
+        page = OrderPage(driver, task.cancel.is_set, lambda seconds: self._task_wait(task, seconds), log=self.log)
+        # How long each part took and why a read failed: kept with the result so a
+        # failed check can be diagnosed from the task record alone.
+        timing = {}
+        try:
+            orders = read_existing_orders(page, budget=ORDER_POLICIES["trip_check_timeout_seconds"], timing=timing)
+        except Exception as exc:
+            if is_session_lost(exc):
+                raise
+            # Exception text can carry account data; the type is enough to diagnose.
+            timing["reason"] = type(exc).__name__
+            orders = None
+        finally:
+            try:
+                driver.set_page_load_timeout(30)
+            except Exception:
+                pass
+        if task.cancel.is_set():
+            return True
+        if orders is None:
+            reason = {"budget": "超出检查时限", "not_official_page": "当前不是官方订单页，可能需要重新登录",
+                      "tab_control_missing": "未找到未出行订单标签", "tab_not_active": "未出行订单标签未能切换",
+                      "loading": "订单列表仍在加载"}.get(timing.get("reason"), f"读取中断（{timing.get('reason', '原因未知')}）")
+            steps = "，".join(f"{label} {timing[key] / 1000:.1f} 秒" for key, label in (
+                ("navigation_ms", "打开订单页"), ("tabs_ms", "等待标签"), ("untraveled_ms", "读取未出行订单")) if key in timing)
+            self.log(f"未能读取官方未出行订单（{reason}{'；' + steps if steps else ''}），已跳过已购行程检查，任务继续；"
+                     "请自行确认未重复购票。", "WARN")
+            record("unreadable", **timing)
+            return False
+        trains = parse_codes(config.get("train_code", ""), upper=True)
+        found = trip_conflicts(orders, config, dates, self.train_schedules.routes(trains))
+        if not found:
+            self.log("已检查官方未出行与未完成订单，未发现任务乘车人的同行程车票。")
+            record("clear", orders=len(orders), **timing)
+            return False
+        trips = "；".join(describe_trip(trip) for trip in found)
+        record("conflict", trips=found, **timing)
+        self._handle_human_action({
+            "title": "已有同行程车票",
+            "train_code": found[0]["train"],
+            "message": f"官方订单中，任务乘车人已持有同行程车票或待支付订单（{trips}）。为避免重复购票已停止任务，"
+                       "未取消或修改任何订单；如需改签或另购，请在官方页面处理后重新启动。"})
+        return True
 
     def _prepare_query_page(self, driver, config, task):
         for attempt in range(3):

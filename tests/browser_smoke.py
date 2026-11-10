@@ -393,6 +393,41 @@ class BrowserQueryTests(unittest.TestCase):
         for value, expected in [({"data":{"flag":True}},"ok"), ({"data":{"flag":False}},"expired"), ({},"unknown"), ({"data":{"flag":"false"}},"unknown")]:
             self.assertEqual(self.driver.execute_async_script(wrapper, LOGIN_CHECK_JS, value), expected)
 
+    def test_timed_automatic_query_acknowledges_temporary_error_then_accepts_fresh_result(self):
+        for message in ('网络超时，请重试', '系统忙，请稍后再试！'):
+            with self.subTest(message=message):
+                self.driver.execute_script("fixture.mode='temporaryError';fixture.errorMessage=arguments[0];fixture.clicks=0;fixture.confirms=0;", message)
+                analyzer = PageAnalyzer(self.driver, log_callback=lambda message: None)
+                analyzer.resolver._name2code = {"北京":"BJP", "上海":"SHH"}
+                progress, humans, waits = [], [], []
+                monitor = TicketMonitor(self.driver, {"from_station_cn":"北京", "to_station_cn":"上海",
+                    "date":"2026-09-10", "timer_enabled":True, "auto_submit":True, "target_time":"08:30:00", "query_timeout":2},
+                    param_filler=analyzer.fill_query_form, log_callback=lambda message: None,
+                    progress_callback=progress.append, human_action_callback=humans.append, wait_callback=waits.append)
+                self.assertFalse(monitor._run_single_loop(1, 6))
+                self.assertEqual(progress[-1]["snapshot"]["status"], "error")
+                self.assertEqual(progress[-1]["rows"], [])
+                self.assertEqual(self.driver.execute_script("return [fixture.clicks,fixture.confirms]"), [1, 1])
+                self.assertGreaterEqual(waits[-1], 6)
+                self.driver.execute_script("fixture.mode='empty'")
+                self.assertFalse(monitor._run_single_loop(2, 6))
+                self.assertEqual(progress[-1]["status"], "empty")
+                self.assertEqual(self.driver.execute_script("return [fixture.clicks,fixture.confirms]"), [2, 1])
+                self.assertEqual(humans, [])
+
+    def test_temporary_error_dismissal_rechecks_other_dialogs_and_query_page(self):
+        self.driver.execute_script("fixture.show('网络超时，请重试')")
+        dialog = self.query.inspect_dialog()
+        self.assertEqual(dialog["kind"], "transient_error")
+        self.driver.execute_script("document.body.insertAdjacentHTML('beforeend','<div id=randCode>验证码</div>')")
+        self.assertFalse(self.driver.execute_script(DISMISS_DIALOG_JS, dialog["text"], "transient_error"))
+        self.driver.execute_script("document.getElementById('randCode').remove();document.getElementById('dialogs').insertAdjacentHTML('beforeend','<div role=dialog>请确认订单<button>确定</button></div>')")
+        self.assertEqual(self.query.inspect_dialog()["kind"], "human_action")
+        self.assertFalse(self.query.dismiss_transient_error())
+        self.driver.execute_script("fixture.show('网络超时，请重试');document.getElementById('query_ticket').remove()")
+        self.assertFalse(self.query.dismiss_transient_error())
+        self.assertEqual(self.driver.execute_script("return fixture.confirms"), 0)
+
     def test_monitor_transaction_publishes_only_confirmed_empty_rows(self):
         self.driver.execute_script("fixture.mode='empty'")
         analyzer = PageAnalyzer(self.driver, log_callback=lambda message: None)

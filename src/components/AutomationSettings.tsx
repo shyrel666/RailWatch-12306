@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, InputNumber, Modal, Select, Switch } from "antd";
-import { ClipboardCheck, Settings2, Ticket, TicketPlus, type LucideIcon } from "lucide-react";
+import { ClipboardCheck, Settings2, Ticket, TicketPlus, Zap, type LucideIcon } from "lucide-react";
 import { AlternateSettings } from "./AlternateSettings";
 import { Hint } from "./DisplayPrimitives";
 import { PreferenceSection } from "./PreferenceSection";
@@ -64,12 +64,27 @@ export function AutomationSection({ config, update, runCommand, confirm, busy }:
   useEffect(() => { if (!config.auto_alternate) setOpen(false); }, [config.auto_alternate]);
   const watchEnabled = config.order_watch_enabled ?? ORDER_POLICY.order_watch_enabled;
   const watchInterval = config.order_watch_interval_seconds ?? ORDER_POLICY.order_watch_interval_seconds;
+  const prefillEnabled = config.prefill_enabled ?? ORDER_POLICY.prefill_enabled;
+  const showPrefill = config.timer_enabled && config.auto_submit;
+  const showWatch = config.auto_submit || config.auto_alternate;
+  const intervalInput = <InputNumber
+    aria-label="订单核对间隔（秒）"
+    className="trip-automation-watch-interval"
+    size={showPrefill ? "small" : undefined}
+    precision={0}
+    prefix="每"
+    suffix="秒"
+    min={ORDER_POLICY.min_watch_interval_seconds}
+    max={ORDER_POLICY.max_watch_interval_seconds}
+    value={watchInterval}
+    onChange={value => { if (value !== null) update({ order_watch_interval_seconds: value }); }}
+  />;
   const description = [config.auto_submit ? "自动提交" : "", config.auto_alternate ? "自动候补" : ""]
     .filter(Boolean).join(" · ") || "仅查询与提醒";
 
   return <>
     <PreferenceSection id="trip-automation" title="自动化" description={description}
-      defaultOpen>
+      icon={Zap} active={config.auto_submit || config.auto_alternate} defaultOpen>
       <div className="trip-automation-toggles">
         <AutomationToggle
           checked={config.auto_submit}
@@ -90,20 +105,36 @@ export function AutomationSection({ config, update, runCommand, confirm, busy }:
         />
       </div>
       {/* Order tracking follows both kinds of orders, so it stays outside the waitlist dialog;
-          a single row keeps this column close to the height of the trip form beside it. */}
-      {config.auto_submit || config.auto_alternate ? <section className="trip-automation-watch" aria-label="订单跟踪">
-        <span className="trip-automation-watch-label">
-          <ClipboardCheck size={16} aria-hidden="true" />
-          <strong>持续订单核对</strong>
-          <Hint text="取得订单号后在独立标签页按间隔核对状态，保留付款页面；候补生效后持续等待兑现。可在订单中心停止，重启应用后点击「继续核对」恢复。" />
-        </span>
-        {watchEnabled ? <InputNumber aria-label="订单核对间隔（秒）" className="trip-automation-watch-interval" precision={0}
-          prefix="每" suffix="秒"
-          min={ORDER_POLICY.min_watch_interval_seconds} max={ORDER_POLICY.max_watch_interval_seconds}
-          value={watchInterval}
-          onChange={value => { if (value !== null) update({ order_watch_interval_seconds: value }); }} /> : null}
-        <Switch aria-label="持续订单核对" checked={watchEnabled} onChange={value => update({ order_watch_enabled: value })} />
-      </section> : null}
+          pairing it side-by-side with official prefill keeps this column close to the trip form height. */}
+      {showPrefill || showWatch ? <div className={`trip-automation-aux${showPrefill && showWatch ? " split" : ""}`}>
+        {showPrefill ? <section className="trip-automation-watch" aria-label="官方预填加速">
+          <div className="trip-automation-watch-head">
+            <span className="trip-automation-watch-label">
+              <Zap size={15} aria-hidden="true" />
+              <strong>官方预填加速</strong>
+              <Hint text="距起售至少 90 秒且本机时区为北京时间（UTC+8）时，提前在 12306 官方预填页准备好目标车次、席别和成人乘客，到点直接点击购票（官方预填直连确认不支持自选靠窗／过道）；不满足条件或未及时解锁时自动回退常规余票查询。" />
+            </span>
+            <Switch aria-label="官方预填加速" checked={prefillEnabled} onChange={value => update({ prefill_enabled: value })} />
+          </div>
+          <div className="trip-automation-watch-sub">
+            <small>{prefillEnabled ? "起售前自动预填直连" : "已关闭，走常规余票查询"}</small>
+          </div>
+        </section> : null}
+        {showWatch ? <section className="trip-automation-watch" aria-label="订单跟踪">
+          <div className="trip-automation-watch-head">
+            <span className="trip-automation-watch-label">
+              <ClipboardCheck size={15} aria-hidden="true" />
+              <strong>持续订单核对</strong>
+              <Hint text="取得订单号后在独立标签页按间隔核对状态，保留付款页面；候补生效后持续等待兑现。可在订单中心停止，重启应用后点击「继续核对」恢复。" />
+            </span>
+            {!showPrefill && watchEnabled ? intervalInput : null}
+            <Switch aria-label="持续订单核对" checked={watchEnabled} onChange={value => update({ order_watch_enabled: value })} />
+          </div>
+          {showPrefill ? <div className="trip-automation-watch-sub">
+            {watchEnabled ? <><span>核对间隔</span>{intervalInput}</> : <small>已关闭后台状态核对</small>}
+          </div> : null}
+        </section> : null}
+      </div> : null}
     </PreferenceSection>
     <Modal
       open={open && config.auto_alternate}

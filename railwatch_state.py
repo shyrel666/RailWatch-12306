@@ -57,6 +57,7 @@ class RailWatchState:
     task: Mapping[str, object] = field(default_factory=dict)
     order: Mapping[str, object] = field(default_factory=dict)
     human_action: Mapping[str, object] = field(default_factory=dict)
+    prefill: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "RailWatchState":

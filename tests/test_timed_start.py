@@ -250,6 +250,68 @@ class SaleRetryTests(unittest.TestCase):
                           {"evidence": "rows", "retry": None}])
 
 
+class TemporaryQueryRecoveryTests(unittest.TestCase):
+    def monitor(self, **changes):
+        monitor = SaleRetryTests.monitor(self, rows=[], auto_submit=True, **changes)
+        monitor.human_action = Mock()
+        monitor.query_executor.execute.return_value = {"status": "transient_error", "reason": "网络超时，请重试"}
+        monitor.query_executor.dismiss_transient_error.return_value = True
+        monitor.query_executor.inspect_dialog.return_value = {"kind": "none", "text": ""}
+        return monitor
+
+    waits = SaleRetryTests.waits
+
+    def test_temporary_outage_backs_off_without_human_action_or_booking(self):
+        monitor = self.monitor(smart_rate=False)
+        self.assertEqual(self.waits(monitor, 6), [6, 12, 24, 48, 60, 60])
+        monitor.human_action.assert_not_called()
+        monitor._find_hit_row.assert_not_called()
+        self.assertTrue(monitor._sale_retry_disabled)
+        self.assertFalse(monitor._needs_navigation)
+
+    def test_success_resets_consecutive_temporary_errors(self):
+        monitor = self.monitor(smart_rate=False)
+        self.assertEqual(self.waits(monitor, 2), [6, 12])
+        monitor.query_executor.execute.return_value = {"status": "empty"}
+        self.assertFalse(monitor._run_single_loop(3, 3))
+        monitor.query_executor.execute.return_value = {"status": "transient_error", "reason": "系统忙，请稍后再试"}
+        self.assertFalse(monitor._run_single_loop(4, 3))
+        self.assertEqual(monitor._sleep.call_args.args[0], 6)
+        monitor.human_action.assert_not_called()
+
+    def test_captcha_replacing_error_before_or_during_cooldown_stops(self):
+        for dialogs in ([{"kind": "human_action", "text": "验证码"}],
+                        [{"kind": "none", "text": ""}, {"kind": "human_action", "text": "验证码"}]):
+            with self.subTest(dialogs=dialogs):
+                monitor = self.monitor()
+                monitor.query_executor.inspect_dialog.side_effect = dialogs
+                self.assertTrue(monitor._run_single_loop(1, 3))
+                monitor.human_action.assert_called_once()
+                monitor._find_hit_row.assert_not_called()
+
+    def test_stop_during_cooldown_never_requests_manual_recovery(self):
+        monitor = self.monitor()
+        stopped = [False]
+        monitor.should_stop = lambda: stopped[0]
+        monitor._sleep.side_effect = lambda seconds: stopped.__setitem__(0, True)
+        self.assertTrue(monitor._run_single_loop(1, 3))
+        monitor.human_action.assert_not_called()
+        monitor._find_hit_row.assert_not_called()
+
+    def test_recovery_requires_timed_automatic_submission_and_safe_dismissal(self):
+        for changes in ({"timer_enabled": False}, {"auto_submit": False}, {"dismiss": False}):
+            with self.subTest(changes=changes):
+                monitor = self.monitor()
+                if "dismiss" in changes:
+                    monitor.query_executor.dismiss_transient_error.return_value = False
+                else:
+                    monitor.cfg.update(changes)
+                    monitor.auto_submit = monitor.cfg["auto_submit"]
+                self.assertTrue(monitor._run_single_loop(1, 3))
+                monitor.human_action.assert_called_once()
+                monitor._sleep.assert_not_called()
+
+
 class OvernightWorkerTests(unittest.TestCase):
     def run_worker(self, date_range, *, wake_at="2026-10-04T08:00:00+08:00"):
         directory = tempfile.TemporaryDirectory()
@@ -317,6 +379,37 @@ class OvernightWorkerTests(unittest.TestCase):
 
 
 class QueryArmingTests(unittest.TestCase):
+    def test_temporary_banner_waits_for_inflight_response_before_retry_decision(self):
+        form = {"page": "one", "values": ["北京", "BJP", "上海", "SHH", "2026-09-10"]}
+        dialog = {"kind": "transient_error", "text": "网络超时，请重试"}
+        driver = Mock()
+        driver.execute_script.side_effect = [
+            {"form": form, "dialog": {"kind": "none"}, "armed": True},
+            {"form": form, "dialog": dialog, "status": {"status": "pending", "requests": 1, "responseFinished": False}},
+            {"form": form, "dialog": dialog, "status": {"status": "invalid", "http_status": 429, "retry_after": "120"}},
+        ]
+        wait = Mock()
+        result = QueryExecutor(driver, wait=wait).execute(lambda: True, 1)
+        self.assertEqual((result["status"], result["retry_after_seconds"]), ("rate_limited", 120))
+        wait.assert_called_once()
+        self.assertEqual(driver.execute_script.call_count, 3)
+
+    def test_temporary_banner_never_overrides_official_cooldown(self):
+        form = {"page": "one", "values": ["北京", "BJP", "上海", "SHH", "2026-09-10"]}
+        for code, header, expected in ((429, "120", "rate_limited"), (429, None, "rate_limited"),
+                                       (503, "90", "server_backoff")):
+            with self.subTest(code=code, header=header):
+                driver = Mock()
+                driver.execute_script.side_effect = [
+                    {"form": form, "dialog": {"kind": "none"}, "armed": True},
+                    {"form": form, "dialog": {"kind": "transient_error", "text": "系统忙，请稍后再试"},
+                     "status": {"status": "invalid", "http_status": code, "retry_after": header}},
+                ]
+                result = QueryExecutor(driver).execute(lambda: True, 1)
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(result["retry_after_seconds"], int(header) if header else None)
+                self.assertEqual(driver.execute_script.call_count, 2)
+
     def test_one_browser_command_arms_before_click_and_still_waits_for_fresh_result(self):
         driver, clicks = Mock(), []
         form = {"page": "one", "values": ["北京", "BJP", "上海", "SHH", "2026-09-10"]}

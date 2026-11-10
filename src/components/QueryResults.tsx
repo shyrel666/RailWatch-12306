@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { MonitorPlay, Radar } from "lucide-react";
 import { queryFamily, queryFreshness, queryRouteMatches, selectableQueryTrains, type QueryViews } from "../lib/queryResults";
-import type { QueryAttempt, QueryResultRow, RailWatchConfig, RailWatchStatus, SeatAvailability } from "../types";
+import type { PrefillProgress as Progress, QueryAttempt, QueryResultRow, RailWatchConfig, RailWatchStatus, SeatAvailability } from "../types";
+import { PrefillProgress } from "./PrefillProgress";
 
 function timestamp(seconds: number | null) {
   if (seconds === null) return "未知";
@@ -20,11 +21,12 @@ function seatLabel(seat?: SeatAvailability) {
   }
 }
 
-export function QueryResults({ views, rows, status, config, editableRoute, onSelectTrains, now, pending, error, activeQuery }: {
+export function QueryResults({ views, rows, status, config, editableRoute, onSelectTrains, now, pending, error, activeQuery, prefill }: {
   views: QueryViews; rows: QueryResultRow[]; status: RailWatchStatus; config: RailWatchConfig;
   editableRoute?: RailWatchConfig; onSelectTrains?: (trains: string[]) => void;
   now: number; pending: boolean; error: string | null;
   activeQuery: QueryAttempt | null;
+  prefill?: Progress | null;
 }) {
   const [selectedTrains, setSelectedTrains] = useState<string[]>([]);
   const selectionContext = editableRoute ? queryFamily(editableRoute) : null;
@@ -35,11 +37,13 @@ export function QueryResults({ views, rows, status, config, editableRoute, onSel
   const groups = Object.values(views).sort((a, b) => a.latest.conditions.date.localeCompare(b.latest.conditions.date));
   const latest = [...groups].sort((a, b) => b.latest.completed_at - a.latest.completed_at || b.latest.sequence - a.latest.sequence)[0]?.latest;
   return (
-    <section className="st-results-panel" aria-label="查询结果">
+    <section className="st-results-panel" aria-label={prefill ? "购票结果" : "查询结果"}>
       <div className="st-panel-head">
-        <h3><MonitorPlay size={15} />查询结果</h3>
-        <span className="st-result-count">{rows.length} 条</span>
+        <h3><MonitorPlay size={15} />{prefill ? "官方预填进度" : "查询结果"}</h3>
+        <span className="st-result-count">{prefill ? `${prefill.candidates.length} 个组合` : `${rows.length} 条`}</span>
       </div>
+      {prefill ? <PrefillProgress progress={prefill} /> : null}
+      {prefill && (groups.length > 0 || rows.length > 0) ? <div className="st-panel-head"><h3>余票查询结果</h3><span>{rows.length} 条</span></div> : null}
       {activeQuery ? <p className="query-context" role="status">当前查询日期：{activeQuery.conditions.date} · 查询中</p> : null}
       {latest && (pending || activeQuery || groups.length > 1) ? <p className="query-context">
         {pending ? "手动查询中 · " : ""}最近完成查询日期：{latest.conditions.date}
@@ -95,7 +99,7 @@ export function QueryResults({ views, rows, status, config, editableRoute, onSel
           <details><summary>原始信息</summary><p className="dispatch-raw">{row.raw}</p></details>
         </article>)}
       </div> : null}
-      {!groups.length && !rows.length ? <div className="st-empty-results">
+      {!prefill && !groups.length && !rows.length ? <div className="st-empty-results">
         <Radar size={32} /><strong>暂无查询结果</strong><span>{pending ? "正在查询，请稍候" : "查询余票或启动监控后显示"}</span>
       </div> : null}
     </section>

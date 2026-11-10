@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>RailWatch prefill saved order fixture</title>
+<style>
+  .lines-list { display: flex; gap: 10px; margin-bottom: 10px; }
+  .lines-item { padding: 6px 12px; border: 1px solid #ccc; cursor: pointer; }
+  .lines-item.is-active { border-color: #3b99fc; background: #eef6ff; }
+  .btn, .btn92, .btn92s { display: inline-block; padding: 4px 10px; border: 1px solid #3b99fc; text-decoration: none; cursor: pointer; }
+  .ticket-result-item { border-bottom: 1px solid #eee; padding: 8px 0; }
+  .modal, .up-box { padding: 12px; border: 1px solid #999; background: #fff; margin-top: 10px; }
+  .modal table, .up-box table, #regular-confirm-form table { border-collapse: collapse; margin: 8px 0; }
+  .modal th, .modal td, .up-box th, .up-box td, #regular-confirm-form th, #regular-confirm-form td { border: 1px solid #ddd; padding: 4px 8px; }
+  .nc_scale { width: 240px; height: 32px; line-height: 32px; border: 1px solid #ccc; background: #f7f7f7; margin-top: 8px; padding: 0 8px; }
+</style>
+
+<div class="wrapper" id="prefill-wrapper">
+  <div class="ticket-fill-advance-lines">
+    <div class="lines-con">
+      <div class="lines-list" id="lines-list"></div>
+    </div>
+  </div>
+
+  <div class="tips-box mb-lg">
+    <div>
+      <span class="unOnsale-span" id="unonsale-span">
+        距离<span class="start-station" id="tip-station">大兴机场</span>最近起售时间还有<strong><span class="count-down-text" id="countdown-text">0小时10分钟0秒</span></strong>。开售后
+      </span>
+      <span class="onsale-span" id="onsale-span" style="display: none;"><span class="start-station" id="onsale-station">大兴机场</span>已开售。请</span>
+      点击所需车次的"按预填信息购票"按钮快速购票。您已预填乘车人：<span class="passsengers-span" id="passengers-span">张三</span>
+      <a href="./prefill-editor.html" id="edit-button" class="txt-primary underline ml-lg">编辑</a>
+    </div>
+  </div>
+
+  <div class="ticket-result-box ticket-fill-advance-result-box">
+    <div class="ticket-result-bd" id="detail-list"></div>
+  </div>
+</div>
+
+<div id="regular-confirm-form" style="display: none;"></div>
+<div id="dialog-root"></div>
+<div id="orders-root"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawSelected = params.get('selected') || 'G8821|大兴机场|天津西|二等座;G8821|大兴机场|天津西|一等座;G8863|北京大兴|天津西|二等座';
+const rawPassengers = params.get('passengers') || '张三';
+const dateStr = params.get('date') || '2026-11-21';
+const [, monthStr, dayStr] = dateStr.split('-');
+
+document.getElementById('passengers-span').textContent = rawPassengers;
+if (params.has('countdown')) {
+  document.getElementById('countdown-text').textContent = params.get('countdown');
+}
+
+const editParams = new URLSearchParams({
+  date: dateStr,
+  selected: rawSelected,
+  passengers: rawPassengers,
+});
+for (const extraKey of ['countdown', 'dialog']) {
+  if (params.has(extraKey)) editParams.set(extraKey, params.get(extraKey));
+}
+document.getElementById('edit-button').href = `./prefill-editor.html?${editParams.toString()}`;
+
+function parseTabs(raw) {
+  const tabs = new Map();
+  for (const item of raw.split(';').filter(Boolean)) {
+    const [code, from, to, seat, sale] = item.split('|');
+    const routeKey = `${from}|${to}`;
+    if (!tabs.has(routeKey)) tabs.set(routeKey, { from, to, trains: new Map() });
+    const route = tabs.get(routeKey);
+    if (!route.trains.has(code)) route.trains.set(code, { code, from, to, sale: sale || '11月7日16点起售', seats: [] });
+    else if (sale) route.trains.get(code).sale = sale;
+    route.trains.get(code).seats.push(seat);
+  }
+  return [...tabs.values()].map(t => ({ from: t.from, to: t.to, trains: [...t.trains.values()] }));
+}
+
+const tabs = parseTabs(rawSelected);
+let activeTabIndex = 0;
+let unlocked = false;
+const unlockedSeats = new Set();
+const lockedSeats = new Set();
+const outcomes = {};
+
+function configuredPassengers() {
+  return rawPassengers.split(/[、,，\s]+/).filter(Boolean);
+}
+
+function isSeatUnlocked(code, seat) {
+  const key = `${code}|${seat}`;
+  if (lockedSeats.has(key)) return false;
+  return unlocked || unlockedSeats.has(key);
+}
+
+function showDialog(message) {
+  const host = document.getElementById('dialog-root');
+  host.style.display = '';
+  host.innerHTML = `
+    <div class="dzp-confirm">
+      <div role="alertdialog" class="modal">
+        <div class="modal-hd"><div class="modal-tit">提示</div></div>
+        <div class="modal-bd"><div class="msg-tit">${message}</div></div>
+        <div class="modal-ft"><a href="javascript:;" class="btn btn-primary ok" id="dialog-ok">确定</a></div>
+      </div>
+    </div>`;
+  document.getElementById('dialog-ok').onclick = (e) => {
+    e.preventDefault();
+    host.innerHTML = '';
+  };
+}
+
+function showSoldOutVerifyDialog() {
+  const host = document.getElementById('dialog-root');
+  host.style.display = '';
+  host.innerHTML = `
+    <div class="dzp-confirm">
+      <div role="dialog" class="modal">
+        <div class="modal-hd"><div class="modal-tit">提示</div></div>
+        <div class="modal-bd">
+          <div class="msg-tit">票已售完，请完成核验</div>
+          <div class="nc_scale" id="nc_1_n1z">请按住滑块拖动</div>
+        </div>
+        <div class="modal-ft"><a href="javascript:;" class="btn btn-primary ok" id="dialog-ok">确定</a></div>
+      </div>
+    </div>`;
+  document.getElementById('dialog-ok').onclick = (e) => {
+    e.preventDefault();
+    host.innerHTML = '';
+  };
+}
+
+function showUnpaidOrder(train, seat) {
+  document.getElementById('prefill-wrapper').style.display = 'none';
+  document.getElementById('regular-confirm-form').style.display = 'none';
+  document.getElementById('dialog-root').style.display = 'none';
+  const names = configuredPassengers();
+  document.getElementById('orders-root').innerHTML = `
+    <div class="order-item" id="not_complete">
+      <div class="order-item-hd">订票日期：${dateStr}</div>
+      <div class="order-item-bd">
+        <span class="train-num" data-train-code="${train.code}">${train.code}次</span>
+        <span>${dateStr} ${train.from}—${train.to} ${seat}（¥45.5元）</span>
+        ${names.map(n => `<div class="passenger-name"><strong title="${n}">${n}</strong></div>`).join('')}
+        <span class="ticket-status-name">待支付</span>
+      </div>
+      <div class="order-item-ft">
+        <a href="javascript:;" data-sequence="E888888">取消订单</a>
+        <a href="javascript:;" data-sequence="E888888">去支付</a>
+      </div>
+    </div>`;
+}
+
+function showQrConfirmDialog(train, seat, dialogNames) {
+  const host = document.getElementById('dialog-root');
+  host.style.display = '';
+  host.innerHTML = `
+    <div class="up-box" id="checkticketinfo_id">
+      <div class="up-box-hd">请核对以下信息</div>
+      <div class="up-box-bd">
+        <div class="confirm-trip">${dateStr}（周五）${train.code}次 ${train.from}站（08:00开）—${train.to}站（08:50到）</div>
+        <table class="confirm-passenger-table">
+          <thead>
+            <tr><th>序号</th><th>席别</th><th>票种</th><th>姓名</th></tr>
+          </thead>
+          <tbody>
+            ${dialogNames.map((n, idx) => `
+              <tr>
+                <td>${idx + 1}</td>
+                <td>${seat}</td>
+                <td>成人票</td>
+                <td>${n}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="lay-btn">
+        <a id="back_edit_id" class="btn92" href="javascript:;">返回修改</a>
+        <a id="qr_submit_id" class="btn92s" href="javascript:;">确认</a>
+      </div>
+    </div>`;
+  document.getElementById('qr_submit_id').onclick = (e) => {
+    e.preventDefault();
+    window.fixture.confirmClicks += 1;
+    showUnpaidOrder(train, seat);
+  };
+}
+
+// Reproduces M1 13-modal-structure.jsonl: DIV.modal with no #qr_submit_id and id-less a.btn.btn-primary.ok "提交订单".
+function showPrefillConfirmModal(train, seat, dialogNames, opts = {}) {
+  const rowSeat = opts.seatOverride || seat;
+  const rowTicketType = opts.ticketType || '成人票';
+  const host = document.getElementById('dialog-root');
+  host.style.display = '';
+  host.innerHTML = `
+    <div class="dzp-confirm">
+      <div class="modal">
+        <div class="modal-hd">
+          <div class="modal-tit">购票信息确认</div>
+          <a href="javascript:;" class="modal-close"></a>
+        </div>
+        <div class="modal-bd">
+          <div class="confirm-trip">${dateStr}（星期六）${train.code}次 ${train.from}（08:00开）- ${train.to}（08:50到）</div>
+          <table class="confirm-passenger-table">
+            <thead>
+              <tr><th>序号</th><th>姓名</th><th>票种</th><th>席别</th><th>证件类型</th><th>证件号码</th></tr>
+            </thead>
+            <tbody>
+              ${dialogNames.map((n, idx) => `
+                <tr>
+                  <td>${idx + 1}</td>
+                  <td>${n}</td>
+                  <td>${rowTicketType}</td>
+                  <td>${rowSeat}</td>
+                  <td>中国居民身份证</td>
+                  <td>1101***********123</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+          <div class="confirm-tips">*系统将随机为您申请席位，暂不支持自选席位。</div>
+          <div class="confirm-protocol">
+            提交订单表示已阅读并同意
+            <a href="javascript:;" class="txt-primary">《国铁集团铁路旅客运输规程》</a>
+            <a href="javascript:;" class="txt-primary">《服务条款》</a>
+          </div>
+        </div>
+        <div class="modal-ft">
+          <a href="javascript:;" class="btn cancel">取消</a>
+          <a href="javascript:;" class="btn btn-primary ok">提交订单</a>
+        </div>
+      </div>
+    </div>`;
+  const modal = host.querySelector('.modal');
+  for (const closeEl of modal.querySelectorAll('.modal-close, .btn.cancel')) {
+    closeEl.onclick = (e) => {
+      e.preventDefault();
+      host.innerHTML = '';
+    };
+  }
+  modal.querySelector('a.btn.btn-primary.ok').onclick = (e) => {
+    e.preventDefault();
+    window.fixture.confirmClicks += 1;
+    showUnpaidOrder(train, seat);
+  };
+}
+
+function showConfirmForm(train, seat) {
+  document.getElementById('prefill-wrapper').style.display = 'none';
+  const names = configuredPassengers();
+  const form = document.getElementById('regular-confirm-form');
+  form.style.display = '';
+  form.innerHTML = `
+    <div id="ticket_info">${dateStr}（周五）${train.code}次${train.from}站（08:00开）—${train.to}站（08:50到）</div>
+    <div id="normal_passenger_id">
+      ${names.map(n => `<label title="${n}"><input type="checkbox" checked>${n}（成人）</label>`).join('')}
+    </div>
+    <table>
+      <thead>
+        <tr><th>序号</th><th>席别</th><th>票种</th><th>姓名</th></tr>
+      </thead>
+      <tbody>
+        ${names.map((n, i) => `
+          <tr>
+            <td>${i + 1}</td>
+            <td>
+              <select id="seatType_${i}">
+                <option ${seat === '二等座' ? 'selected' : ''}>二等座（¥45.5元）</option>
+                <option ${seat === '一等座' ? 'selected' : ''}>一等座（¥71.5元）</option>
+                <option ${seat === '硬卧' ? 'selected' : ''}>硬卧（¥65.5元）</option>
+                <option ${seat === '硬座' ? 'selected' : ''}>硬座（¥19.5元）</option>
+              </select>
+            </td>
+            <td><select id="ticketType_${i}"><option selected>成人票</option></select></td>
+            <td><input id="passenger_name_${i}" readonly value="${n}"></td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+    <button id="submitOrder_id">提交订单</button>`;
+  document.getElementById('submitOrder_id').onclick = () => {
+    window.fixture.formSubmitClicks += 1;
+    showQrConfirmDialog(train, seat, names);
+  };
+}
+
+function mismatchedPassengers(baseNames) {
+  const pool = ['李四', '赵六', '张三'];
+  const replacement = pool.find(n => !baseNames.includes(n)) || '李四';
+  return [replacement, ...baseNames.slice(1)];
+}
+
+function extraPassengers(baseNames) {
+  const pool = ['李四', '赵六', '张三'];
+  const extra = pool.find(n => !baseNames.includes(n)) || '李四';
+  return [...baseNames, extra];
+}
+
+function handleBuyClick(train, seat) {
+  window.fixture.clicks.push(`${train.code}|${seat}`);
+  const mode = outcomes[`${train.code}|${seat}`] || 'confirm_form';
+  const baseNames = configuredPassengers();
+  if (mode === 'sold_out') {
+    showDialog('很抱歉，当日该车次票已售完');
+  } else if (mode === 'not_on_sale') {
+    showDialog('未到起售时间');
+  } else if (mode === 'sold_out_verify') {
+    showSoldOutVerifyDialog();
+  } else if (mode === 'no_response') {
+    return;
+  } else if (mode === 'direct_confirm') {
+    showPrefillConfirmModal(train, seat, baseNames);
+  } else if (mode === 'legacy_qr_confirm') {
+    showQrConfirmDialog(train, seat, baseNames);
+  } else if (mode === 'confirm_mismatch') {
+    showPrefillConfirmModal(train, seat, mismatchedPassengers(baseNames));
+  } else if (mode === 'confirm_extra_passenger') {
+    showPrefillConfirmModal(train, seat, extraPassengers(baseNames));
+  } else if (mode === 'confirm_wrong_seat') {
+    showPrefillConfirmModal(train, seat, baseNames, { seatOverride: seat === '二等座' ? '一等座' : '二等座' });
+  } else if (mode === 'confirm_student_type') {
+    showPrefillConfirmModal(train, seat, baseNames, { ticketType: '学生票' });
+  } else if (mode === 'confirm_over_form') {
+    showConfirmForm(train, seat);
+    showPrefillConfirmModal(train, seat, baseNames);
+  } else if (mode === 'direct_unpaid') {
+    showUnpaidOrder(train, seat);
+  } else {
+    showConfirmForm(train, seat);
+  }
+}
+
+function renderTabs() {
+  const list = document.getElementById('lines-list');
+  list.innerHTML = tabs.map((tab, idx) => `
+    <div class="lines-item${idx === activeTabIndex ? ' is-active' : ''}" data-idx="${idx}">
+      <strong class="lines-name">${tab.from}</strong>
+      <i class="lines-to"></i>
+      <strong class="lines-name">${tab.to}</strong>
+      <span class="lines-info">（${Number(monthStr)}月${Number(dayStr)}日  星期五）</span>
+    </div>`).join('');
+  for (const node of list.querySelectorAll('.lines-item')) {
+    node.onclick = () => {
+      activeTabIndex = Number(node.getAttribute('data-idx'));
+      renderTabs();
+      renderDetail();
+    };
+  }
+}
+
+function renderDetail() {
+  const tab = tabs[activeTabIndex];
+  if (!tab) return;
+  document.getElementById('tip-station').textContent = tab.from;
+  document.getElementById('onsale-station').textContent = tab.from;
+  const host = document.getElementById('detail-list');
+  host.innerHTML = tab.trains.map(train => {
+    const anyLocked = train.seats.some(seat => !isSeatUnlocked(train.code, seat));
+    return `
+    <div class="ticket-result-item">
+      <div class="ticket-item-info">
+        <div class="ticket-type">预填单</div>
+        <div class="ticket-number"><div class="ticket-number-num">${train.code}</div></div>
+        <div class="ticket-time">
+          <div class="ticket-time-num txt-primary">08:00</div>
+          <div class="ticket-time-info"><span class="label-shi">始</span>${train.from}</div>
+        </div>
+        <div class="ticket-alltime"><div class="ticket-alltime-txt">50分钟</div></div>
+        <div class="ticket-time">
+          <div class="ticket-time-num">08:50</div>
+          <div class="ticket-time-info"><span class="label-zhong">终</span>${train.to}</div>
+        </div>
+      </div>
+      <div class="ticket-item-buy">
+        <div class="ticket-item-buy-item-drop">
+          ${train.seats.map((seat, sIdx) => {
+            const seatOpen = isSeatUnlocked(train.code, seat);
+            return `
+            <div class="ticket-item-buy-item">
+              <div class="ticket-price">
+                <div class="ticket-price-seat">${seat}</div>
+                <div class="ticket-price-num"><span class="txt-price"><i class="rmb">¥</i>45.5</span></div>
+              </div>
+              <div class="ticket-state">
+                ${sIdx === 0 ? '<a href="javascript:;" class="txt-primary underline train-del-button">删除</a>' : ''}
+              </div>
+              <div class="ticket-btn">
+                <a href="javascript:;" data-code="${train.code}" data-seat="${seat}" class="btn btn-hollow btn-sm w120 buy-ticket-button" style="display: ${seatOpen ? 'inline-block' : 'none'};">按预填信息购票</a>
+                ${!seatOpen && (sIdx === 0 || anyLocked) ? `<span class="txt-lighter qishou-text">${train.sale}</span>` : ''}
+              </div>
+            </div>
+            <div class="ticket-item-buy-item-group" style="display: none">
+              <div class="ticket-item-buy-item"><div class="ticket-price"><div class="ticket-price-seat">上铺</div></div></div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  for (const btn of host.querySelectorAll('a.buy-ticket-button')) {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      const code = btn.getAttribute('data-code');
+      const seat = btn.getAttribute('data-seat');
+      const train = tab.trains.find(t => t.code === code);
+      handleBuyClick(train, seat);
+    };
+  }
+}
+
+window.fixture = {
+  clicks: [],
+  confirmClicks: 0,
+  formSubmitClicks: 0,
+  unlock(trainCode, seatName) {
+    if (trainCode && seatName) {
+      unlockedSeats.add(`${trainCode}|${seatName}`);
+    } else {
+      unlocked = true;
+    }
+    document.getElementById('unonsale-span').style.display = 'none';
+    document.getElementById('onsale-span').style.display = '';
+    renderDetail();
+  },
+  lockSeat(trainCode, seatName) {
+    lockedSeats.add(`${trainCode}|${seatName}`);
+    renderDetail();
+  },
+  setPassengers(text) {
+    document.getElementById('passengers-span').textContent = text;
+  },
+  rerender() {
+    renderDetail();
+  },
+  setCountdownText(text) {
+    document.getElementById('countdown-text').textContent = text;
+  },
+  setSaleLabel(trainCode, saleText) {
+    for (const tab of tabs) {
+      for (const train of tab.trains) {
+        if (train.code === trainCode) train.sale = saleText;
+      }
+    }
+    renderDetail();
+  },
+  showDialog(message) {
+    showDialog(message);
+  },
+  clearDialog() {
+    const host = document.getElementById('dialog-root');
+    host.innerHTML = '';
+    host.style.display = '';
+  },
+  setOutcome(trainCode, seatName, mode) {
+    outcomes[`${trainCode}|${seatName}`] = mode;
+  }
+};
+
+renderTabs();
+renderDetail();
+if (params.has('dialog') && params.get('dialog')) {
+  showDialog(params.get('dialog'));
+}
+</script>
+</html>

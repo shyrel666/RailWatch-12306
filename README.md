@@ -20,7 +20,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/dashboard-v0.7.0.png" alt="RailWatch v0.7.0 仪表盘：当前行程、下一步与购票日历（演示数据）" width="100%">
+  <img src="docs/images/dashboard-v0.9.0.png" alt="RailWatch v0.9.0 仪表盘：当前行程、下一步与购票日历（演示数据）" width="100%">
 </p>
 
 把行程填好，剩下的交给 RailWatch：它在起售时刻准点查询，有票自动提交，无票自动候补，拿到订单号后持续跟踪状态，需要你付款时第一时间提醒。登录和支付始终在 12306 官方页面完成，所有数据只保存在你的电脑上。
@@ -37,7 +37,7 @@
     </td>
     <td width="50%" valign="top">
       <h3>准点起售</h3>
-      自动查询出发站的起售时刻，购票日历一眼看清哪天开售。定时任务到点开始查询，起售彩排可提前检查登录、乘客与下单路径。
+      自动查询出发站的起售时刻，购票日历一眼看清哪天开售。定时抢票支持提前完成 12306 官方购票信息预填，到点直接按预填购票（异常时自动回退常规查询）；起售彩排可提前检查登录、时区、乘客与下单路径。
     </td>
   </tr>
   <tr>
@@ -80,15 +80,15 @@
 <table>
   <tr>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/trip-setup-v0.7.0.png"><img src="docs/images/trip-setup-v0.7.0.png" alt="行程设置" width="100%"></a>
+      <a href="docs/images/trip-setup-v0.9.0.png"><img src="docs/images/trip-setup-v0.9.0.png" alt="行程设置" width="100%"></a>
       <br><sub><b>行程设置</b> · 路线、席别、乘客与策略</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/monitor-v0.7.0.png"><img src="docs/images/monitor-v0.7.0.png" alt="购票监控（深色主题）" width="100%"></a>
+      <a href="docs/images/monitor-v0.9.0.png"><img src="docs/images/monitor-v0.9.0.png" alt="购票监控（深色主题）" width="100%"></a>
       <br><sub><b>购票监控</b> · 实时查询结果（深色主题）</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/order-center-v0.7.0.png"><img src="docs/images/order-center-v0.7.0.png" alt="订单中心" width="100%"></a>
+      <a href="docs/images/order-center-v0.9.0.png"><img src="docs/images/order-center-v0.9.0.png" alt="订单中心" width="100%"></a>
       <br><sub><b>订单中心</b> · 订单状态与候补详情</sub>
     </td>
   </tr>
@@ -164,6 +164,12 @@
 <summary><b>中途退出或电脑重启，订单会丢吗？</b></summary>
 
 不会。订单意图和官方订单号保存在本机，重新打开后会恢复原订单并提示你继续核对，确认结果之前不会重复提交。
+</details>
+
+<details>
+<summary><b>官方购票信息预填有什么使用条件？</b></summary>
+
+同时开启「定时开始」与「自动提交」、距起售至少 90 秒且本机时区为北京时间（`UTC+8`）时，RailWatch 会在准备阶段完成或复用 12306 官方购票信息预填，到点直接点击购票；全部预填候选确认售罄且开启了自动候补时会立即切回余票页执行候补。仅支持明确车次、支持自动提交的席别与成人票，不会删除或覆盖账号内其他乘车人的既有预填单（存在冲突或未及时解锁时自动回退常规余票查询）。由于 12306 官方预填直连确认弹窗暂不支持自选靠窗／过道，如需常规表单选座可在「行程设置 → 自动化」中关闭「官方预填加速」。
 </details>
 
 ## 参与贡献

@@ -19,8 +19,25 @@ def _check_range(policies, key, low, high, types=(int, float)):
 
 def validate_order_policies(policies):
     """Packaged policies cannot be changed at runtime; reject bad values at load."""
+    if not isinstance(policies, dict) or type(policies.get("prefill_enabled")) is not bool:
+        raise ValueError(f"策略参数 prefill_enabled 应为布尔值，实际为 {policies.get('prefill_enabled') if isinstance(policies, dict) else None!r}")
     _check_range(policies, "people_ready_timeout_seconds", 0, 30)
     _check_range(policies, "people_stable_ms", 100, 2000)
+    _check_range(policies, "prefill_min_lead_seconds", 30, 600)
+    _check_range(policies, "prefill_countdown_tolerance_seconds", 1, 30)
+    _check_range(policies, "prefill_unlock_timeout_ms", 200, 5000)
+    _check_range(policies, "prefill_unlock_abort_countdown_seconds", 1, 30)
+    # Each retry is one more official entry request shortly after the sale time.
+    delays = policies.get("prefill_presale_retry_delays_ms")
+    if (type(delays) is not list or len(delays) > 3
+            or any(type(delay) is not int or not 200 <= delay <= 2000 for delay in delays)):
+        raise ValueError(f"策略参数 prefill_presale_retry_delays_ms 应为最多 3 个 200–2000 的整数，实际为 {delays!r}")
+    if type(policies.get("trip_check_enabled")) is not bool:
+        raise ValueError(f"策略参数 trip_check_enabled 应为布尔值，实际为 {policies.get('trip_check_enabled')!r}")
+    _check_range(policies, "trip_check_timeout_seconds", 3, 30)
+    # The check must leave the pre-fill its own minimum lead before the sale.
+    _check_range(policies, "trip_check_min_lead_seconds",
+                 policies["prefill_min_lead_seconds"] + policies["trip_check_timeout_seconds"], 900)
     return policies
 
 

@@ -30,6 +30,7 @@ QUERY_TELEMETRY_STAGES = frozenset({"query_click", "query_result", "query_timing
 BUFFERED_TELEMETRY_STAGES = QUERY_TELEMETRY_STAGES | {"scheduler_wake"}
 OFFICIAL_STATUSES = frozenset({"pending_payment", "active", "fulfilled", "cancelled", "expired", "failed"})
 EVENT_LABELS = {"submitting": "订单意图已在本地保存", "regular_submit": "已点击普通订单提交",
+                "regular_auto_reconcile": "官网暂时异常，自动核对原订单",
                 "alternate_confirm_attempt": "已尝试确认原候补订单，后续仅核对结果",
                 "alternate_confirm_rejected": "浏览器未送达确认点击（按钮被遮挡或已刷新），可重新确认",
                 "alternate_choices": "完整候补组合已在本地保存",
@@ -40,6 +41,13 @@ EVENT_LABELS = {"submitting": "订单意图已在本地保存", "regular_submit"
                 "resume_released": "原订单恢复已结束", "dismissed": "用户结束本地核对；官方订单未取消",
                 "order_result": "订单页面核对结果", "pending_payment": "官方订单待支付",
                 "order_timing": "下单分步耗时",
+                "prefill_armed": "官方购票信息预填已就绪",
+                "prefill_fallback": "官方预填已回退常规查询",
+                "trip_check": "启动前已购行程检查",
+                "prefill_submit": "已尝试点击预填购票入口",
+                "prefill_click_rejected": "浏览器明确未送达预填购票点击",
+                "prefill_official_rejected": "官方明确拒绝预填购票且未生成订单",
+                "prefill_form_opened": "预填已打开普通订单表单",
                 "active": "官方候补已生效", "fulfilled": "官方订单已完成"}
 
 
@@ -260,11 +268,12 @@ class OrderJournal:
         # The literal NOT IN term lets SQLite use the order_events_run_markers partial index.
         with self.connection() as db:
             rows = db.execute(
-                f"SELECT run_id,sequence,stage,detail FROM order_events WHERE run_id IN ({','.join('?' * len(grouped))})"
+                f"SELECT run_id,sequence,stage,detail,intent_id,at FROM order_events WHERE run_id IN ({','.join('?' * len(grouped))})"
                 f" AND stage NOT IN ('query_click','query_result') AND stage IN ({','.join('?' * len(CONCLUSION_STAGES))})"
                 " ORDER BY sequence", (*grouped, *CONCLUSION_STAGES)).fetchall()
-        for run_id, sequence, stage, detail in rows:
-            grouped[run_id].append({"sequence": sequence, "stage": stage, "detail": json.loads(detail)})
+        for run_id, sequence, stage, detail, intent_id, at in rows:
+            grouped[run_id].append({"sequence": sequence, "stage": stage, "detail": json.loads(detail),
+                                    "intent_id": intent_id, "at": at})
         return grouped
 
     def recent_runs(self, limit=20, cursor=None):
@@ -407,7 +416,7 @@ class OrderJournal:
                 attempted = db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN "
                                        "('regular_submit','alternate_submit','regular_confirm_attempt','resume_claimed') LIMIT 1",
                                        (intent.intent_id,)).fetchone()
-                if not result.no_order or previous.get("order_id") or attempted:
+                if not result.no_order or previous.get("order_id") or attempted or self._prefill_click_pending(db, intent.intent_id):
                     result = OrderResult("unknown", "尚未确认没有已创建的订单")
                 else:
                     result = replace(result, evidence={**result.evidence, "no_order_basis": "before_submission"})
@@ -612,7 +621,7 @@ class OrderJournal:
 
     def submission_started(self, intent_id):
         with self.connection() as db:
-            return bool(db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit','resume_claimed') LIMIT 1", (intent_id,)).fetchone())
+            return self._prefill_click_pending(db, intent_id) or bool(db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit','resume_claimed') LIMIT 1", (intent_id,)).fetchone())
 
     def revise_alternate_deadline(self, intent_id, deadline):
         """An explicit re-selection may amend only an unsubmitted original intent."""
@@ -645,6 +654,17 @@ class OrderJournal:
                     json.dumps({"deadline": value}, ensure_ascii=False)))
         finally:
             lease.close()
+
+    @staticmethod
+    def _prefill_click_pending(db, intent_id):
+        """Keep ownership while an entry click may have created an order."""
+        attempts, settled = db.execute(
+            "SELECT coalesce(sum(stage='prefill_submit'),0),"
+            " coalesce(sum(stage IN ('prefill_click_rejected','prefill_official_rejected','prefill_form_opened')),0)"
+            " FROM order_events WHERE intent_id=? AND stage IN"
+            " ('prefill_submit','prefill_click_rejected','prefill_official_rejected','prefill_form_opened')",
+            (intent_id,)).fetchone()
+        return attempts > settled
 
     @staticmethod
     def _confirmation_pending(db, intent_id):
@@ -696,6 +716,8 @@ class OrderJournal:
                 with self._ordered_transaction() as db:
                     db.execute("UPDATE order_events SET stage='resume_released' WHERE stage='resume_claimed'")
                     if not db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1", (intent_id,)).fetchone():
+                        return False
+                    if self._prefill_click_pending(db, intent_id):
                         return False
                     if db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND stage IN ('regular_submit','alternate_submit') LIMIT 1", (intent_id,)).fetchone():
                         return False
@@ -762,6 +784,17 @@ class OrderJournal:
 
     def mark(self, run_id, stage, intent_id="", detail=None):
         with self._ordered_transaction() as db:
+            if stage == "prefill_submit":
+                valid = db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1 AND json_extract(intent,'$.kind')='regular'",
+                                   (intent_id,)).fetchone()
+                started = db.execute("SELECT 1 FROM order_events WHERE intent_id=? AND"
+                                     " (stage IN ('regular_submit','alternate_submit') OR (stage='resume_claimed' AND run_id<>?)) LIMIT 1",
+                                     (intent_id, run_id)).fetchone()
+                if not valid or started or self._prefill_click_pending(db, intent_id):
+                    raise RuntimeError("预填点击已尝试或意图不可用，请先核对原订单")
+            if stage in ("prefill_click_rejected", "prefill_official_rejected", "prefill_form_opened"):
+                if not self._prefill_click_pending(db, intent_id):
+                    raise RuntimeError("没有待结算的预填购票点击")
             if stage == "alternate_confirm_attempt":
                 valid = db.execute("SELECT 1 FROM orders WHERE intent_id=? AND unresolved=1 AND json_extract(intent,'$.kind')='alternate'",
                                    (intent_id,)).fetchone()

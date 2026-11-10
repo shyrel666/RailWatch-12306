@@ -1,4 +1,5 @@
 import { Button } from "antd";
+import { CalendarClock } from "lucide-react";
 import type { RailWatchConfig } from "../types";
 import { beijingTimestamp, presaleDays, saleDay } from "../lib/saleCalendar";
 import { useClock } from "../lib/useClock";
@@ -51,7 +52,8 @@ export function TimerSettings({ config, update, windowDays }: {
     update((!validTarget || target <= now ? saleTimePatch() : null) ?? { timer_enabled: true });
   };
 
-  return <PreferenceSection id="trip-timer" title="定时启动" description={summary}>
+  return <PreferenceSection id="trip-timer" title="定时启动" description={summary}
+    icon={CalendarClock} active={config.timer_enabled} defaultOpen>
     <div className="timer-mode-options" role="radiogroup" aria-label="开始方式">
       <label className={`timer-mode${!config.timer_enabled ? " selected" : ""}`}>
         <input type="radio" name="timer-mode" aria-label="立即开始" checked={!config.timer_enabled}
@@ -69,10 +71,12 @@ export function TimerSettings({ config, update, windowDays }: {
         <span>{station || "未设置出发站"} · {config.date || "未设置乘车日期"}</span>
         {station && <Button type="text" size="small" aria-label="刷新起售时间" loading={loading} onClick={refresh}>刷新</Button>}
       </div>
-      <p role="status">{guidance}</p>
-      {canApply && (usingSaleTime ? <small className="timer-applied">已使用当前行程起售时间</small>
-        : <Button size="small" onClick={applySaleTime}>设为起售时间</Button>)}
-      {released && config.timer_enabled && <Button size="small" onClick={() => update({ timer_enabled: false })}>改为立即开始</Button>}
+      <div className="timer-trip-guidance">
+        <p role="status">{guidance}</p>
+        {canApply && (usingSaleTime ? <small className="timer-applied">已使用当前行程起售时间</small>
+          : <Button size="small" onClick={applySaleTime}>设为起售时间</Button>)}
+        {released && config.timer_enabled && <Button size="small" onClick={() => update({ timer_enabled: false })}>改为立即开始</Button>}
+      </div>
     </div>
     {config.timer_enabled && <>
       <div className="trip-field">

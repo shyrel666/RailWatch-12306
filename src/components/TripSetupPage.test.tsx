@@ -42,6 +42,33 @@ function resetStore() {
   });
 }
 
+test("official prefill toggle pairs side-by-side with order tracking for timed auto-submit and updates prefill_enabled", async () => {
+  resetStore();
+  railwatchStore.setState({
+    config: { ...defaultConfig, timer_enabled: true, auto_submit: true, sale_at: "2026-11-07T16:00:00+08:00" },
+  });
+  const user = userEvent.setup();
+  render(<TripSetupPage runCommand={vi.fn(async () => undefined)} confirm={vi.fn(async () => true)} busy={null} />);
+  const prefillRegion = screen.getByRole("region", { name: "官方预填加速" });
+  const trackingRegion = screen.getByRole("region", { name: "订单跟踪" });
+  const auxRow = prefillRegion.parentElement!;
+  expect(auxRow.classList.contains("trip-automation-aux")).toBe(true);
+  expect(auxRow.classList.contains("split")).toBe(true);
+  expect([...auxRow.children]).toEqual([prefillRegion, trackingRegion]);
+  const toggle = within(prefillRegion).getByRole("switch", { name: "官方预填加速" });
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  await user.click(toggle);
+  expect(railwatchStore.getState().config.prefill_enabled).toBe(false);
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  act(() => {
+    railwatchStore.setState({
+      config: { ...railwatchStore.getState().config, timer_enabled: false },
+    });
+  });
+  expect(screen.queryByRole("region", { name: "官方预填加速" })).toBeNull();
+  expect(screen.getByRole("region", { name: "订单跟踪" }).parentElement!.classList.contains("split")).toBe(false);
+});
+
 test("waitlist seat labels use runtime capabilities and preserve an explicit multi-seat selection", async () => {
   resetStore();
   railwatchStore.setState({ runtime: { ...defaultRuntimeInfo, seat_capabilities: readinessCases.capabilities } });
@@ -63,6 +90,8 @@ test("date strategy and budget survive leaving settings without enabling trading
   const runCommand = vi.fn(async () => undefined);
   const mount = () => render(<TripSetupPage busy={null} confirm={async () => false} runCommand={runCommand} />);
   let view = mount();
+  expect(railwatchStore.getState().config.date_range).toBe("单日");
+  await user.click(screen.getByRole("button", { name: "±1天" }));
   await user.click(screen.getByRole("combobox", { name: "多日期策略" }));
   await user.click(await screen.findByText("限时扫描多日期现票", { selector: ".ant-select-item-option-content" }));
   const input = screen.getByRole("spinbutton", { name: "跨日期扫描预算（秒）" });
@@ -422,7 +451,9 @@ describe("TripSetupPage", () => {
     expect(screen.getByRole("group", { name: "日期范围" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "席别" })).toBeTruthy();
     await userEvent.click(screen.getByText("查询策略", { selector: "h2" }));
-    await userEvent.click(screen.getByText("定时启动", { selector: "h2" }));
+    expect(
+      (screen.getByRole("heading", { name: "定时启动" }).closest("details") as HTMLDetailsElement).open,
+    ).toBe(true);
     expect(screen.getByRole("group", { name: "优先级" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "保存配置" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查询余票" })).toBeTruthy();

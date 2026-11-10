@@ -29,6 +29,8 @@ function EditableForm({ initial = config }: { initial?: RailWatchConfig }) {
 test("a released trip can switch to immediate mode without filling a time or leaving disabled actions", async () => {
   render(<EditableForm initial={{ ...config, date: "2026-10-07" }} />);
   const section = screen.getByRole("heading", { name: "定时启动" }).closest("details")!;
+  expect(section.open).toBe(true);
+  fireEvent.click(screen.getByRole("heading", { name: "定时启动" }));
   expect(section.open).toBe(false);
   fireEvent.click(screen.getByRole("heading", { name: "定时启动" }));
   expect(section.open).toBe(true);
@@ -43,7 +45,6 @@ test("a released trip can switch to immediate mode without filling a time or lea
 
 test("choosing scheduled mode fills a future release, but preserves a custom time across mode switches", async () => {
   render(<EditableForm initial={{ ...config, timer_enabled: false }} />);
-  fireEvent.click(screen.getByText("定时启动", { selector: "h2" }));
   await screen.findByRole("button", { name: "设为起售时间" });
   expect(screen.queryByLabelText("定时启动时间")).toBeNull();
   fireEvent.click(screen.getByRole("radio", { name: "定时开始" }));
@@ -80,7 +81,6 @@ test("applying the official time enables the timer, keeps Beijing time and still
     }} />;
   }
   render(<Form />);
-  fireEvent.click(screen.getByText("定时启动", { selector: "h2" }));
   const apply = await screen.findByRole("button", { name: "设为起售时间" });
   expect(update).not.toHaveBeenCalled();
   fireEvent.click(apply);

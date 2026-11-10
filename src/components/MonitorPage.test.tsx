@@ -39,6 +39,58 @@ describe("MonitorPage", () => {
   beforeEach(resetStore);
   afterEach(cleanup);
 
+  const prefill = {
+    run_id: "prefill-original", fallback: false, submissions: 0,
+    candidates: [{ train: "G8843", date: "2026-11-22", from: "大兴机场", to: "天津西", seat: "二等座",
+      status: "armed", confirmed: false, bound: false }],
+  };
+
+  test("armed prefill explains zero queries and shows the prepared trip", () => {
+    const config = { ...defaultConfig, timer_enabled: true, sale_at: new Date(Date.now() + 60_000).toISOString() };
+    railwatchStore.setState({ config, status: { ...defaultStatus, monitoring: true, current_config: config,
+      task: { run_id: "prefill-original", status: "waiting" }, prefill } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByText("余票查询次数").parentElement?.textContent).toContain("0");
+    expect(screen.getByText("预填提交次数").parentElement?.textContent).toContain("0");
+    expect(screen.getByText("预填已就绪，到点后直接购票")).toBeTruthy();
+    expect(screen.queryByText("暂无查询结果")).toBeNull();
+    expect(screen.queryByText("暂无命中")).toBeNull();
+    expect(screen.getByRole("heading", { name: "官方预填进度" })).toBeTruthy();
+    expect(screen.getByRole("table").textContent).toContain("大兴机场 → 天津西");
+  });
+
+  test("prefill payment shows one confirmation without manufacturing query rows or hits", () => {
+    railwatchStore.setState({ status: { ...defaultStatus, monitoring: true,
+      task: { run_id: "recovery", status: "pending_payment" },
+      order: { status: "pending_payment", order_id: "E123456", recovery_required: false },
+      prefill: { ...prefill, submissions: 1, candidates: [{ ...prefill.candidates[0], status: "pending_payment", confirmed: true, bound: true }] },
+    } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByText("余票查询次数").parentElement?.textContent).toContain("0");
+    expect(screen.getByText("预填提交次数").parentElement?.textContent).toContain("1");
+    expect(screen.getByText("已绑定官方订单")).toBeTruthy();
+    expect(screen.queryByText("暂无查询结果")).toBeNull();
+    expect(railwatchStore.getState().hits).toEqual([]);
+    expect(railwatchStore.getState().results).toEqual([]);
+  });
+
+  test("recovery retains fallback query evidence but a new run clears it", () => {
+    const snapshot = querySnapshot();
+    const original = { ...defaultStatus, monitoring: true, task: { run_id: "prefill-original", sequence: 1 },
+      prefill: { ...prefill, fallback: true } };
+    railwatchStore.setState({ status: original, monitorLoops: 3, queryConfig,
+      queryViews: { first: { owner: "run", latest: snapshot, success: snapshot } }, results: snapshot.rows });
+    railwatchStore.getState().applyState({ ...original, task: { run_id: "recovery", sequence: 1 } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByText("余票查询次数").parentElement?.textContent).toContain("3");
+    expect(screen.getByRole("heading", { name: "余票查询结果" })).toBeTruthy();
+    expect(railwatchStore.getState().results).toEqual(snapshot.rows);
+    act(() => railwatchStore.getState().applyState({ ...defaultStatus, monitoring: true,
+      task: { run_id: "new-run", sequence: 1 }, prefill: null }));
+    expect(railwatchStore.getState().monitorLoops).toBe(0);
+    expect(screen.queryByRole("heading", { name: "官方预填进度" })).toBeNull();
+  });
+
   test("automation still shows both flags without the removed adjustment link", () => {
     railwatchStore.setState({ config: { ...defaultConfig, auto_submit: true, auto_alternate: false } });
     render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
@@ -52,7 +104,7 @@ describe("MonitorPage", () => {
   test("running date strategy comes from the launch snapshot", () => {
     railwatchStore.setState({ config: { ...defaultConfig, date_strategy: "inventory_first" },
       status: { ...defaultStatus, monitoring: true,
-        current_config: { ...defaultConfig, date_strategy: "preferred_date" } } });
+        current_config: { ...defaultConfig, date_range: "±1天", date_strategy: "preferred_date" } } });
     render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
     expect(screen.getByLabelText("本次日期策略").textContent).toContain("先查首选日期");
     expect(screen.getByLabelText("本次日期策略").textContent).not.toContain("限时扫描多日期现票");

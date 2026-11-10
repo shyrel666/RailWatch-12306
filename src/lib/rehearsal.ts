@@ -14,8 +14,16 @@ export type RehearsalReport = {
   checks: RehearsalCheck[]; measurements: Record<string, unknown>; prediction?: TimelineSegment[];
 };
 export type RehearsalStarted = { rehearsal_id: string; trigger: "manual" | "task"; checks: RehearsalCheck[] };
-export type RunReviewSummary = { run_id: string; started_at: number; target_at: number | null; trip?: Partial<RehearsalReport["trip"]>; conclusion: string };
+export type RunReviewSummary = { run_id: string; started_at: number; target_at: number | null; trip?: Partial<RehearsalReport["trip"]>; conclusion: string;
+  sale_confirm?: { path: "prefill" | "regular"; confirm_delivered_ms: number } | null };
+/** Milliseconds after the sale time; a step the run never reached stays null. */
+export type SalePath = {
+  path: "prefill" | "regular"; fallback: boolean; entry_attempts: number; unlock_wait_ms: number | null;
+  entry_click_ms: number | null; submit_ms: number | null; confirm_click_ms: number | null;
+  confirm_delivered_ms: number | null; official_result_ms: number | null;
+};
 export type RunReviewDetail = RunReviewSummary & {
+  sale_path?: SalePath | null;
   segments: TimelineSegment[]; prediction: TimelineSegment[]; slowest: string | null;
   order_timings?: { kind: "regular" | "alternate"; segments: TimelineSegment[] }[];
   query_timings?: {

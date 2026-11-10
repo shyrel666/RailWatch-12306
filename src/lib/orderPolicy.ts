@@ -7,6 +7,7 @@ export const DEFAULT_ORDER_POLICY = {
   alternate_max_combinations: policy.alternate_max_combinations,
   order_watch_enabled: policy.order_watch_enabled,
   order_watch_interval_seconds: policy.order_watch_interval_seconds,
+  prefill_enabled: policy.prefill_enabled,
 };
 
 export function orderPolicySummary(config: RailWatchConfig) {

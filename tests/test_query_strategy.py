@@ -95,6 +95,20 @@ class PolicyRangeTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 validate_order_policies({**ORDER_POLICIES, key: value})
 
+    def test_prefill_unlock_and_presale_retry_values_are_range_checked_at_load(self):
+        for key, value in (("prefill_unlock_abort_countdown_seconds", 1), ("prefill_unlock_abort_countdown_seconds", 30),
+                           ("prefill_presale_retry_delays_ms", []), ("prefill_presale_retry_delays_ms", [200, 2000, 350])):
+            with self.subTest(key=key, value=value):
+                validate_order_policies({**ORDER_POLICIES, key: value})
+        for key, value in (("prefill_unlock_abort_countdown_seconds", 0), ("prefill_unlock_abort_countdown_seconds", 31),
+                           ("prefill_unlock_abort_countdown_seconds", None),
+                           ("prefill_presale_retry_delays_ms", None), ("prefill_presale_retry_delays_ms", 350),
+                           ("prefill_presale_retry_delays_ms", [199]), ("prefill_presale_retry_delays_ms", [2001]),
+                           ("prefill_presale_retry_delays_ms", [350.0]), ("prefill_presale_retry_delays_ms", [True]),
+                           ("prefill_presale_retry_delays_ms", [350, 350, 350, 350])):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                validate_order_policies({**ORDER_POLICIES, key: value})
+
     def test_sale_start_and_settle_values_are_range_checked_at_load(self):
         self.assertIs(validate_query_strategies(QUERY_STRATEGIES), QUERY_STRATEGIES)
         def changed(section, key, value, strategies=QUERY_STRATEGIES):

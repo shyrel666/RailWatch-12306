@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  SlidersHorizontal,
   Star,
   TrainFront,
   UserRoundSearch,
@@ -204,9 +205,9 @@ export function TripSetupPage({
   const dismissDraft = useRailWatchStore(state => state.dismissDraft);
   const markConfigSaved = useRailWatchStore(state => state.markConfigSaved);
   const [dateRange, setDateRange] = useState<DateRangePreset>(
-    () => (config.date_range as DateRangePreset) || "±1天",
+    () => (config.date_range as DateRangePreset) || "单日",
   );
-  useEffect(() => setDateRange((config.date_range as DateRangePreset) || "±1天"), [config.date_range]);
+  useEffect(() => setDateRange((config.date_range as DateRangePreset) || "单日"), [config.date_range]);
   const formalDirty = savedConfig ? tripFingerprint(config) !== tripFingerprint(savedConfig) : false;
   const formatSavedAt = (at: number | null) => at === null ? "未知" : new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
@@ -374,7 +375,7 @@ export function TripSetupPage({
     if (loaded) {
       setConfig(loaded);
       markConfigSaved(loaded, savedAt ?? Date.now() / 1000);
-      setDateRange((loaded.date_range as DateRangePreset) || "±1天");
+      setDateRange((loaded.date_range as DateRangePreset) || "单日");
     }
   };
 
@@ -431,235 +432,259 @@ export function TripSetupPage({
         {/* Edits made before the saved trip loads would be based on defaults
             (e.g. adding a passenger would drop the saved ones), so wait for it. */}
         <ConfigProvider componentDisabled={!tripInitialized}>
-        <fieldset className="trip-setup-form-scroll" disabled={!tripInitialized}>
-          <PreferenceSection
-            id="trip-basics"
-            title="路线与乘客"
-            defaultOpen
-          >
-            {automationIssue ? <Alert type="warning" showIcon message="自动化配置待完善" description={automationIssue} /> : null}
-            <div className="trip-form-row trip-form-row--stations">
-              <StationField key={`from-${stationRevision}`} label="出发站" value={config.from_station_cn} runCommand={runCommand}
-                onChange={value => setRoute(value, config.to_station_cn)} />
-              <button
-                aria-label="交换出发站与到达站"
-                className="trip-swap-button"
-                onClick={swapStations}
-                type="button"
-              >
-                <ArrowLeftRight size={16} />
-              </button>
-              <StationField key={`to-${stationRevision}`} label="到达站" value={config.to_station_cn} runCommand={runCommand}
-                onChange={value => setRoute(config.from_station_cn, value)} />
-            </div>
-            {config.from_station_cn.trim() && config.from_station_cn.trim() === config.to_station_cn.trim()
-              ? <small className="trip-date-hint" role="alert">出发站和到达站不能相同</small> : null}
-            {trainNotice ? <small className="trip-date-hint" role="status">{trainNotice}</small> : null}
-            <div className="trip-route-bar">
-              {choices.recent_routes.length ? <div className="trip-route-choices" aria-label="最近路线">
-                <span>最近</span>{choices.recent_routes.map(route => <button type="button"
-                  key={`${route.from_station}-${route.to_station}`} onClick={() => setRoute(route.from_station, route.to_station)}>
-                  {route.from_station} → {route.to_station}
-                </button>)}
-              </div> : null}
+        <fieldset className="trip-setup-form-scroll trip-setup-grid" disabled={!tripInitialized}>
+          <section className="trip-ticket-card" id="trip-basics">
+            <header className="trip-basics-header">
+              <span className="section-icon-badge is-primary" aria-hidden="true">
+                <TrainFront size={16} />
+              </span>
+              <div className="trip-basics-title">
+                <h2>路线与乘客</h2>
+                <p>乘车区间、车次日期、席别顺序与乘车人</p>
+              </div>
               <Button size="small" className="trip-station-refresh" icon={<RefreshCw size={13} />}
                 loading={busy === "refreshStations"} onClick={() => void runCommand("refreshStations", {}, "站码数据已更新").then(result => {
                   if (result) setStationRevision(value => value + 1);
                 })}>更新站码数据</Button>
-            </div>
-
-            <div className="trip-form-row trip-form-row--split">
-              <label className="trip-field">
-                <span>出发日期</span>
-                <span className="trip-input-shell">
-                  <CalendarDays size={15} />
-                  <input
-                    aria-label="出发日期"
-                    className="native-input trip-native-input"
-                    type="date"
-                    min={todayIso(today)}
-                    value={config.date}
-                    onChange={(event) => update({ date: event.target.value })}
-                  />
-                </span>
-                {tripDateStatus.warning ? (
-                  <small className="trip-date-hint">
-                    {tripDateStatus.warning}
-                  </small>
+            </header>
+            <div className="trip-basics-body">
+              {automationIssue ? <Alert type="warning" showIcon message="自动化配置待完善" description={automationIssue} /> : null}
+              <div className="trip-route-hero">
+                <div className="trip-form-row trip-form-row--stations">
+                  <StationField key={`from-${stationRevision}`} label="出发站" value={config.from_station_cn} runCommand={runCommand}
+                    onChange={value => setRoute(value, config.to_station_cn)} />
+                  <button
+                    aria-label="交换出发站与到达站"
+                    className="trip-swap-button"
+                    onClick={swapStations}
+                    type="button"
+                  >
+                    <ArrowLeftRight size={15} />
+                  </button>
+                  <StationField key={`to-${stationRevision}`} label="到达站" value={config.to_station_cn} runCommand={runCommand}
+                    onChange={value => setRoute(config.from_station_cn, value)} />
+                </div>
+                {(config.from_station_cn.trim() && config.from_station_cn.trim() === config.to_station_cn.trim())
+                  || trainNotice
+                  || choices.recent_routes.length > 0 ? (
+                  <div className="trip-route-meta">
+                    {config.from_station_cn.trim() && config.from_station_cn.trim() === config.to_station_cn.trim()
+                      ? <small className="trip-date-hint is-danger" role="alert">出发站和到达站不能相同</small> : null}
+                    {trainNotice ? <small className="trip-date-hint" role="status">{trainNotice}</small> : null}
+                    {choices.recent_routes.length ? <div className="trip-route-choices" aria-label="最近路线">
+                      <span>最近</span>{choices.recent_routes.map(route => <button type="button"
+                        key={`${route.from_station}-${route.to_station}`} onClick={() => setRoute(route.from_station, route.to_station)}>
+                        {route.from_station} → {route.to_station}
+                      </button>)}
+                    </div> : null}
+                  </div>
                 ) : null}
-                {rangeStatus.invalid ? <small className="trip-date-hint">请输入有效日期</small>
-                  : config.date_range !== "单日" || rangeStatus.skipped.length ? <small className="trip-date-hint">
-                    实际查询 {rangeStatus.valid.map(date => date.slice(5)).join("、") || "无"}
-                    {rangeStatus.skipped.length ? ` · 跳过 ${rangeStatus.skipped.map(date => date.slice(5)).join("、")}` : ""}
-                  </small> : null}
-              </label>
-              <div className="trip-field">
-                <span>日期范围</span>
-                <SegmentedControl
-                  ariaLabel="日期范围"
-                  options={["单日", "±1天", "±2天"] as const}
-                  value={dateRange}
-                  onChange={(next) => {
-                    setDateRange(next);
-                    update({ date_range: next });
-                  }}
-                />
               </div>
-            </div>
 
-            <div className="trip-form-row trip-form-row--split">
-              <div className="trip-field">
-                <span className="trip-field-label-with-help">车次
-                  <Hint text="可填写多个车次，按顺序优先。留空则查询本路线全部车次，可在查询结果中勾选加入。" /></span>
-                <span className="trip-input-with-action">
+              <div className="trip-schedule-grid">
+                <label className="trip-field">
+                  <span>出发日期</span>
                   <span className="trip-input-shell">
-                    <TrainFront size={15} />
-                    <Input
-                      aria-label="车次"
-                      bordered={false}
-                      placeholder="如：G1, G2, D3 或留空"
-                      value={config.train_code}
-                      onChange={(event) =>
-                        update({ train_code: event.target.value.toUpperCase() })
-                      }
+                    <CalendarDays size={15} />
+                    <input
+                      aria-label="出发日期"
+                      className="native-input trip-native-input"
+                      type="date"
+                      min={todayIso(today)}
+                      value={config.date}
+                      onChange={(event) => update({ date: event.target.value })}
                     />
                   </span>
-                  <Button className="trip-inline-button" icon={<Star size={14} />} onClick={() => void saveFavorites()} type="default">
-                    收藏
-                  </Button>
-                </span>
-                {currentFavorite?.trains.length ? <span className="trip-route-choices">
-                  <span>收藏</span><button type="button" onClick={() => update({ train_code: currentFavorite.trains.join(", ") })}>
-                    应用 {currentFavorite.trains.join("、")}
-                  </button>
-                </span> : null}
-                {selectedTrains.length > 1 ? <span className="trip-train-order" aria-label="车次优先顺序">
-                  {selectedTrains.map((code, index) => <span key={code}>
-                    <em>{index + 1}</em>{code}
-                    <button type="button" aria-label={`上移 ${code}`} disabled={index === 0} onClick={() => moveTrain(index, -1)}>↑</button>
-                    <button type="button" aria-label={`下移 ${code}`} disabled={index === selectedTrains.length - 1} onClick={() => moveTrain(index, 1)}>↓</button>
-                  </span>)}
-                </span> : null}
-              </div>
-              <div className="trip-field">
-                <span className="trip-field-label-with-help">多日期策略
-                  <Hint label="多日期策略" text={dateStrategySummary(config)} /></span>
-                <Select aria-label="多日期策略" className="trip-select" value={dateStrategy(config)}
-                  disabled={dateRange === "单日"}
-                  options={Object.entries(DATE_STRATEGIES).map(([value, policy]) => ({ value, label: policy.label }))}
-                  onChange={value => update({ date_strategy: value })} />
-                {dateStrategy(config) === "inventory_first" && dateRange !== "单日" ? <label className="trip-field">
-                  <span>跨日期扫描预算（秒）</span>
-                  <InputNumber aria-label="跨日期扫描预算（秒）" className="trip-select"
-                    min={DATE_SCAN_BUDGET.min_budget_seconds} max={DATE_SCAN_BUDGET.max_budget_seconds} precision={0}
-                    value={config.date_scan_budget_seconds ?? DATE_SCAN_BUDGET.scan_budget_seconds}
-                    onChange={value => { if (value !== null) update({ date_scan_budget_seconds: value }); }} />
-                </label> : null}
-              </div>
-            </div>
-
-            <div className="trip-form-row">
-              <div className="trip-field">
-                <span className="trip-field-label-with-help">席别
-                  <Hint text="可多选，按选择顺序优先。标记「仅提醒」的席别只查询和通知，由你在官网购买；卧铺铺位由官网分配。" /></span>
-                <div aria-label="席别" className="chip-group" role="group">
-                  {[{ name: "不限", query: true, regular: true, alternate: true }, ...seatCapabilities.filter(seat => seat.query)].map((capability) => {
-                    const seat = capability.name;
-                    const limit = !capability.regular && !capability.alternate ? "仅提醒"
-                      : !capability.alternate ? "不可候补" : !capability.regular ? "仅候补" : "";
-                    return (
-                    <button
-                      aria-pressed={selectedSeats.includes(seat)}
-                      className={
-                        selectedSeats.includes(seat)
-                          ? "chip-option active"
-                          : "chip-option"
-                      }
-                      key={seat}
-                      onClick={() => toggleSeat(seat)}
-                      type="button"
-                    >
-                      {seat}{limit ? <small>{limit}</small> : null}
-                    </button>
-                  );})}
+                  {tripDateStatus.warning ? (
+                    <small className="trip-date-hint is-warning">
+                      {tripDateStatus.warning}
+                    </small>
+                  ) : null}
+                  {rangeStatus.invalid ? <small className="trip-date-hint">请输入有效日期</small>
+                    : config.date_range !== "单日" || rangeStatus.skipped.length ? <small className="trip-date-hint">
+                      实际查询 {rangeStatus.valid.map(date => date.slice(5)).join("、") || "无"}
+                      {rangeStatus.skipped.length ? ` · 跳过 ${rangeStatus.skipped.map(date => date.slice(5)).join("、")}` : ""}
+                    </small> : null}
+                </label>
+                <div className="trip-field">
+                  <span>日期范围</span>
+                  <SegmentedControl
+                    ariaLabel="日期范围"
+                    options={["单日", "±1天", "±2天"] as const}
+                    value={dateRange}
+                    onChange={(next) => {
+                      setDateRange(next);
+                      update({ date_range: next });
+                    }}
+                  />
                 </div>
-                {!seatCapabilities.length ? <small className="field-help">席别信息尚未加载，请检查运行环境。</small> : null}
-                {selectedSeats.length > 1 ? <span className="trip-train-order" aria-label="席别优先顺序">
-                  {selectedSeats.map((seat, index) => <span key={seat}><em>{index + 1}</em>{seat}
-                    <button type="button" aria-label={`上移席别 ${seat}`} disabled={index === 0} onClick={() => {
-                      const next = [...selectedSeats]; [next[index - 1], next[index]] = [next[index], next[index - 1]];
-                      update({ seat_keyword: next.join("，") });
-                    }}>↑</button>
-                    <button type="button" aria-label={`下移席别 ${seat}`} disabled={index === selectedSeats.length - 1} onClick={() => {
-                      const next = [...selectedSeats]; [next[index + 1], next[index]] = [next[index], next[index + 1]];
-                      update({ seat_keyword: next.join("，") });
-                    }}>↓</button>
-                  </span>)}
-                </span> : null}
+                <div className="trip-field">
+                  <span className="trip-field-label-with-help">车次
+                    <Hint text="可填写多个车次，按顺序优先。留空则查询本路线全部车次，可在查询结果中勾选加入。" /></span>
+                  <span className="trip-input-with-action">
+                    <span className="trip-input-shell">
+                      <TrainFront size={15} />
+                      <Input
+                        aria-label="车次"
+                        bordered={false}
+                        placeholder="如：G1, G2, D3 或留空"
+                        value={config.train_code}
+                        onChange={(event) =>
+                          update({ train_code: event.target.value.toUpperCase() })
+                        }
+                      />
+                    </span>
+                    <Button className="trip-inline-button" icon={<Star size={14} />} onClick={() => void saveFavorites()} type="default">
+                      收藏
+                    </Button>
+                  </span>
+                  {currentFavorite?.trains.length ? <span className="trip-route-choices">
+                    <span>收藏</span><button type="button" onClick={() => update({ train_code: currentFavorite.trains.join(", ") })}>
+                      应用 {currentFavorite.trains.join("、")}
+                    </button>
+                  </span> : null}
+                  {selectedTrains.length > 1 ? <span className="trip-train-order" aria-label="车次优先顺序">
+                    {selectedTrains.map((code, index) => <span key={code}>
+                      <em>{index + 1}</em>{code}
+                      <button type="button" aria-label={`上移 ${code}`} disabled={index === 0} onClick={() => moveTrain(index, -1)}>↑</button>
+                      <button type="button" aria-label={`下移 ${code}`} disabled={index === selectedTrains.length - 1} onClick={() => moveTrain(index, 1)}>↓</button>
+                    </span>)}
+                  </span> : null}
+                </div>
+                <div className="trip-field">
+                  <span className="trip-field-label-with-help">多日期策略
+                    <Hint label="多日期策略" text={dateStrategySummary(config)} /></span>
+                  <Select aria-label="多日期策略" className="trip-select" value={dateStrategy(config)}
+                    disabled={dateRange === "单日"}
+                    options={Object.entries(DATE_STRATEGIES).map(([value, policy]) => ({ value, label: policy.label }))}
+                    onChange={value => update({ date_strategy: value })} />
+                  {dateStrategy(config) === "inventory_first" && dateRange !== "单日" ? <label className="trip-field">
+                    <span>跨日期扫描预算（秒）</span>
+                    <InputNumber aria-label="跨日期扫描预算（秒）" className="trip-select"
+                      min={DATE_SCAN_BUDGET.min_budget_seconds} max={DATE_SCAN_BUDGET.max_budget_seconds} precision={0}
+                      value={config.date_scan_budget_seconds ?? DATE_SCAN_BUDGET.scan_budget_seconds}
+                      onChange={value => { if (value !== null) update({ date_scan_budget_seconds: value }); }} />
+                  </label> : null}
+                </div>
               </div>
-            </div>
 
-            <div className="trip-form-row trip-form-row--split">
-              <div className="trip-field">
-                <span className="trip-field-label-with-help">乘客
-                  <Hint text="自动交易仅支持成人票：官方乘车人列表不显示本人票种，读取时默认按成人；下单时仍在官方页面回读票种，不是成人票时不会提交。学生、儿童票请在官网办理。" /></span>
-                <div className="passenger-strip">
-                  {passengerNames.map((name, index) => (
-                    <span className="passenger-tag" key={`${name}-${index}`}>
-                      {name}
+              <div className="trip-subsection">
+                <div className="trip-field">
+                  <div className="trip-subsection-head">
+                    <span className="trip-field-label-with-help">席别
+                      <Hint text="可多选，按选择顺序优先。标记「仅提醒」的席别只查询和通知，由你在官网购买；卧铺铺位由官网分配。" /></span>
+                    <small className="trip-subsection-meta">
+                      {selectedSeats.includes("不限") ? "不限席别" : `已选 ${selectedSeats.length} 项`}
+                    </small>
+                  </div>
+                  <div aria-label="席别" className="chip-group" role="group">
+                    {[{ name: "不限", query: true, regular: true, alternate: true }, ...seatCapabilities.filter(seat => seat.query)].map((capability) => {
+                      const seat = capability.name;
+                      const limit = !capability.regular && !capability.alternate ? "仅提醒"
+                        : !capability.alternate ? "不可候补" : !capability.regular ? "仅候补" : "";
+                      return (
                       <button
-                        aria-label={`移除乘客 ${name}`}
-                        onClick={() => removePassenger(index)}
+                        aria-pressed={selectedSeats.includes(seat)}
+                        className={
+                          selectedSeats.includes(seat)
+                            ? "chip-option active"
+                            : "chip-option"
+                        }
+                        key={seat}
+                        onClick={() => toggleSeat(seat)}
                         type="button"
                       >
-                        <X size={12} />
+                        {seat}{limit ? <small>{limit}</small> : null}
                       </button>
-                    </span>
-                  ))}
-                  <span className="passenger-add">
-                    <Input
-                      aria-label="添加乘客"
-                      placeholder="姓名"
-                      value={passengerDraft}
-                      onChange={(event) =>
-                        setPassengerDraft(event.target.value)
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          addPassenger();
-                        }
-                      }}
-                    />
-                    <Button type="text" aria-label="添加乘客" icon={<Plus size={14} />} onClick={addPassenger}>
-                      添加乘客
-                    </Button>
-                    <Button className="trip-station-refresh" icon={<UserRoundSearch size={14} />}
+                    );})}
+                  </div>
+                  {!seatCapabilities.length ? <small className="field-help">席别信息尚未加载，请检查运行环境。</small> : null}
+                  {selectedSeats.length > 1 ? <span className="trip-train-order" aria-label="席别优先顺序">
+                    {selectedSeats.map((seat, index) => <span key={seat}><em>{index + 1}</em>{seat}
+                      <button type="button" aria-label={`上移席别 ${seat}`} disabled={index === 0} onClick={() => {
+                        const next = [...selectedSeats]; [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                        update({ seat_keyword: next.join("，") });
+                      }}>↑</button>
+                      <button type="button" aria-label={`下移席别 ${seat}`} disabled={index === selectedSeats.length - 1} onClick={() => {
+                        const next = [...selectedSeats]; [next[index + 1], next[index]] = [next[index], next[index + 1]];
+                        update({ seat_keyword: next.join("，") });
+                      }}>↓</button>
+                    </span>)}
+                  </span> : null}
+                </div>
+              </div>
+
+              <div className="trip-subsection">
+                <div className="trip-field">
+                  <div className="trip-subsection-head">
+                    <span className="trip-field-label-with-help">乘客
+                      <Hint text="自动交易仅支持成人票：官方乘车人列表不显示本人票种，读取时默认按成人；下单时仍在官方页面回读票种，不是成人票时不会提交。学生、儿童票请在官网办理。" /></span>
+                    <Button size="small" className="trip-station-refresh" icon={<UserRoundSearch size={13} />}
                       disabled={readingPassengers || !!busy || !!passengerBlock}
                       aria-busy={readingPassengers} onClick={() => void readPassengers()}>
                       {readingPassengers ? "正在读取官方乘客…" : "从官方页面读取乘客"}
                     </Button>
-                  </span>
+                  </div>
+                  <div className="passenger-box">
+                    <div className="passenger-strip">
+                      {passengerNames.map((name, index) => (
+                        <span className="passenger-tag" key={`${name}-${index}`}>
+                          {name}
+                          <button
+                            aria-label={`移除乘客 ${name}`}
+                            onClick={() => removePassenger(index)}
+                            type="button"
+                          >
+                            <X size={12} />
+                          </button>
+                        </span>
+                      ))}
+                      <span className="passenger-add">
+                        <Input
+                          aria-label="添加乘客"
+                          placeholder="输入乘车人姓名"
+                          value={passengerDraft}
+                          onChange={(event) =>
+                            setPassengerDraft(event.target.value)
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              addPassenger();
+                            }
+                          }}
+                        />
+                        <Button type="text" aria-label="添加乘客" icon={<Plus size={14} />} onClick={addPassenger}>
+                          添加乘客
+                        </Button>
+                      </span>
+                    </div>
+                  </div>
+                  {passengerError ? <small className="trip-date-hint is-danger" role="alert">{passengerError}</small> : null}
+                  {passengerBlock ? <small className="field-help">{passengerBlock}</small> : null}
+                  {passengerCandidates?.warning ? <small className="field-help" role="status">{passengerCandidates.warning}</small> : null}
+                  {passengerCandidates?.items.length ? <div className="trip-route-choices" aria-label="官方页面乘客候选">
+                    {passengerCandidates.items.map((candidate, index) => <button type="button" key={`${candidate.name}-${candidate.identity_hint}-${index}`}
+                      disabled={candidate.ambiguous || candidate.ticket_type !== "adult" || passengerNames.includes(candidate.name)}
+                      onClick={() => addCandidate(candidate)}>{candidate.name} · {candidate.identity_hint || "证件摘要未提供"} · {
+                        candidate.ambiguous ? "同名需人工核对" : candidate.ticket_type === "adult" ? (candidate.default_adult ? "默认成人" : "成人") : candidate.ticket_type === "unknown" ? "列表未标票种，可手动填写姓名后核对" : "票种不支持自动交易"
+                      }</button>)}
+                  </div> : null}
                 </div>
-                {passengerError ? <small className="trip-date-hint" role="alert">{passengerError}</small> : null}
-                {passengerBlock ? <small className="field-help">{passengerBlock}</small> : null}
-                {passengerCandidates?.warning ? <small className="field-help" role="status">{passengerCandidates.warning}</small> : null}
-                {passengerCandidates?.items.length ? <div className="trip-route-choices" aria-label="官方页面乘客候选">
-                  {passengerCandidates.items.map((candidate, index) => <button type="button" key={`${candidate.name}-${candidate.identity_hint}-${index}`}
-                    disabled={candidate.ambiguous || candidate.ticket_type !== "adult" || passengerNames.includes(candidate.name)}
-                    onClick={() => addCandidate(candidate)}>{candidate.name} · {candidate.identity_hint || "证件摘要未提供"} · {
-                      candidate.ambiguous ? "同名需人工核对" : candidate.ticket_type === "adult" ? (candidate.default_adult ? "默认成人" : "成人") : candidate.ticket_type === "unknown" ? "列表未标票种，可手动填写姓名后核对" : "票种不支持自动交易"
-                    }</button>)}
-                </div> : null}
               </div>
             </div>
-          </PreferenceSection>
+          </section>
+
           <div className="trip-strategy-sections">
+            <AutomationSection config={config} update={update} runCommand={runCommand} confirm={confirm}
+              busy={busy} />
+            <TimerSettings config={config} update={update} windowDays={windowDays} />
             <PreferenceSection
               id="trip-query"
               title="查询策略"
+              icon={SlidersHorizontal}
+              active={customized}
               description={`${PRIORITIES[priority].label} · 每 ${config.interval} 秒`}
-              defaultOpen={window.matchMedia("(min-width: 1400px)").matches}
             >
               <div className="trip-form-row trip-form-row--split">
                 <div className="trip-field">
@@ -741,35 +766,44 @@ export function TripSetupPage({
                   />
                 </div>
               </div>
-              <div className="trip-advanced-switches">
+              <div className="trip-query-switches">
                 <span className="switch-row">
+                  <span className="switch-row-label">
+                    <span>保持会话</span>
+                    <Hint text="定期检查登录状态，临近起售时暂停检查。登录失效后仍需重新登录。" />
+                  </span>
                   <Switch
                     aria-label="保持会话"
                     checked={config.keep_alive}
                     onChange={(checked) => update({ keep_alive: checked })}
                   />
-                  <span>保持会话</span>
-                  <Hint text="定期检查登录状态，临近起售时暂停检查。登录失效后仍需重新登录。" />
                 </span>
                 <span className="switch-row">
+                  <span className="switch-row-label">
+                    <span>智能轮询</span>
+                    <Hint text="遇到超时或限频时自动放慢查询，不影响首次查询。" />
+                  </span>
                   <Switch
                     aria-label="智能轮询"
                     checked={config.smart_rate}
                     onChange={(checked) => update({ smart_rate: checked })}
                   />
-                  <span>智能轮询</span>
-                  <Hint text="遇到超时或限频时自动放慢查询，不影响首次查询。" />
                 </span>
               </div>
             </PreferenceSection>
-            <AutomationSection config={config} update={update} runCommand={runCommand} confirm={confirm}
-              busy={busy} />
-            <TimerSettings config={config} update={update} windowDays={windowDays} />
           </div>
         </fieldset>
         </ConfigProvider>
         <footer className="trip-setup-footer">
-          {queryBlock ? <small className="trip-setup-footer-hint" role="status">{queryBlock}</small> : null}
+          {queryBlock ? <small className="trip-setup-footer-hint" role="status">{queryBlock}</small>
+            : <div className="trip-footer-summary" aria-hidden="true">
+              <span>{config.from_station_cn.trim() || "未设出发站"} → {config.to_station_cn.trim() || "未设到达站"}</span>
+              <i>·</i>
+              <span className="mono">{config.date || "未设日期"}</span>
+              {dateRange !== "单日" ? <small>{dateRange}</small> : null}
+              <i>·</i>
+              <span>{passengerNames.length ? `${passengerNames.length} 位乘车人` : "未添加乘车人"}</span>
+            </div>}
           <Button
             icon={<Save size={15} />}
             loading={busy === "saveConfig"}
@@ -777,6 +811,10 @@ export function TripSetupPage({
             onClick={() => void saveConfig()}
           >
             保存配置
+          </Button>
+          <Button loading={busy === "analyzeQuery"} disabled={!!queryBlock}
+            onClick={() => void runCommand("analyzeQuery", { config: { ...config, train_code: "" } })}>
+            查询全部车次
           </Button>
           <Button
             type="primary"
@@ -786,10 +824,6 @@ export function TripSetupPage({
             onClick={() => void runCommand("analyzeQuery", { config })}
           >
             查询余票
-          </Button>
-          <Button loading={busy === "analyzeQuery"} disabled={!!queryBlock}
-            onClick={() => void runCommand("analyzeQuery", { config: { ...config, train_code: "" } })}>
-            查询全部车次
           </Button>
         </footer>
       </section>

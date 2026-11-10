@@ -163,3 +163,31 @@ test("runs without a recorded route have no dangling arrow and an empty history 
   await userEvent.click(screen.getByRole("button", { name: "前往购票监控" }));
   expect(railwatchStore.getState().activePage).toBe("购票监控");
 });
+
+test("timed runs state the sale-to-confirmation time by path and never guess a missing step", async () => {
+  const path = { path: "prefill", fallback: false, entry_attempts: 2, unlock_wait_ms: 980, entry_click_ms: 1060,
+    submit_ms: 3000, confirm_click_ms: 3105, confirm_delivered_ms: 5418, official_result_ms: null };
+  let current: unknown = path;
+  vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "runReviews" ?
+    { items: [{ run_id: "run-1", started_at: 1, target_at: 2, conclusion: "待支付",
+      sale_confirm: { path: "prefill", confirm_delivered_ms: 5418 } }], next_cursor: null } :
+    { run_id: "run-1", started_at: 1, target_at: 2, conclusion: "待支付", segments: [], prediction: [],
+      preparation_margin_ms: null, sale_path: current }) as never);
+  render(<RunReviews />);
+  const timeline = await screen.findByRole("region", { name: "阶段时间线" });
+  const note = within(timeline).getByText(/^起售 → 确认送达：5\.42 秒/);
+  expect(note.textContent).toContain("官方预填；等待解锁 0.98 秒，入口点击 +1.06 秒，入口共点击 2 次，确认点击 +3.10 秒");
+  expect(note.textContent).not.toContain("官方订单");
+  expect(note.textContent).toContain("不代表已成功入队");
+  expect(screen.getByRole("button", { name: "查看复盘" }).textContent).toContain("官方预填 +5.42 秒 确认");
+  cleanup();
+  current = { ...path, path: "regular", fallback: true, entry_attempts: 0, unlock_wait_ms: null, entry_click_ms: 4000,
+    confirm_click_ms: null, confirm_delivered_ms: null };
+  render(<RunReviews />);
+  expect(within(await screen.findByRole("region", { name: "阶段时间线" }))
+    .getByText("起售 → 确认送达未记录：本次常规下单（预填回退后）未走到确认送达（命中 +4.00 秒）。")).toBeTruthy();
+  cleanup();
+  current = null;
+  render(<RunReviews />);
+  expect(within(await screen.findByRole("region", { name: "阶段时间线" })).queryByText(/起售 → 确认送达/)).toBeNull();
+});

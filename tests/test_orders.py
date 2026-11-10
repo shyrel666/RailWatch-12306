@@ -593,6 +593,63 @@ class OrderResultWaitingTests(unittest.TestCase):
         self.assertEqual(self.elapsed, 45)
         self.page.reconcile.assert_not_called()
 
+    def test_delivered_confirmation_temporary_error_recovers_once_through_long_queue(self):
+        for message in ('提示 系统忙，请稍后再试！ 确定', '网络超时，请重试'):
+            with self.subTest(message=message):
+                self.elapsed = 0
+                navigated = [False]
+                def read():
+                    if not navigated[0]:
+                        return snapshot(orders=[], dialogs=[message])
+                    if self.elapsed < 75:
+                        return snapshot(orders=[], processing=True)
+                    return snapshot() if self.elapsed >= 95 else snapshot(orders=[])
+                self.page.snapshot = read
+                self.page.driver.get = Mock(side_effect=lambda url: navigated.__setitem__(0, True))
+                self.page.mark = Mock()
+                result = self.page._post_submit(intent(), True)
+                self.assertEqual((result.status, result.order_id), ('pending_payment', 'E123456'))
+                self.assertEqual(self.elapsed, 95)
+                self.page.driver.get.assert_called_once_with('https://kyfw.12306.cn/otn/view/train_order.html')
+                self.page.mark.assert_called_once_with('regular_auto_reconcile')
+
+    def test_temporary_error_without_delivery_receipt_never_auto_recovers(self):
+        self.page.snapshot = lambda: snapshot(orders=[], dialogs=['系统忙，请稍后再试！'])
+        result = self.page._post_submit(intent(), False)
+        self.assertEqual(result.status, 'verification')
+        self.page.driver.get.assert_not_called()
+
+    def test_login_captcha_limits_and_mixed_errors_keep_human_handling(self):
+        for changes in (
+                {'dialogs': ['操作过快，请稍后再试']},
+                {'dialogs': ['系统忙，请稍后再试！'], 'verification': True},
+                {'dialogs': ['系统忙，请稍后再试！', '请完成验证码']},
+                {'dialogs': ['请重新登录']},
+                {'dialogs': ['网络异常，请联系工作人员']},
+                {'dialogs': ['排队失败，请稍后再试'], 'queueFailed': True}):
+            with self.subTest(changes=changes):
+                self.page.snapshot = lambda: snapshot(orders=[], **changes)
+                self.assertEqual(self.page._post_submit(intent(), True).status, 'verification')
+                self.page.driver.get.assert_not_called()
+
+    def test_automatic_recovery_does_not_loop_on_another_temporary_error(self):
+        self.page.snapshot = lambda: snapshot(orders=[], dialogs=['系统忙，请稍后再试！'])
+        self.assertEqual(self.page._post_submit(intent(), True).status, 'verification')
+        self.page.driver.get.assert_called_once()
+
+    def test_captcha_appearing_at_recovery_navigation_stays_on_page(self):
+        error = snapshot(orders=[], dialogs=['系统忙，请稍后再试！'])
+        captcha = snapshot(orders=[], dialogs=['请输入验证码'], verification=True)
+        self.page.snapshot = Mock(side_effect=[error, error, captcha])
+        self.assertEqual(self.page._post_submit(intent(), True).status, 'verification')
+        self.page.driver.get.assert_not_called()
+
+    def test_stopped_temporary_error_does_not_navigate(self):
+        self.page.snapshot = lambda: snapshot(orders=[], dialogs=['系统忙，请稍后再试！'])
+        self.page.stop = lambda: True
+        self.page._post_submit(intent(), True)
+        self.page.driver.get.assert_not_called()
+
     def test_official_queue_outlives_timeout_then_payment_page_gets_fresh_grace(self):
         def read():
             if self.elapsed < 120:
@@ -675,6 +732,57 @@ class OrderResultWaitingTests(unittest.TestCase):
                 result = self.page.wait_result(intent(), known_id="E123456")
                 self.assertEqual(result.status, expected)
                 self.assertEqual(self.elapsed, 0)
+
+    def test_manual_recovery_waits_for_delayed_queue_and_then_binds_order(self):
+        def read():
+            if not self.page.driver.get.called:
+                return snapshot(orders=[], dialogs=["网络超时，请重试"])
+            if self.elapsed < 8:
+                return snapshot(orders=[])
+            if self.elapsed < 75:
+                return snapshot(orders=[], processing=True)
+            return snapshot() if self.elapsed >= 95 else snapshot(orders=[])
+        self.page.snapshot = read
+        result = self.page.reconcile(intent(), navigate=True)
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertEqual(self.elapsed, 95)
+        self.page.driver.get.assert_called_once_with("https://kyfw.12306.cn/otn/view/train_order.html")
+        self.page.driver.execute_script.assert_not_called()
+
+    def test_manual_recovery_on_queue_observes_without_navigation(self):
+        self.page.snapshot = lambda: snapshot() if self.elapsed >= 80 else snapshot(orders=[], processing=True)
+        result = self.page.reconcile(intent(), navigate=True)
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertEqual(self.elapsed, 80)
+        self.page.driver.get.assert_not_called()
+
+    def test_manual_recovery_queue_stop_keeps_ownership_without_more_navigation(self):
+        self.page.snapshot = lambda: snapshot(orders=[], processing=True)
+        self.page.stop = lambda: self.elapsed >= 2
+        result = self.page.reconcile(intent(), navigate=True)
+        self.assertEqual(result.status, "unknown")
+        self.assertFalse(result.no_order)
+        self.assertFalse(result.can_fallback)
+        self.assertEqual(self.elapsed, 2)
+        self.page.driver.get.assert_not_called()
+
+    def test_manual_recovery_queue_failure_is_handed_off_without_resubmission(self):
+        self.page.snapshot = lambda: snapshot(orders=[], processing=self.elapsed < 3,
+                                             queueFailed=self.elapsed >= 3)
+        result = self.page.reconcile(intent(), navigate=True)
+        self.assertEqual(result.status, "verification")
+        self.assertIn("排队失败", result.reason)
+        self.assertFalse(result.no_order)
+        self.assertEqual(self.elapsed, 3)
+        self.page.driver.get.assert_not_called()
+
+    def test_manual_recovery_unrecognized_page_still_has_bounded_wait(self):
+        self.page.snapshot = lambda: snapshot(orders=[])
+        result = self.page.reconcile(intent(), navigate=True)
+        self.assertEqual(result.status, "unknown")
+        self.assertFalse(result.no_order)
+        self.assertEqual(self.elapsed, 60)
+        self.page.driver.get.assert_called_once()
 
 
 class PassengerListWaitTests(unittest.TestCase):

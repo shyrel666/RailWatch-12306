@@ -8,5 +8,14 @@
   "min_watch_interval_seconds": 30,
   "max_watch_interval_seconds": 600,
   "people_ready_timeout_seconds": 10,
-  "people_stable_ms": 500
+  "people_stable_ms": 500,
+  "prefill_enabled": true,
+  "prefill_min_lead_seconds": 90,
+  "prefill_countdown_tolerance_seconds": 5,
+  "prefill_unlock_timeout_ms": 4000,
+  "prefill_unlock_abort_countdown_seconds": 3,
+  "prefill_presale_retry_delays_ms": [350, 1000],
+  "trip_check_enabled": true,
+  "trip_check_timeout_seconds": 10,
+  "trip_check_min_lead_seconds": 120
 }

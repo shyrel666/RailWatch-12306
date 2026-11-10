@@ -69,6 +69,12 @@ class TrainSchedules:
                 if previous is None or any(previous[field] != entry[field] for field in (*FIELDS, "seen_date")):
                     self._dirty = True
 
+    def routes(self, trains) -> list:
+        """Station pairs the given trains were last listed with."""
+        wanted = set(trains or [])
+        with self._lock:
+            return [(start, end) for (code, start, end) in self._items if code in wanted]
+
     def candidates(self, train: str, rows) -> list:
         """Other listed trains whose stations and times equal those last seen for ``train``."""
         with self._lock:

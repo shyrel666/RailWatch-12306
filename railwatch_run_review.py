@@ -9,6 +9,7 @@ LABELS = {"wake": "唤醒迟到", "first_query": "首次查询", "query": "查�
 ORDER_STEP_LABELS = {"page_load": "打开并等待下单页", "alternatives": "选择并核对候补组合",
                      "people_wait": "等待乘车人列表", "passengers": "选择乘车人",
                      "seats": "选择席别", "deadline": "选择候补截止时间", "readback": "提交前核对",
+                     "prefill_unlock": "等待预填购票按钮解锁", "prefill_submit": "点击预填购票入口",
                      "submit": "提交操作", "confirmation_wait": "等待确认弹窗",
                      "confirmation_action": "操作确认弹窗", "result_wait": "等待并核对订单结果"}
 
@@ -115,7 +116,7 @@ def duration(start, end):
 
 CONCLUSION_STAGES = ("order_result", "inventory_found", "no_inventory", "alternate_first_action",
                      "verification", "unknown", "sold_out", "not_submitted", "confirmed_failure",
-                     "regular_submit", "regular_confirm_dispatched", "alternate_submit", "submitting",
+                     "regular_submit", "regular_confirm_dispatched", "alternate_submit", "prefill_submit", "submitting",
                      "task_finished")
 
 
@@ -142,7 +143,7 @@ def run_conclusion(events):
             return "结果待核对"
         if status in ("sold_out", "not_submitted", "confirmed_failure"):
             return {"sold_out": "已确认售罄", "not_submitted": "未提交", "confirmed_failure": "提交未成功"}[status]
-        if stage in ("regular_submit", "regular_confirm_dispatched", "alternate_submit", "submitting"):
+        if stage in ("regular_submit", "regular_confirm_dispatched", "alternate_submit", "prefill_submit", "submitting"):
             return "结果待核对"
     finished = next((event for event in reversed(ordered) if event["stage"] == "task_finished"), None)
     if finished:
@@ -150,6 +151,50 @@ def run_conclusion(events):
                 "human_action": "需要人工处理", "verification": "需要核验",
                 "unknown": "结果待核对"}.get(finished["detail"].get("status"), "记录不完整")
     return "记录不完整"
+
+
+def sale_path(events, target_at):
+    """When each step of the order that got furthest happened, counted from the sale time.
+
+    Read from markers the transaction already writes; a missing step stays
+    None. "confirm_delivered" is when the browser click returned with its
+    delivery receipt: an upper bound for the end of the official queue request,
+    not proof of a place in the queue. Run lists pass only conclusion markers,
+    which lack the confirmation attempt and the fallback marker.
+    """
+    if type(target_at) not in (int, float) or not math.isfinite(target_at):
+        return None
+    ordered = sorted(events, key=lambda e: e["sequence"])
+    def pick(stage, items=ordered, last=False):
+        found = [e for e in items if e["stage"] == stage]
+        return (found[-1] if last else found[0]) if found else None
+    anchor = (pick("regular_confirm_dispatched") or pick("regular_confirm_attempt")
+              or pick("regular_submit", last=True) or pick("prefill_submit", last=True)
+              or pick("inventory_found", last=True))
+    if anchor is None:
+        return None
+    intent = anchor.get("intent_id")
+    own = [e for e in ordered if e.get("intent_id") == intent] if intent else ordered
+    def offset(event):
+        value = event.get("at") if event else None
+        return (round(max(0.0, value - target_at) * 1000, 3)
+                if type(value) in (int, float) and math.isfinite(value) else None)
+    prefill = pick("prefill_submit", own)
+    confirmed = pick("regular_confirm_dispatched", own)
+    official = next((e for e in own if e["stage"] == "order_result" and e["detail"].get("official")
+                     and (confirmed is None or e["sequence"] > confirmed["sequence"])), None)
+    # The first entry click of the run waited for the unlock; retries only recheck.
+    first_entry = pick("prefill_submit")
+    wait = (first_entry or {}).get("detail", {}).get("unlock_wait_ms")
+    return {"path": "prefill" if prefill else "regular",
+            "fallback": any(e["stage"] == "prefill_fallback" for e in ordered),
+            "entry_attempts": sum(e["stage"] == "prefill_submit" for e in ordered),
+            "unlock_wait_ms": wait if type(wait) in (int, float) and math.isfinite(wait) and wait >= 0 else None,
+            "entry_click_ms": offset(prefill or pick("inventory_found", own)),
+            "submit_ms": offset(pick("regular_submit", own)),
+            "confirm_click_ms": offset(pick("regular_confirm_attempt", own)),
+            "confirm_delivered_ms": offset(confirmed),
+            "official_result_ms": offset(official)}
 
 
 def build_run_review(events, report=None):
@@ -170,7 +215,7 @@ def build_run_review(events, report=None):
             pending = None
     hit_pair = next((pair for pair in reversed(pairs) if hit and pair[1]["sequence"] < hit["sequence"]), None)
     chosen = hit_pair or (pairs[0] if pairs else (None, None))
-    submit = first("regular_submit", hit)
+    submit = first("regular_submit", hit) or first("prefill_submit", hit)
     confirm = first("regular_confirm_dispatched", submit)
     official = first("pending_payment|order_result", confirm) if confirm else None
     alt = first("alternate_first_action", hit)
@@ -206,6 +251,7 @@ def build_run_review(events, report=None):
             "order_timings": order_timing_details(ordered),
             "query_timings": query_timing_summary(ordered),
             "first_valid_query": first_valid_query(ordered, target_at, wake),
+            "sale_path": sale_path(ordered, target_at),
             "preparation_margin_ms": margin, "query_median_ms": median(rounds) if rounds and first_known else None,
             "history_complete": all(s["duration_ms"] is not None for s in segments),
             "note": "未记录的阶段不推测补齐；可能未命中、未执行对应路径，或查询遥测已按 20,000 条上限清理。官方处理为本机观察时间。",

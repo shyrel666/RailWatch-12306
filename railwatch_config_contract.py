@@ -51,6 +51,7 @@ TRIP_FIELD_KEYS = (
     "date_scan_budget_seconds",
     "smart_rate",
     "timer_enabled",
+    "prefill_enabled",
     "target_time",
     "sale_at",
     "sale_time_source",
@@ -100,8 +101,9 @@ def default_config(
         "alternate_accept_new_trains": False,
         "alternate_new_train_windows": [],
         **{key: ORDER_POLICIES[key] for key in ("alternate_mode", "alternate_max_combinations",
-                                               "order_watch_enabled", "order_watch_interval_seconds")},
-        "date_range": "±1天",
+                                               "order_watch_enabled", "order_watch_interval_seconds",
+                                               "prefill_enabled")},
+        "date_range": "单日",
         "date_strategy": DATE_STRATEGIES["default"],
         "date_scan_budget_seconds": DATE_STRATEGIES["scan_budget_seconds"],
         "smart_rate": True,
@@ -196,7 +198,7 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     if trip["sale_at"]:
         from railwatch_time import resolve_sale_timestamp
         resolve_sale_timestamp(trip)
-    trip["date_range"] = str(trip.get("date_range", "±1天")).strip() or "±1天"
+    trip["date_range"] = str(trip.get("date_range", "单日")).strip() or "单日"
     trip["date_strategy"] = str(trip.get("date_strategy", DATE_STRATEGIES["default"]))
     if trip["date_strategy"] not in DATE_STRATEGIES["strategies"]:
         raise ValueError("不支持的多日期策略")
@@ -239,6 +241,7 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     trip["keep_alive"] = _to_bool(trip.get("keep_alive"))
     trip["smart_rate"] = _to_bool(trip.get("smart_rate"))
     trip["timer_enabled"] = _to_bool(trip.get("timer_enabled"))
+    trip["prefill_enabled"] = _to_bool(trip.get("prefill_enabled", ORDER_POLICIES["prefill_enabled"]))
     normalize_strategy(trip, raw_trip)
     return trip
 

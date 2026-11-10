@@ -89,7 +89,7 @@ export const defaultConfig: RailWatchConfig = {
   alternate_deadline: "开车前1小时",
   alternate_accept_new_trains: false,
   alternate_new_train_windows: [],
-  date_range: "±1天",
+  date_range: "单日",
   smart_rate: true,
   timer_enabled: false,
   target_time: "00:00:00",
@@ -295,15 +295,17 @@ export function createRailWatchStore() {
       if (incoming && get().retiredRuns.includes(incoming)) return;
       if (incoming && incoming === current && (status.task?.sequence ?? 0) < (get().status.task?.sequence ?? 0)) return;
       const changed = Boolean(incoming && incoming !== current);
+      const samePrefill = Boolean(status.prefill?.run_id && status.prefill.run_id === get().status.prefill?.run_id);
       const orderResolved = Boolean(status.order?.order_id && !status.order.recovery_required &&
         ["pending_payment", "active", "fulfilled"].includes(status.order.status));
       set({ status, hits: status.hits,
         ...(!status.monitoring && !get().manualQueryPending ? { activeQuery: null } : {}),
         ...(orderResolved ? { lastHumanAction: null } : {}),
-        ...(changed ? { monitorLoops: 0, results: [], queryViews: {}, activeQuery: null, queryConfig: { ...get().config, ...status.current_config },
+        ...(changed && !samePrefill ? { monitorLoops: 0, results: [], queryViews: {}, activeQuery: null, queryConfig: { ...get().config, ...status.current_config },
           queryRenumber: null, manualQueryId: null, manualQueryPending: false, manualQueryError: null, lastHumanAction: null,
+        } : {}),
+        ...(changed ? { dismissedHumanActionKey: null, activeQuery: null,
           retiredRuns: current ? [...get().retiredRuns, current].slice(-1000) : get().retiredRuns } : {}),
-        ...(changed ? { dismissedHumanActionKey: null } : {}),
         ...(status.human_action && (changed || humanActionKey(status.human_action) !== get().dismissedHumanActionKey)
           ? { lastHumanAction: status.human_action } : {}),
       });

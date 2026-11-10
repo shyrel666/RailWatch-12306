@@ -16,6 +16,8 @@ class RailWatchConfigContractTests(unittest.TestCase):
         self.assertEqual(config["automation_route"], AUTOMATION_ROUTE)
         self.assertEqual(len(config["query_jobs"]), 1)
         self.assertEqual(config["query_jobs"][0]["from_station_cn"], "北京")
+        self.assertEqual(config["date_range"], "单日")
+        self.assertEqual(config["query_jobs"][0]["date_range"], "单日")
 
     def test_validate_config_normalizes_primary_and_jobs(self):
         config = validate_config(
@@ -32,6 +34,9 @@ class RailWatchConfigContractTests(unittest.TestCase):
         self.assertEqual(config["interval"], 6.0)
         self.assertEqual(config["burst_window_seconds"], 60.0)
         self.assertEqual(config["query_jobs"][0]["train_code"], "G101")
+        self.assertEqual(config["date_range"], "单日")
+        self.assertEqual(validate_config({"date_range": ""})["date_range"], "单日")
+        self.assertEqual(validate_config({"date_range": "±2天"})["date_range"], "±2天")
 
     def test_validate_config_prefers_renderer_trip_fields_over_stale_query_jobs(self):
         config = validate_config(

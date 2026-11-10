@@ -20,6 +20,7 @@ import {
 import type { TicketHit, TripChoices } from "../types";
 import type { CommandRunner } from "./componentTypes";
 import { QueryResults } from "./QueryResults";
+import { prefillStageLabel } from "./PrefillProgress";
 import { missingTargetsNotice, queryTargets, replaceTrainCode, selectableQueryTrains } from "../lib/queryResults";
 import { RenumberSuggestions } from "./RenumberSuggestions";
 import { countdown as saleCountdown } from "../lib/saleCalendar";
@@ -119,6 +120,8 @@ export function MonitorPage({
   const autoAlternateEnabled = config.auto_alternate;
 
   const order = status.order;
+  const prefill = status.prefill;
+  const prefillDirect = Boolean(prefill && !prefill.fallback);
   const unresolvedOrder = hasUnresolvedOrder(order);
   const seatCapabilities = useRailWatchStore(state => state.runtime.seat_capabilities);
   const automationIssue = automationConfigIssue(draftConfig, seatCapabilities);
@@ -185,12 +188,13 @@ export function MonitorPage({
   const saleAt = config.timer_enabled && config.sale_at ? Date.parse(config.sale_at) : NaN;
   const display =
     waitingForSale && Number.isFinite(saleAt) && saleAt > now
-      ? { caption: "距定时开售", value: saleCountdown(saleAt, now), note: "到点后自动开始查询", tone: "led" as const }
+      ? { caption: "距定时开售", value: saleCountdown(saleAt, now), note: prefillDirect ? "预填已就绪，到点后直接购票" : "到点后自动开始查询", tone: "led" as const }
       : status.monitoring
         ? {
             caption: "已运行",
             value: elapsed,
-            note: status.task?.status === "querying" ? "正在查询" : `已查询 ${monitorLoops} 次`,
+            note: prefillDirect ? `官方预填 · 已确认提交 ${prefill!.submissions} 次`
+              : status.task?.status === "querying" ? "正在查询" : `已查询 ${monitorLoops} 次`,
             tone: "go" as const,
           }
         : { caption: "运行时间", value: "00:00:00", note: "监控未运行", tone: "dim" as const };
@@ -378,29 +382,33 @@ export function MonitorPage({
       {rehearsalEnabled ? <RehearsalPanel busy={busy} runCommand={runCommand} /> : null}
       <section className="st-metrics-strip" aria-label="运行指标">
         <div className="st-metric">
-          <em>查询次数</em>
+          <em>{prefill ? "余票查询次数" : "查询次数"}</em>
           <strong className="st-mono">{monitorLoops}</strong>
+          {prefillDirect && monitorLoops === 0 ? <small>预填直达，无需轮询余票</small> : null}
         </div>
         <div className="st-metric">
-          <em>命中记录</em>
+          <em>{prefill ? "预填提交次数" : "命中记录"}</em>
           <strong
-            className={`st-mono ${hits.length > 0 ? "st-accent-green" : ""}`}
+            className={`st-mono ${(prefill ? prefill.submissions : hits.length) > 0 ? "st-accent-green" : ""}`}
           >
-            {hits.length}
+            {prefill ? prefill.submissions : hits.length}
           </strong>
         </div>
         <div className="st-metric">
-          <em>下次刷新</em>
+          <em>{prefillDirect ? (waitingForSale ? "起售倒计时" : "订单状态") : "下次刷新"}</em>
           <strong className="st-mono">
-            {status.monitoring ? countdown : "—"}
+            {prefillDirect && !waitingForSale
+              ? (status.task?.status === "reconciling" ? "核对中" : order?.status === "pending_payment" ? "待支付"
+                : order?.status === "submitting" ? "等待结果" : taskLabels[order?.status || ""] || "已就绪")
+              : status.monitoring ? countdown : "—"}
           </strong>
           <span className="st-progress" aria-hidden="true">
             <i style={{ width: `${refreshProgress * 100}%` }} />
           </span>
         </div>
         <div className="st-metric">
-          <em>刷新间隔</em>
-          <strong className="st-mono">{config.interval}s</strong>
+          <em>{prefillDirect ? "执行方式" : "刷新间隔"}</em>
+          <strong className="st-mono">{prefillDirect ? "预填直达" : `${config.interval}s`}</strong>
         </div>
       </section>
 
@@ -412,7 +420,7 @@ export function MonitorPage({
       {selectionError ? <p role="alert">{selectionError}</p> : null}
       <div className="st-body">
         {/* Left: Results */}
-        <QueryResults views={queryViews} rows={results} config={queryConfig ?? config} editableRoute={draftConfig}
+        <QueryResults views={queryViews} rows={results} prefill={prefill} config={queryConfig ?? config} editableRoute={draftConfig}
           onSelectTrains={trains => {
             const state = railwatchStore.getState();
             if (!state.tripInitialized) {
@@ -438,13 +446,21 @@ export function MonitorPage({
             <div className="st-panel-head">
               <h3>
                 <BellRing size={15} />
-                命中记录
+                {prefill ? "预填记录" : "命中记录"}
               </h3>
               {hits.length > 0 ? (
                 <span className="st-hit-badge">{hits.length}</span>
               ) : null}
             </div>
-            {hits.length === 0 ? (
+            {prefill ? <div className="st-hit-list">
+              {prefill.candidates.filter(item => item.status !== "armed").map((item, index) => <div className="hit-card" key={`${item.train}-${item.seat}-${index}`}>
+                <div className="hit-card-body"><strong>{item.train} · {item.seat}</strong><span>{prefillStageLabel(item)}</span></div>
+                <span className="hit-card-source">官方预填</span>
+              </div>)}
+              {prefill.candidates.every(item => item.status === "armed") ? <p className="query-context">{prefill.fallback ? "已转常规余票查询" : "预填已就绪，等待起售"}</p> : null}
+              {hits.length > 0 ? <p className="query-context">常规余票命中</p> : null}
+              {hits.map((hit, index) => <HitCard key={`${hit.train_code}-${hit.seat_type}-${index}`} hit={hit} />)}
+            </div> : hits.length === 0 ? (
               <div className="st-empty-hits">
                 <Bell size={24} />
                 <span>暂无命中</span>

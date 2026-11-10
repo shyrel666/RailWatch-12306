@@ -184,22 +184,35 @@ def probe_date(target, today, last_released):
     return max(today, min(target, last))
 
 
-def check_clock(offset, uncertainty, error=""):
+def check_clock(offset, uncertainty, error="", *, timezone_offset_minutes=None, prefill_intended=False):
+    tz_mismatch = prefill_intended and timezone_offset_minutes is not None and timezone_offset_minutes != 480
+    tz_note = ("当前系统/浏览器时区非北京时间（UTC+8），官方购票信息预填倒计时会失准；"
+               "运行时将自动回退常规余票查询，建议切换系统时区为 UTC+8。")
     if (error or any(type(value) not in (int, float) or not math.isfinite(value)
                      for value in (offset, uncertainty)) or uncertainty < 0):
+        if tz_mismatch:
+            return result("warn", "HTTP 时间辅助检查不可用，且浏览器时区非 UTC+8", details=[tz_note])
         return result("unknown", "HTTP 时间辅助检查不可用；定时仍使用系统时钟")
     details = [f"HTTP 辅助估计偏差 {offset:+.2f}s，不确定度至少 ±{uncertainty:.2f}s。",
                "此测量不是精密授时，不用于提前查询或自动调整电脑时间；请在启动定时任务前完成系统对时。"]
+    if tz_mismatch:
+        details.append(tz_note)
     if uncertainty > 1:
-        return result("unknown", "时间测量误差过大，无法判断电脑时钟是否准确；定时仍使用系统时钟", details=details)
+        return result("warn" if tz_mismatch else "unknown",
+                      "时间测量误差过大，且浏览器时区非 UTC+8" if tz_mismatch else "时间测量误差过大，无法判断电脑时钟是否准确；定时仍使用系统时钟",
+                      details=details)
     lower, upper = max(0, abs(offset) - uncertainty), abs(offset) + uncertainty
     if upper <= 1:
+        if tz_mismatch:
+            return result("warn", "时钟偏差正常，但时区非北京时间（UTC+8），预填将回退常规查询", details=details)
         return result("pass", "辅助检查未发现明显时钟偏差；不代表毫秒级准确", details=details)
     if lower > 3:
         return result("fail", "辅助检查提示较大时钟偏差，请先核对系统自动对时", details=details)
     if lower > 1:
         return result("warn", "辅助检查提示时钟可能有偏差，请核对系统自动对时", details=details)
-    return result("unknown", "时间测量范围跨越判断阈值，无法确认时钟准确性", details=details)
+    return result("warn" if tz_mismatch else "unknown",
+                  "时区非北京时间（UTC+8），且时间测量范围跨越判断阈值" if tz_mismatch else "时间测量范围跨越判断阈值，无法确认时钟准确性",
+                  details=details)
 
 
 def check_scheduler(sample):
@@ -286,8 +299,19 @@ def make_checks(bridge, config):
             offset = diagnostic.sync(force=True)
             return offset, diagnostic.uncertainty_seconds, diagnostic.last_error
         offset, uncertainty, error = await_diagnostic(background(sync), cancel)
+        tz_minutes = None
+        if bridge.driver:
+            try:
+                raw_tz = bridge.driver.execute_script("return new Date().getTimezoneOffset();")
+                if type(raw_tz) in (int, float) and math.isfinite(raw_tz):
+                    tz_minutes = -int(raw_tz)
+                    report["measurements"]["timezone_offset_minutes"] = tz_minutes
+            except Exception:
+                pass
         report["measurements"].update(clock_offset_s=offset, clock_uncertainty_s=uncertainty)
-        return check_clock(offset, uncertainty, error)
+        return check_clock(offset, uncertainty, error, timezone_offset_minutes=tz_minutes,
+                           prefill_intended=bool(config.get("timer_enabled") and config.get("auto_submit")
+                                                 and config.get("prefill_enabled", True)))
     def scheduler(report, cancel, sample):
         report["measurements"]["scheduler_late_ms"] = sample
         return check_scheduler(sample)
