@@ -192,7 +192,7 @@ function Stop-Process {
 
     def test_reset_directory_preserves_locked_electron_subdir_and_clears_siblings(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / APP_SLUG
+            data_dir = Path(tmp, APP_SLUG).resolve()
             electron_dir = data_dir / "electron"
             profile_dir = data_dir / "chrome_profile"
             electron_dir.mkdir(parents=True)
@@ -216,7 +216,7 @@ function Stop-Process {
 
     def test_reset_directory_rolls_back_siblings_without_removing_electron(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / APP_SLUG
+            data_dir = Path(tmp, APP_SLUG).resolve()
             electron_dir = data_dir / "electron"
             electron_dir.mkdir(parents=True)
             (electron_dir / "Cookies").write_text("keep-electron", encoding="utf-8")
@@ -238,7 +238,7 @@ function Stop-Process {
         if sys.platform != "win32":
             return
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / APP_SLUG
+            data_dir = Path(tmp, APP_SLUG).resolve()
             electron_dir = data_dir / "electron"
             profile_dir = data_dir / "chrome_profile"
             electron_dir.mkdir(parents=True)
