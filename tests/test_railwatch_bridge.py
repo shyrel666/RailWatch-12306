@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1629,13 +1630,20 @@ class DriverLaunchRecoveryTests(unittest.TestCase):
             issued.append((command, kwargs))
             return Result()
 
-        with patch("railwatch_bridge.subprocess.run", fake_run):
+        profile = os.path.join(bridge.data_dir, "chrome_profile_12306")
+        with patch("railwatch_bridge.subprocess.run", fake_run), patch("railwatch_bridge.sys.platform", "win32"):
             killed = bridge._terminate_profile_chrome()
         self.assertEqual(killed, 2)
         command, options = issued[-1]
-        self.assertEqual(options["env"]["RAILWATCH_CLEANUP_PROFILE"],
-                         os.path.join(bridge.data_dir, "chrome_profile_12306"))
+        self.assertEqual(options["env"]["RAILWATCH_CLEANUP_PROFILE"], profile)
         self.assertNotIn(bridge.data_dir, command[-1])
+
+        # macOS has no count to read back: pkill matches the whole argument and reports success.
+        with patch("railwatch_bridge.subprocess.run", fake_run), patch("railwatch_bridge.sys.platform", "darwin"):
+            killed = bridge._terminate_profile_chrome()
+        self.assertEqual(killed, 1)
+        command, _options = issued[-1]
+        self.assertEqual(command, ["pkill", "-f", "(^|[[:space:]])--user-data-dir=" + re.escape(profile) + "([[:space:]]|$)"])
 
     @unittest.skipUnless(os.name == "nt", "Windows command-line matching")
     def test_cleanup_matches_exact_profile_argument_without_evaluating_path(self):
