@@ -528,7 +528,8 @@ class ChromeDriverManagerTests(unittest.TestCase):
                 plistlib.dump({"CFBundleShortVersionString": "137.0.7151.119"}, handle)
 
             orig_isfile = os.path.isfile
-            with patch("chromedriver_manager.os.path.isfile", side_effect=lambda p: p == binary or orig_isfile(p)), \
+            # Only the temporary bundle exists for this test; a Chrome installed on the machine must not answer.
+            with patch("chromedriver_manager.os.path.isfile", side_effect=lambda p: p.startswith(tmp_dir) and orig_isfile(p)), \
                 patch.object(subprocess, "run", side_effect=AssertionError("subprocess.run must not be called")), \
                 patch.object(cm, "_detect_chrome_macos", wraps=cm._detect_chrome_macos):
                 orig_expanduser = os.path.expanduser
