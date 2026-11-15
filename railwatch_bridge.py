@@ -56,11 +56,17 @@ from railwatch_preferences import (
 from railwatch_trip_choices import load_trip_choices, remember_route, save_train_favorites
 from railwatch_train_schedules import TrainSchedules
 from railwatch_sale_reminders import SaleReminders
-from railwatch_policies import IDLE_POLICIES
+from railwatch_policies import IDLE_POLICIES, QUERY_STRATEGIES
 from railwatch_seats import public_seat_capabilities, validate_automation_seats
 from railwatch_dates import expand_travel_dates, eligible_travel_dates, beijing_now, PRESALE_WINDOW_DAYS
 from railwatch_state import APP_DISPLAY_NAME, APP_PAGES, APP_SLUG, AppPhase, RailWatchState, TicketHit
-from railwatch_system import get_app_version, inspect_data_dir, probe_connectivity
+from railwatch_system import (
+    get_app_version,
+    inspect_data_dir,
+    pending_connectivity_snapshot,
+    probe_connectivity,
+    proxy_status_snapshot,
+)
 from railwatch_time import ServerTimeSync, get_server_time_sync, resolve_sale_timestamp
 from railwatch_orders import OrderJournal, OrderIntent, OrderResult, STAGES
 from railwatch_order_page import OrderPage
@@ -70,6 +76,7 @@ from railwatch_cleanup import checked_data_path, release_orphan_browsers, reset_
 
 try:
     from chromedriver_manager import (
+        CHROME_DOWNLOAD_URL,
         detect_chrome_version,
         detect_chromedriver_version,
         download_and_install_chromedriver,
@@ -78,6 +85,7 @@ try:
 
     CD_MANAGER_AVAILABLE = True
 except ImportError:
+    CHROME_DOWNLOAD_URL = "https://www.google.cn/chrome/"
     detect_chrome_version = None
     detect_chromedriver_version = None
     download_and_install_chromedriver = None
@@ -100,14 +108,9 @@ except ImportError as exc:
     SELENIUM_IMPORT_ERROR = exc
 
 try:
-    from anti_detect import AntiDetect, BehaviorSimulator, RailDeviceIdProtector
-
-    ANTI_DETECT_AVAILABLE = True
+    from anti_detect import RailDeviceIdProtector
 except ImportError:
-    AntiDetect = None
-    BehaviorSimulator = None
     RailDeviceIdProtector = None
-    ANTI_DETECT_AVAILABLE = False
 
 try:
     from gui_12306_0 import ConfigManager, PageAnalyzer, QueryConfig, TicketMonitor, StationCodeResolver
@@ -127,6 +130,10 @@ except ImportError as exc:
 LOGIN_URL = "https://kyfw.12306.cn/otn/resources/login.html"
 QUERY_URL = "https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc"
 MAX_LOG_ENTRIES = 1000
+CHROMEDRIVER_MIRROR_HINT = (
+    "https://registry.npmmirror.com/binary.html?path=chrome-for-testing/ "
+    "(或官方源 https://googlechromelabs.github.io/chrome-for-testing/)"
+)
 # Local observation budget, not an official payment deadline.
 ORDER_OBSERVATION_SECONDS = 600
 MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
@@ -135,9 +142,14 @@ SCHEDULE_FLUSH_SECONDS = 300.0
 MONITOR_PREWARM_INTERVAL_SECONDS = 30.0
 NOTIFICATION_SETTINGS_FILE = "notification_settings.json"
 VERIFICATION_PUSH_HINT = "需要回到电脑上的受控浏览器完成。"
+# Script timeout of one keep-alive login probe; the pre-sale recheck budgets for it.
+LOGIN_PROBE_TIMEOUT_SECONDS = 3
 KEYCHAIN_PENDING_HINT = "外部通知凭据尚未授权，命中时无法发送外部提醒；请在系统钥匙串授权弹窗中选择“始终允许”。"
 KEYCHAIN_BUSY_MESSAGE = "macOS 钥匙串授权尚未完成，请先处理系统授权弹窗后重试。"
 CHROMEDRIVER_NAME = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
+# Stay clearly under App.tsx's 180s runtime polling interval so consecutive polls do not hit nearly-unexpired cache.
+CONNECTIVITY_CACHE_TTL_SECONDS = 150.0
+CHROME_VERSION_CACHE_TTL_SECONDS = 300.0
 
 
 def order_push_summary(intent) -> str:
@@ -233,6 +245,7 @@ def state_to_payload(state: RailWatchState) -> dict:
         "order": dict(state.order),
         "human_action": dict(state.human_action) or None,
         "prefill": dict(state.prefill) or None,
+        "prefill_notice": state.prefill_notice or None,
     }
 
 
@@ -276,7 +289,6 @@ class RailWatchBridge:
         self.event_callback = event_callback or (lambda event: None)
         self.state = RailWatchState.initial()
         self.driver = None
-        self.behavior_simulator = None
         self.device_id_protector = None
         self._task = None
         self._task_lock = threading.RLock()
@@ -304,6 +316,11 @@ class RailWatchBridge:
         self.config_manager = ConfigManager(self.data_dir) if CORE_AVAILABLE and ConfigManager else None
         self.chromedriver_path = CHROMEDRIVER_PATH
         self._chromedriver_repair_failed = False
+        self._runtime_cache_lock = threading.Lock()
+        self._chrome_version_cache: Optional[tuple[float, str]] = None
+        self._connectivity_cache: Optional[tuple[float, dict]] = None
+        self._connectivity_probe_token: Optional[object] = None
+        self._connectivity_probe_generation = 0
         self.server_time_sync: ServerTimeSync = get_server_time_sync(log_callback=self.log)
         self.notification_service = NotificationService(self._load_notification_settings(), log_callback=self.log)
         self.order_journal = OrderJournal(os.path.join(data_dir, "orders.sqlite3"))
@@ -356,6 +373,7 @@ class RailWatchBridge:
             if purpose == "install" and (activity["state"] != "idle" or activity["unresolved_order"]):
                 return {"ready": False, "reason": "有活动任务或未完成订单，更新已推迟。", "activity": activity}
             self._admission_closed = True
+            self._invalidate_runtime_caches(connectivity=True)
             if self._rehearsal_cancel is not None:
                 self._rehearsal_cancel.set()
             task = self._task if self.is_monitoring else None
@@ -504,10 +522,93 @@ class RailWatchBridge:
             self.emit("log", entry)
         return entry
 
-    def get_runtime_info(self) -> dict:
+    def _invalidate_runtime_caches(self, *, chrome: bool = False, connectivity: bool = False) -> None:
+        with self._runtime_cache_lock:
+            if chrome:
+                self._chrome_version_cache = None
+            if connectivity:
+                self._connectivity_cache = None
+                self._connectivity_probe_generation += 1
+                self._connectivity_probe_token = None
+
+    def _resolve_chrome_version_info(self, *, force: bool = False) -> str:
+        now = time.monotonic()
+        with self._runtime_cache_lock:
+            cached = self._chrome_version_cache
+            if not force and cached is not None and (now - cached[0]) < CHROME_VERSION_CACHE_TTL_SECONDS:
+                return cached[1]
         chrome_version = get_chrome_version_info() if CD_MANAGER_AVAILABLE and get_chrome_version_info else "未知"
+        with self._runtime_cache_lock:
+            self._chrome_version_cache = (time.monotonic(), chrome_version)
+        return chrome_version
+
+    def _emit_connectivity_labels(self, connectivity: dict) -> None:
+        self.emit(
+            "labels",
+            {
+                "network_ok": bool(connectivity["network_ok"]),
+                "network_label": str(connectivity["network_label"]),
+                "railway_ok": bool(connectivity["railway_ok"]),
+                "railway_label": str(connectivity["railway_label"]),
+                "proxy_configured": bool(connectivity["proxy_configured"]),
+                "proxy_label": str(connectivity["proxy_label"]),
+                "proxy_value": str(connectivity.get("proxy_value", "")),
+                "connectivity_pending": False,
+            },
+        )
+
+    def _start_connectivity_probe(self) -> None:
+        with self._runtime_cache_lock:
+            if self._connectivity_probe_token is not None or self._admission_closed:
+                return
+            token = object()
+            self._connectivity_probe_token = token
+            gen = self._connectivity_probe_generation
+
+        def worker() -> None:
+            try:
+                result = dict(probe_connectivity())
+                with self._runtime_cache_lock:
+                    if gen != self._connectivity_probe_generation or self._admission_closed:
+                        return
+                    self._connectivity_cache = (time.monotonic(), result)
+                    merged = {**result, **proxy_status_snapshot()}
+                self._emit_connectivity_labels(merged)
+            except Exception:
+                pass
+            finally:
+                with self._runtime_cache_lock:
+                    if self._connectivity_probe_token is token:
+                        self._connectivity_probe_token = None
+
+        threading.Thread(target=worker, name="railwatch-connectivity-probe", daemon=True).start()
+
+    def _get_connectivity_snapshot(self, *, probe: bool = True, force: bool = False) -> dict:
+        proxy_snapshot = proxy_status_snapshot()
+        now = time.monotonic()
+        with self._runtime_cache_lock:
+            cached = self._connectivity_cache
+            gen = self._connectivity_probe_generation
+            if not force and cached is not None and (now - cached[0]) < CONNECTIVITY_CACHE_TTL_SECONDS:
+                return {**cached[1], **proxy_snapshot}
+        if probe:
+            result = dict(probe_connectivity())
+            with self._runtime_cache_lock:
+                if gen == self._connectivity_probe_generation and not self._admission_closed:
+                    self._connectivity_cache = (time.monotonic(), result)
+            return {**result, **proxy_snapshot}
+        self._start_connectivity_probe()
+        # Re-read cache in case a fast background probe finished immediately.
+        with self._runtime_cache_lock:
+            latest = self._connectivity_cache
+        if latest is not None:
+            return {**latest[1], **proxy_snapshot}
+        return pending_connectivity_snapshot()
+
+    def get_runtime_info(self, *, probe: bool = True, force: bool = False) -> dict:
+        chrome_version = self._resolve_chrome_version_info(force=force)
         data_dir_status = inspect_data_dir(self.data_dir)
-        connectivity = probe_connectivity()
+        connectivity = self._get_connectivity_snapshot(probe=probe, force=force)
         return {
             "app_display_name": APP_DISPLAY_NAME,
             "app_version": get_app_version(),
@@ -529,6 +630,7 @@ class RailWatchBridge:
             "proxy_configured": connectivity["proxy_configured"],
             "proxy_label": connectivity["proxy_label"],
             "proxy_value": str(connectivity.get("proxy_value", "")),
+            "connectivity_pending": bool(connectivity.get("connectivity_pending", False)),
             "automation_route": AUTOMATION_ROUTE,
             "server_time_offset_seconds": round(self.server_time_sync.offset_seconds, 3),
             "server_time_last_error": self.server_time_sync.last_error,
@@ -846,7 +948,23 @@ class RailWatchBridge:
         self.order_journal.mark("", "alternate_options", detail=cached)
         return {"snapshot": cached, "warning": None}
 
-    def _ensure_matching_chromedriver(self, force: bool = False) -> None:
+    def _environment_progress_reporter(self, operation: str):
+        """Keep download snapshots scoped to this command, including its total elapsed time."""
+        started_at = time.time()
+
+        def report(payload: dict) -> None:
+            self.emit("environmentProgress", {
+                **payload,
+                "operation": operation,
+                "status": payload.get("status", "running"),
+                "started_at": started_at,
+                "updated_at": time.time(),
+            })
+
+        return report
+
+    def _ensure_matching_chromedriver(self, force: bool = False,
+                                      progress_callback: Optional[Callable[[dict], None]] = None) -> None:
         """Chrome 会自动升级，本地 ChromeDriver 可能落后于已安装 Chrome；发现大版本不匹配时自动补齐。
 
         force=True 供「检查环境」显式触发，即使上一次自动修复失败也重试；
@@ -876,10 +994,12 @@ class RailWatchBridge:
         else:
             self.log(f"未找到可用的 ChromeDriver，正在自动下载 Chrome {chrome_major} 对应版本...", "WARN")
         try:
+            progress_options = {"progress_callback": progress_callback} if progress_callback else {}
             dest_path = download_and_install_chromedriver(
                 target_dir=self.data_dir,
                 major_version=chrome_major,
                 log_callback=self.log,
+                **progress_options,
             )
         except Exception as exc:
             self._chromedriver_repair_failed = True
@@ -887,6 +1007,7 @@ class RailWatchBridge:
             return
         self.chromedriver_path = dest_path
         self._chromedriver_repair_failed = False
+        self._invalidate_runtime_caches(chrome=True)
         self.emit("labels", {"chromedriver_path": dest_path, "chrome_version": f"Chrome {chrome_major}"})
         self.log("ChromeDriver 已自动更新到匹配版本。", "SUCCESS")
 
@@ -894,6 +1015,17 @@ class RailWatchBridge:
     def check_environment(self) -> dict:
         if self.is_monitoring:
             raise RuntimeError("监控运行中，请先停止监控后再检查环境。")
+        report = self._environment_progress_reporter("checkEnvironment")
+        report({"stage": "checking", "message": "正在检查运行组件与本机 Chrome 版本…"})
+
+        def download_progress(payload: dict) -> None:
+            # Completing the download does not mean the browser check has passed.
+            if payload.get("stage") == "complete":
+                report({"stage": "verifying", "message": "驱动已安装，正在验证浏览器能否正常启动…"})
+            else:
+                report(payload)
+
+        self._invalidate_runtime_caches(chrome=True, connectivity=True)
         try:
             self.log("正在检查 Python、Selenium 和 ChromeDriver...")
             if not SELENIUM_AVAILABLE:
@@ -902,13 +1034,13 @@ class RailWatchBridge:
             self.log(f"Python {sys.version.split()[0]}")
             self.log(f"平台 {sys.platform}")
 
-            self._ensure_matching_chromedriver(force=True)
+            self._ensure_matching_chromedriver(force=True, progress_callback=download_progress)
 
             chrome_ver = detect_chrome_version() if CD_MANAGER_AVAILABLE and detect_chrome_version else None
             if chrome_ver:
                 self.log(f"Chrome 版本: {chrome_ver}")
             else:
-                self.log("未检测到 Chrome 浏览器。", "WARN")
+                self.log(f"未检测到 Chrome 浏览器。请先安装 Chrome: {CHROME_DOWNLOAD_URL}", "WARN")
 
             if os.path.exists(self.chromedriver_path):
                 self.log(f"ChromeDriver 已找到: {self.chromedriver_path}", "SUCCESS")
@@ -917,20 +1049,23 @@ class RailWatchBridge:
                 if chrome_ver and CD_MANAGER_AVAILABLE:
                     self.log(f"提示: 点击「下载 ChromeDriver」自动获取 Chrome {chrome_ver} 对应版本。", "INFO")
                 else:
-                    self.log("提示: 请手动下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing/", "INFO")
+                    self.log(f"提示: 请手动下载 ChromeDriver: {CHROMEDRIVER_MIRROR_HINT}", "INFO")
 
+            report({"stage": "verifying", "message": "正在验证 Chrome 启动与驱动连接…"})
             with self._driver_lock:
                 if self.driver and not driver_session_alive(self.driver):
                     self.log("受控浏览器已关闭，将重新启动 Chrome 进行环境检查。", "WARN")
                     self._release_driver()
                 if self.driver:
                     self.driver.execute_script("return document.readyState")
-                    return self.emit_state(self.state.with_environment(True, "环境就绪"))
-                driver = self._ensure_driver(test_only=True)
-                driver.quit()
-                if self.driver is driver:
-                    self.driver = None
-            return self.emit_state(self.state.with_environment(True, "环境就绪"))
+                else:
+                    driver = self._ensure_driver(test_only=True)
+                    driver.quit()
+                    if self.driver is driver:
+                        self.driver = None
+            result = self.emit_state(self.state.with_environment(True, "环境就绪"))
+            report({"stage": "complete", "status": "success", "message": "环境检查完成，运行环境已就绪。"})
+            return result
         except Exception as exc:
             error_msg = str(exc)
             lowered = error_msg.lower()
@@ -938,32 +1073,44 @@ class RailWatchBridge:
                 if CD_MANAGER_AVAILABLE:
                     error_msg += "\n\n可能是 ChromeDriver 版本与 Chrome 不匹配，点击「下载 ChromeDriver」自动获取正确版本。"
                 else:
-                    error_msg += "\n\n请下载与 Chrome 版本匹配的 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing/"
+                    error_msg += f"\n\n请下载与 Chrome 版本匹配的 ChromeDriver: {CHROMEDRIVER_MIRROR_HINT}"
             message = f"环境检查失败: {error_msg}"
             self.log(message, "ERROR")
+            report({"stage": "error", "status": "error", "message": message})
             return self.emit_state(self.state.with_error(message))
+        finally:
+            self._start_connectivity_probe()
 
     @idle_browser_command
     def download_chromedriver(self) -> dict:
-        if not CD_MANAGER_AVAILABLE or not detect_chrome_version or not download_and_install_chromedriver:
-            raise RuntimeError(
-                "chromedriver_manager 模块不可用。请手动下载 ChromeDriver：https://googlechromelabs.github.io/chrome-for-testing/"
+        report = self._environment_progress_reporter("downloadChromeDriver")
+        report({"stage": "checking", "message": "正在检测 Chrome 版本，准备下载匹配的驱动…"})
+        try:
+            if not CD_MANAGER_AVAILABLE or not detect_chrome_version or not download_and_install_chromedriver:
+                raise RuntimeError(
+                    f"chromedriver_manager 模块不可用。请手动下载 ChromeDriver：{CHROMEDRIVER_MIRROR_HINT}"
+                )
+            chrome_ver = detect_chrome_version()
+            if not chrome_ver:
+                self.log("未检测到 Chrome 浏览器，无法自动匹配版本。", "WARN")
+                self.log(f"请先安装 Chrome: {CHROME_DOWNLOAD_URL}", "WARN")
+                report({"stage": "error", "status": "error", "message": "未检测到 Chrome 浏览器，请先安装 Chrome 后重试。"})
+                return {"chromedriver_path": self.chromedriver_path, "chrome_version": ""}
+            dest_path = download_and_install_chromedriver(
+                target_dir=self.data_dir,
+                major_version=chrome_ver,
+                log_callback=self.log,
+                progress_callback=report,
             )
-        chrome_ver = detect_chrome_version()
-        if not chrome_ver:
-            self.log("未检测到 Chrome 浏览器，无法自动匹配版本。", "WARN")
-            self.log("请先安装 Chrome: https://www.google.com/chrome/", "WARN")
-            return {"chromedriver_path": self.chromedriver_path, "chrome_version": ""}
-        dest_dir = self.data_dir
-        dest_path = download_and_install_chromedriver(
-            target_dir=dest_dir,
-            major_version=chrome_ver,
-            log_callback=self.log,
-        )
-        self.chromedriver_path = dest_path
-        self.emit("labels", {"chromedriver_path": dest_path, "chrome_version": f"Chrome {chrome_ver}"})
-        self.log("ChromeDriver 下载完成，可以运行环境检查。", "SUCCESS")
-        return {"chromedriver_path": dest_path, "chrome_version": f"Chrome {chrome_ver}"}
+            self.chromedriver_path = dest_path
+            self._invalidate_runtime_caches(chrome=True)
+            self.emit("labels", {"chromedriver_path": dest_path, "chrome_version": f"Chrome {chrome_ver}"})
+            self.log("ChromeDriver 下载完成，可以运行环境检查。", "SUCCESS")
+            report({"stage": "complete", "status": "success", "message": "ChromeDriver 下载完成，可以运行环境检查。"})
+            return {"chromedriver_path": dest_path, "chrome_version": f"Chrome {chrome_ver}"}
+        except Exception as exc:
+            report({"stage": "error", "status": "error", "message": f"ChromeDriver 下载失败: {exc}"})
+            raise
 
     @idle_browser_command
     def open_login(self) -> dict:
@@ -1249,7 +1396,7 @@ class RailWatchBridge:
             self.order_journal.mark(task.run_id, "target_sale", detail={"target_at": target, "trip": public_trip(config)})
             # Publish ownership only after the required startup record succeeds.
             self._task = task
-            self.state = replace(self.state.with_safety(config["auto_submit"], config["auto_alternate"]).with_monitoring(True), human_action={}, prefill={})
+            self.state = replace(self.state.with_safety(config["auto_submit"], config["auto_alternate"]).with_monitoring(True), human_action={}, prefill={}, prefill_notice="")
             self._transition(task, "preparing")
             task.thread = threading.Thread(target=lambda: self._run_task_worker(task, lambda: self._monitor_worker(deepcopy(config), task)), name=f"railwatch-monitor-{task.run_id[:8]}", daemon=True)
             task.thread.start()
@@ -1368,6 +1515,13 @@ class RailWatchBridge:
             self.state = replace(self.state, prefill=read_prefill_progress(self.order_journal, run_id))
         except Exception:
             self.log("预填进度暂时无法读取，订单处理继续。", "WARN")
+
+    def _publish_prefill_notice(self, reason):
+        """Tell the user that this run falls back to the regular query, and why."""
+        if not self._owns_context():
+            return
+        self.state = replace(self.state, prefill_notice=str(reason).rstrip("。"))
+        self.emit_state()
 
     def _publish_prefill_progress(self, run_id, stage=None):
         if not self._owns_context():
@@ -1605,7 +1759,7 @@ class RailWatchBridge:
             return {
                 "requires_confirmation": True,
                 "title": "清除本地数据",
-                "message": "将关闭 RailWatch 受控浏览器，并删除本地配置、登录信息、订单与复盘记录、日志和下载的驱动。不会取消官方订单。是否继续？",
+                "message": "将关闭 RailWatch 受控浏览器，并删除本地配置、12306 登录信息、订单与复盘记录、日志、界面/窗口状态、更新缓存和下载的驱动。不会取消官方订单。是否继续？",
             }
         with self._idle_lock:
             return self._clear_local_data()
@@ -1643,9 +1797,9 @@ class RailWatchBridge:
         self._param_filler = None
         with self._station_resolver_lock:
             self._station_resolver = None
-        self.behavior_simulator = None
         self.device_id_protector = None
         self._chromedriver_repair_failed = False
+        self._invalidate_runtime_caches(chrome=True, connectivity=True)
         self.chromedriver_path = PACKAGED_CHROMEDRIVER_PATH if os.path.exists(PACKAGED_CHROMEDRIVER_PATH) else str(target / CHROMEDRIVER_NAME)
         self._keep_alive_last_state = None
         self._keep_alive_unknown_count = 0
@@ -2024,7 +2178,13 @@ class RailWatchBridge:
                         return
                     armed_prefill = None
                     prefill_adapter = None
-                    if prefill_eligible_reason(config, task.target_timestamp, now=time.time()) is None:
+                    prefill_skip = prefill_eligible_reason(config, task.target_timestamp, now=time.time())
+                    if (prefill_skip is not None and task.target_timestamp is not None and config.get("timer_enabled")
+                            and config.get("auto_submit") and config.get("prefill_enabled", True) is not False):
+                        # The user asked for the pre-fill; say why this run starts without it.
+                        self.log(f"本次未使用官方预填：{prefill_skip}", "WARN")
+                        self._publish_prefill_notice(prefill_skip)
+                    if prefill_skip is None:
                         prefill_adapter = PrefillAdapter(
                             driver,
                             stop=task.cancel.is_set,
@@ -2056,6 +2216,7 @@ class RailWatchBridge:
                             raise
                         except PrefillFallback as fb:
                             self.log(f"官方预填未启用，回退常规查询：{fb.reason}", "WARN")
+                            self._publish_prefill_notice(fb.reason)
                             detail = {"stage": fb.stage, "reason": fb.reason}
                             if fb.query_result is not None:
                                 detail.update(query_status=fb.query_result.get("status"),
@@ -2079,6 +2240,7 @@ class RailWatchBridge:
                             # A recorded fallback must not also buy through the pre-fill.
                             armed_prefill = None
                             self.log(f"官方预填准备异常（{type(exc).__name__}），已自动回退常规查询。", "WARN")
+                            self._publish_prefill_notice("官方预填准备异常，已自动回退常规查询")
                             self.order_journal.mark(
                                 task.run_id,
                                 "prefill_fallback",
@@ -2090,7 +2252,10 @@ class RailWatchBridge:
                             if not monitor._fill_query_params(force=True):
                                 raise ValueError("定时首轮查询参数未就绪，请检查官方页面后重新启动。")
                     prepared_at = time.time()
-                    self.order_journal.mark(task.run_id, "prepared", detail={"prepared_at": prepared_at, "target_at": task.target_timestamp})
+                    # The notice rides on this existing marker: no extra write before the sale.
+                    self.order_journal.mark(task.run_id, "prepared", detail={
+                        "prepared_at": prepared_at, "target_at": task.target_timestamp,
+                        **({"prefill_notice": self.state.prefill_notice} if self.state.prefill_notice else {})})
                     if task.target_timestamp and prepared_at > task.target_timestamp - 10:
                         self.log("准备完成时已进入最后10秒或超过起售点；本次继续执行，但不能计作准点准备完成。", "WARN")
                     if config.get("timer_enabled") and not self._wait_for_target_time(config):
@@ -2281,7 +2446,7 @@ class RailWatchBridge:
         started = time.monotonic()
         failure = ""
         try:
-            self.driver.set_script_timeout(3)
+            self.driver.set_script_timeout(LOGIN_PROBE_TIMEOUT_SECONDS)
             result = self.driver.execute_async_script(LOGIN_CHECK_JS)
         except Exception as exc:
             result, failure = "unknown", type(exc).__name__
@@ -2324,12 +2489,26 @@ class RailWatchBridge:
             self._transition(task)
             # No navigation, HTTP calibration or login probes in the final ten seconds.
             final_login_check = (10 < remaining <= 60 and not task.sale_login_checked
+                                 and current_mono >= task.sale_login_retry_at
                                  and (config.get("auto_submit") or config.get("auto_alternate")))
             if final_login_check or (remaining > 10 and config.get("keep_alive") and current_mono - last_check >= 60):
                 self._send_keep_alive()
                 last_check = time.monotonic()
                 task.last_login_check = last_check
                 if final_login_check:
+                    # One inconclusive probe (slow link, script timeout) is not an expired
+                    # login. Probe again only while the retry still ends before the quiet
+                    # final ten seconds; an expired login stops at once.
+                    policy = QUERY_STRATEGIES["sale_start"]
+                    interval = policy["login_recheck_interval_seconds"]
+                    if (self._keep_alive_last_state == "unknown" and not task.cancel.is_set()
+                            and task.sale_login_rechecks < policy["login_recheck_limit"]
+                            and deadline - last_check > 10 + interval + LOGIN_PROBE_TIMEOUT_SECONDS):
+                        task.sale_login_rechecks += 1
+                        task.sale_login_retry_at = last_check + interval
+                        self.log(f"起售前登录状态暂未确认，{interval:g} 秒后重查"
+                                 f"（{task.sale_login_rechecks}/{policy['login_recheck_limit']}）。", "WARN")
+                        continue
                     task.sale_login_checked = True
                     if self._keep_alive_last_state != "ok":
                         self.state = replace(self.state, login_ready=False)

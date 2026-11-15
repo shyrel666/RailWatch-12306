@@ -8,6 +8,9 @@
 *.toml text eol=lf
 *.spec text eol=lf
 *.txt text eol=lf
+*.lock text eol=lf
+.python-version text eol=lf
+.nvmrc text eol=lf
 *.json text eol=lf
 *.sh text eol=lf
 *.mjs text eol=lf

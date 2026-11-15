@@ -7,6 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from scripts.keychain_isolation import isolate_system_keychain
+
+setUpModule = isolate_system_keychain  # These bridges save notification settings and clear local data.
+
 
 def temp_data_dir(test):
     """A data directory removed after the test, unlike a bare mkdtemp()."""
@@ -88,7 +92,10 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                    else f"secret-{field}" for field in NOTIFICATION_SECRET_FIELDS}
         self.assertLessEqual({"server_chan_key", "email_password", "wecom_webhook_url", "bark_key", "ntfy_topic_url", "ntfy_token"},
                              set(secrets))
+        # File protection on every system. On macOS secrets go to the keychain instead and
+        # the file holds markers, which test_macos_keychain covers with an injected store.
         with tempfile.TemporaryDirectory() as temp_dir, \
+            patch("railwatch_bridge.uses_system_keychain", return_value=False), \
             patch("railwatch_bridge.protect_local_secret", side_effect=protect), \
             patch("railwatch_bridge.unprotect_local_secret", side_effect=unprotect):
             bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
@@ -675,6 +682,192 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertIn("railway_label", info)
         self.assertIn("proxy_label", info)
 
+    def test_get_runtime_info_nonblocking_returns_immediately_and_emits_labels(self):
+        import threading
+        import time
+        from railwatch_bridge import RailWatchBridge
+
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        probe_calls = 0
+        chrome_calls = 0
+        emitted = []
+
+        def fake_probe():
+            nonlocal probe_calls
+            probe_calls += 1
+            probe_started.set()
+            release_probe.wait(timeout=5)
+            return {
+                "network_ok": True,
+                "network_label": "正常",
+                "railway_ok": True,
+                "railway_label": "正常",
+                "proxy_configured": False,
+                "proxy_label": "未配置",
+                "proxy_value": "",
+            }
+
+        def fake_chrome_info():
+            nonlocal chrome_calls
+            chrome_calls += 1
+            return "Chrome 137"
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+            patch("railwatch_bridge.probe_connectivity", side_effect=fake_probe), \
+            patch("railwatch_bridge.get_chrome_version_info", side_effect=fake_chrome_info):
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=emitted.append)
+            t0 = time.monotonic()
+            initial = bridge.get_runtime_info(probe=False)
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 0.5)
+            self.assertEqual(initial["network_label"], "检测中")
+            self.assertEqual(initial["railway_label"], "检测中")
+            self.assertIs(initial["connectivity_pending"], True)
+            self.assertEqual(initial["chrome_version"], "Chrome 137")
+            self.assertTrue(probe_started.wait(timeout=2))
+            # Repeated probe=False while inflight reuses single background probe.
+            second = bridge.get_runtime_info(probe=False)
+            self.assertEqual(second["network_label"], "检测中")
+            release_probe.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if any(ev.get("event") == "labels" for ev in emitted):
+                    break
+                time.sleep(0.01)
+
+            labels_events = [ev["payload"] for ev in emitted if ev.get("event") == "labels"]
+            self.assertEqual(len(labels_events), 1)
+            self.assertTrue(labels_events[0]["network_ok"])
+            self.assertEqual(labels_events[0]["network_label"], "正常")
+            self.assertIs(labels_events[0]["connectivity_pending"], False)
+            self.assertEqual(probe_calls, 1)
+
+            cached = bridge.get_runtime_info(probe=False)
+            self.assertEqual(cached["network_label"], "正常")
+            self.assertIs(cached["connectivity_pending"], False)
+            self.assertEqual(probe_calls, 1)
+            self.assertEqual(chrome_calls, 1)
+
+            forced = bridge.get_runtime_info(probe=True, force=True)
+            self.assertEqual(forced["network_label"], "正常")
+            self.assertEqual(probe_calls, 2)
+            self.assertEqual(chrome_calls, 2)
+
+    def test_connectivity_cache_ttl_stays_below_polling_interval(self):
+        import threading
+        import time
+        from railwatch_bridge import CONNECTIVITY_CACHE_TTL_SECONDS, RailWatchBridge
+
+        self.assertLess(CONNECTIVITY_CACHE_TTL_SECONDS, 180.0)
+
+        probe_calls = 0
+        second_probe_done = threading.Event()
+        emitted = []
+
+        def fake_probe():
+            nonlocal probe_calls
+            probe_calls += 1
+            if probe_calls >= 2:
+                second_probe_done.set()
+            return {
+                "network_ok": True,
+                "network_label": "正常",
+                "railway_ok": True,
+                "railway_label": "正常",
+                "proxy_configured": False,
+                "proxy_label": "未配置",
+                "proxy_value": "",
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+            patch("railwatch_bridge.probe_connectivity", side_effect=fake_probe), \
+            patch("railwatch_bridge.get_chrome_version_info", return_value="Chrome 137"):
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=emitted.append)
+            bridge.get_runtime_info(probe=True)
+            self.assertEqual(probe_calls, 1)
+
+            # Simulate 180s poll interval after a ~5s initial probe (~175s since completion).
+            with bridge._runtime_cache_lock:
+                cached_at, cached_val = bridge._connectivity_cache
+                bridge._connectivity_cache = (cached_at - 175.0, cached_val)
+
+            polled = bridge.get_runtime_info(probe=False)
+            self.assertEqual(polled["network_label"], "正常")
+            self.assertTrue(second_probe_done.wait(timeout=2))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if any(ev.get("event") == "labels" for ev in emitted):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(probe_calls, 2)
+            self.assertTrue(any(ev.get("event") == "labels" for ev in emitted))
+
+    def test_runtime_forwards_get_runtime_info_probe_and_force_flags(self):
+        from railwatch_runtime import RailWatchRuntime
+
+        bridge = Mock()
+        bridge.get_runtime_info.return_value = {"app": "RailWatch 12306"}
+        runtime = RailWatchRuntime(bridge=bridge, writer=lambda payload: None)
+        try:
+            runtime.handle_line('{"id":"1","command":"getRuntimeInfo","payload":{"probe":false,"force":true}}').result(timeout=5)
+            bridge.get_runtime_info.assert_called_once_with(probe=False, force=True)
+        finally:
+            runtime.shutdown()
+
+    def test_clear_local_data_invalidates_runtime_caches_and_discards_inflight_probe(self):
+        import threading
+        import time
+        from railwatch_bridge import RailWatchBridge
+
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        emitted = []
+        calls = 0
+
+        def fake_probe():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                probe_started.set()
+                release_probe.wait(timeout=5)
+                return {
+                    "network_ok": False,
+                    "network_label": "异常",
+                    "railway_ok": False,
+                    "railway_label": "异常",
+                    "proxy_configured": False,
+                    "proxy_label": "未配置",
+                    "proxy_value": "",
+                }
+            return {
+                "network_ok": True,
+                "network_label": "正常",
+                "railway_ok": True,
+                "railway_label": "正常",
+                "proxy_configured": False,
+                "proxy_label": "未配置",
+                "proxy_value": "",
+            }
+
+        from railwatch_state import APP_SLUG
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+            patch("railwatch_bridge.probe_connectivity", side_effect=fake_probe):
+            data_dir = os.path.join(os.path.realpath(temp_dir), APP_SLUG)
+            bridge = RailWatchBridge(data_dir=data_dir, event_callback=emitted.append)
+            bridge.get_runtime_info(probe=False)
+            self.assertTrue(probe_started.wait(timeout=2))
+
+            bridge.clear_local_data(confirmed=True)
+            release_probe.set()
+            time.sleep(0.05)
+
+            self.assertFalse(any(ev.get("event") == "labels" for ev in emitted))
+            refreshed = bridge.get_runtime_info(probe=True)
+            self.assertTrue(refreshed["network_ok"])
+            self.assertEqual(refreshed["network_label"], "正常")
+
     def test_json_runtime_dispatches_command_response_and_events(self):
         from railwatch_runtime import RailWatchRuntime
 
@@ -859,7 +1052,9 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 return None
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            events = []
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=events.append)
+            bridge._start_connectivity_probe = lambda: None
             stale_path = os.path.join(temp_dir, "stale", "chromedriver.exe")
             os.makedirs(os.path.dirname(stale_path))
             with open(stale_path, "wb") as handle:
@@ -867,9 +1062,15 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             bridge.chromedriver_path = stale_path
             captured = {}
 
-            def fake_install(target_dir, major_version, log_callback):
+            def fake_install(target_dir, major_version, log_callback, progress_callback=None):
                 captured["target_dir"] = target_dir
                 captured["major_version"] = major_version
+                progress_callback({"stage": "downloading", "message": "正在下载 ChromeDriver…",
+                                   "source": "npmmirror 镜像", "downloaded_bytes": 1024,
+                                   "total_bytes": 4096, "bytes_per_second": 512, "eta_seconds": 6})
+                progress_callback({"stage": "complete", "message": "驱动安装完成"})
+                self.assertFalse(any(event["payload"].get("status") == "success"
+                                     for event in events if event["event"] == "environmentProgress"))
                 return os.path.join(target_dir, "chromedriver.exe")
 
             bridge._ensure_driver = lambda test_only=False: FakeDriver()
@@ -885,6 +1086,19 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             self.assertEqual(captured["target_dir"], temp_dir)
             self.assertEqual(bridge.chromedriver_path, os.path.join(temp_dir, "chromedriver.exe"))
             self.assertTrue(payload["environment_ready"])
+            progress = [event["payload"] for event in events if event["event"] == "environmentProgress"]
+            self.assertEqual(progress[0]["stage"], "checking")
+            download = next(item for item in progress if item["stage"] == "downloading")
+            self.assertEqual(download["downloaded_bytes"], 1024)
+            self.assertEqual(download["total_bytes"], 4096)
+            self.assertEqual(download["eta_seconds"], 6)
+            self.assertEqual(download["source"], "npmmirror 镜像")
+            self.assertEqual(progress[-2]["stage"], "verifying")
+            self.assertNotIn("total_bytes", progress[-2])
+            self.assertEqual(progress[-1]["status"], "success")
+            self.assertTrue(all(item["operation"] == "checkEnvironment" for item in progress))
+            self.assertEqual(len({item["started_at"] for item in progress}), 1)
+            self.assertTrue(all(item["updated_at"] >= item["started_at"] for item in progress))
 
     def test_check_environment_skips_repair_when_chromedriver_matches(self):
         from railwatch_bridge import RailWatchBridge
@@ -921,7 +1135,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
             calls = []
 
-            def fake_install(target_dir, major_version, log_callback):
+            def fake_install(target_dir, major_version, log_callback, progress_callback=None):
                 calls.append(major_version)
                 raise RuntimeError("network down")
 
@@ -946,7 +1160,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             bridge.chromedriver_path = os.path.join("C:\\", "Program Files", "packaged", "chromedriver.exe")
             captured = {}
 
-            def fake_install(target_dir, major_version, log_callback):
+            def fake_install(target_dir, major_version, log_callback, progress_callback=None):
                 captured["target_dir"] = target_dir
                 return os.path.join(target_dir, "chromedriver.exe")
 
@@ -957,6 +1171,44 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
             self.assertEqual(captured["target_dir"], temp_dir)
             self.assertEqual(os.path.dirname(result["chromedriver_path"]), temp_dir)
+
+    def test_missing_chrome_and_manual_driver_hints_prefer_china_urls(self):
+        import chromedriver_manager
+        from railwatch_bridge import RailWatchBridge
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("chromedriver_manager.detect_chrome_version", lambda: None):
+                with self.assertRaises(RuntimeError) as cm:
+                    chromedriver_manager.download_and_install_chromedriver(temp_dir)
+            self.assertIn("https://www.google.cn/chrome/", str(cm.exception))
+            self.assertNotIn("google.com/chrome", str(cm.exception))
+
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=lambda event: None)
+            bridge.chromedriver_path = os.path.join(temp_dir, "missing", "chromedriver.exe")
+            bridge._start_connectivity_probe = lambda: None
+
+            with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", True), \
+                patch("railwatch_bridge.detect_chrome_version", lambda: None):
+                result = bridge.download_chromedriver()
+            self.assertEqual(result["chrome_version"], "")
+            messages = "\n".join(entry["message"] for entry in bridge.log_entries)
+            self.assertIn("https://www.google.cn/chrome/", messages)
+            self.assertNotIn("google.com/chrome", messages)
+
+            with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", False):
+                with self.assertRaises(RuntimeError) as manual_err:
+                    bridge.download_chromedriver()
+            self.assertIn("registry.npmmirror.com", str(manual_err.exception))
+
+            bridge.log_entries.clear()
+            with patch("railwatch_bridge.CD_MANAGER_AVAILABLE", False), \
+                patch("railwatch_bridge.SELENIUM_AVAILABLE", True):
+                bridge._ensure_driver = lambda test_only=False: (_ for _ in ()).throw(RuntimeError("session not created: version"))
+                bridge.check_environment()
+            env_messages = "\n".join(entry["message"] for entry in bridge.log_entries)
+            self.assertIn("https://www.google.cn/chrome/", env_messages)
+            self.assertIn("registry.npmmirror.com", env_messages)
+            self.assertNotIn("google.com/chrome", env_messages)
 
     def test_browser_uses_persistent_profile_bounded_transport_and_hygiene_only(self):
         from railwatch_bridge import RailWatchBridge
@@ -1211,6 +1463,104 @@ class StaleBrowserSessionTests(unittest.TestCase):
 
         self.assertIn("版本与 Chrome 不匹配", state["error_message"])
 
+    def test_check_environment_restarts_connectivity_probe_after_success(self):
+        import threading
+        import time
+        from railwatch_bridge import RailWatchBridge
+
+        probe_calls = 0
+        emitted = []
+        second_probe_done = threading.Event()
+
+        def fake_probe():
+            nonlocal probe_calls
+            probe_calls += 1
+            label = "正常" if probe_calls == 1 else "已恢复"
+            if probe_calls >= 2:
+                second_probe_done.set()
+            return {
+                "network_ok": True,
+                "network_label": label,
+                "railway_ok": True,
+                "railway_label": "正常",
+                "proxy_configured": False,
+                "proxy_label": "未配置",
+                "proxy_value": "",
+            }
+
+        class ProbeDriver:
+            def quit(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+            patch("railwatch_bridge.probe_connectivity", side_effect=fake_probe), \
+            patch("railwatch_bridge.get_chrome_version_info", return_value="Chrome 137"), \
+            patch("railwatch_bridge.CD_MANAGER_AVAILABLE", False), \
+            patch("railwatch_bridge.SELENIUM_AVAILABLE", True):
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=emitted.append)
+            bridge._ensure_driver = lambda test_only=False: ProbeDriver()
+            bridge.get_runtime_info(probe=True)
+            emitted.clear()
+
+            state = bridge.check_environment()
+            self.assertTrue(state["environment_ready"])
+            self.assertTrue(second_probe_done.wait(timeout=2))
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if any(ev.get("event") == "labels" for ev in emitted):
+                    break
+                time.sleep(0.01)
+
+            labels_events = [ev["payload"] for ev in emitted if ev.get("event") == "labels"]
+            self.assertEqual(len(labels_events), 1)
+            self.assertEqual(labels_events[0]["network_label"], "已恢复")
+            self.assertEqual(bridge.get_runtime_info(probe=False)["network_label"], "已恢复")
+
+    def test_check_environment_restarts_connectivity_probe_after_failure(self):
+        import threading
+        import time
+        from railwatch_bridge import RailWatchBridge
+
+        emitted = []
+        probe_done = threading.Event()
+
+        def fake_probe():
+            probe_done.set()
+            return {
+                "network_ok": True,
+                "network_label": "正常",
+                "railway_ok": True,
+                "railway_label": "正常",
+                "proxy_configured": False,
+                "proxy_label": "未配置",
+                "proxy_value": "",
+            }
+
+        def explode(test_only=False):
+            raise RuntimeError("driver failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+            patch("railwatch_bridge.probe_connectivity", side_effect=fake_probe), \
+            patch("railwatch_bridge.get_chrome_version_info", return_value="Chrome 137"), \
+            patch("railwatch_bridge.CD_MANAGER_AVAILABLE", False), \
+            patch("railwatch_bridge.SELENIUM_AVAILABLE", True):
+            bridge = RailWatchBridge(data_dir=temp_dir, event_callback=emitted.append)
+            bridge._ensure_driver = explode
+
+            state = bridge.check_environment()
+            self.assertIn("driver failed", state["error_message"])
+            self.assertTrue(probe_done.wait(timeout=2))
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if any(ev.get("event") == "labels" for ev in emitted):
+                    break
+                time.sleep(0.01)
+
+            self.assertTrue(any(ev.get("event") == "labels" for ev in emitted))
+            self.assertEqual(bridge.get_runtime_info(probe=False)["network_label"], "正常")
+
 
 class DriverLaunchRecoveryTests(unittest.TestCase):
     def make_bridge(self):
@@ -1296,7 +1646,8 @@ class DriverLaunchRecoveryTests(unittest.TestCase):
                    calls.append((command, kwargs)) or Mock(stdout="0")):
             bridge._terminate_profile_chrome()
         command, options = calls[0]
-        for folder in (r"C:\Users\Test User\railwatch", r"C:\Users\O'Brien [work] $()\railwatch"):
+        for folder in (r"C:\Users\Test User\railwatch", r"C:\Users\O'Brien [work] $()\railwatch",
+                       r"C:\Users\张三 的电脑\AppData\Local\railwatch"):
             profile = folder + r"\chrome_profile_12306"
             lines = [
                 f'chrome.exe "--user-data-dir={profile}" --test',

@@ -12,11 +12,14 @@ describe("local Windows packaging script", () => {
     expect(script).toContain("if /i \"%INSTALL_DEPS%\"==\"--install-deps\"");
     expect(script).toContain("if exist \"node_modules\\.package-lock.json\"");
     expect(script).toContain("Skipping Node dependencies");
-    expect(script).toContain("python -c \"import PyInstaller\"");
-    expect(script).toContain("Skipping Python packaging dependencies");
+    // The pinned interpreter is checked before the version bump or any cleanup.
+    expect(script.indexOf("node scripts/build-runtime.mjs --check || goto missing_python")).toBeGreaterThan(-1);
+    expect(script.indexOf("node scripts/build-runtime.mjs --check")).toBeLessThan(script.indexOf("npm version"));
+    expect(script).toContain("if exist \"build\\python-venv\" rmdir /s /q \"build\\python-venv\"");
+    // Python packages only ever go into the build environment made by build-runtime.mjs.
+    expect(script).not.toContain("pip install");
     expect(script).toContain("if exist \"release\" rmdir /s /q \"release\"");
     expect(script).toContain("npm ci");
-    expect(script).toContain("python -m pip install -r requirements.txt pyinstaller");
     expect(script).toContain("npm run package");
     expect(script).toContain("Validating updater metadata assets");
     expect(script).toContain("release/latest.yml references missing asset");
@@ -31,13 +34,16 @@ describe("local macOS packaging script", () => {
 
     expect(script.startsWith("#!/usr/bin/env bash")).toBe(true);
     expect(script).toContain("set -euo pipefail");
-    expect(script).toContain("for tool in node npm python3; do");
+    expect(script).toContain("for tool in node npm; do");
+    expect(script.indexOf("node scripts/build-runtime.mjs --check")).toBeGreaterThan(-1);
+    expect(script.indexOf("node scripts/build-runtime.mjs --check")).toBeLessThan(script.indexOf("npm version"));
     expect(script).toContain('PACKAGE_VERSION="${1:-}"');
     expect(script).toContain('INSTALL_DEPS="${2:-}"');
     expect(script).toContain('npm version "$PACKAGE_VERSION" --no-git-tag-version --allow-same-version');
     expect(script).toContain('if [ "$INSTALL_DEPS" = "--install-deps" ]');
     expect(script).toContain("node_modules/.package-lock.json");
-    expect(script).toContain("python3 -m pip install -r requirements.txt pyinstaller");
+    expect(script).toContain("rm -rf build/python-venv");
+    expect(script).not.toContain("pip install");
     expect(script).toContain("rm -rf release");
     expect(script).toContain("arm64) ARCH=arm64 ;;");
     expect(script).toContain("x86_64) ARCH=x64 ;;");

@@ -1,8 +1,11 @@
 import { EventEmitter } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { clearElectronLocalData } from "../appDataPaths";
 import { launchElevated, launchProcess, RailWatchNsisUpdater, windowsCommandLine } from "../nsisUpdater";
-import { INSTALLER_UNAVAILABLE } from "../updateManager";
+import { createUpdateManager, INSTALLER_UNAVAILABLE } from "../updateManager";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock("node:child_process", async importOriginal => ({
@@ -10,7 +13,14 @@ vi.mock("node:child_process", async importOriginal => ({
 }));
 
 let children: Array<EventEmitter & { unref: ReturnType<typeof vi.fn> }>;
+// A real file: launchInstaller refuses an installer that is no longer on disk.
+let cache: string;
+let installer: string;
 beforeEach(() => {
+  cache = mkdtempSync(path.join(os.tmpdir(), "railwatch-nsis-"));
+  installer = path.join(cache, "update cache", "RailWatch.exe");
+  mkdirSync(path.dirname(installer));
+  writeFileSync(installer, "");
   children = [];
   mocks.spawn.mockReset().mockImplementation(() => {
     const child = Object.assign(new EventEmitter(), { unref: vi.fn() });
@@ -21,7 +31,10 @@ beforeEach(() => {
     resourcesPath: "C:/RailWatch/resources", env: { ...process.env, SystemRoot: "C:\\Windows" },
   }));
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  rmSync(cache, { recursive: true, force: true });
+});
 
 function updater(admin = false) {
   // Real upstream class/metadata interface; only OS process creation is mocked.
@@ -30,7 +43,7 @@ function updater(admin = false) {
     whenReady: async () => undefined, quit: vi.fn(), relaunch: vi.fn(), onQuit: vi.fn(),
   });
   Object.assign(instance, { downloadedUpdateHelper: {
-    file: "C:/update cache/RailWatch.exe", packageFile: null,
+    file: installer, packageFile: null,
     downloadedFileInfo: { fileName: "RailWatch.exe", sha512: "verified-by-upstream", isAdminRightsRequired: admin },
   } });
   return instance;
@@ -57,6 +70,47 @@ test("a vanished download is reported with the code that sends users back to che
   expect(mocks.spawn).not.toHaveBeenCalled();
 });
 
+test.each([false, true])("an installer deleted from the cache is never launched (elevated=%s)", async admin => {
+  const instance = updater(admin);
+  rmSync(cache, { recursive: true, force: true });
+  await expect(instance.launchInstaller()).rejects.toMatchObject({ code: INSTALLER_UNAVAILABLE });
+  expect(mocks.spawn).not.toHaveBeenCalled();
+});
+
+test("a missing package file counts as a missing installer", async () => {
+  const instance = updater();
+  Object.assign(instance, { downloadedUpdateHelper: {
+    file: installer, packageFile: path.join(cache, "package-0.5.4.7z"),
+    downloadedFileInfo: { fileName: "RailWatch.exe", sha512: "verified-by-upstream", isAdminRightsRequired: false },
+  } });
+  await expect(instance.launchInstaller()).rejects.toMatchObject({ code: INSTALLER_UNAVAILABLE });
+  expect(mocks.spawn).not.toHaveBeenCalled();
+});
+
+test("clearing the updater cache under a downloaded update leaves it recoverable", async () => {
+  // What the OS answers for a file that is gone; a launch failure keeps an update "downloaded".
+  mocks.spawn.mockImplementation(() => {
+    const child = Object.assign(new EventEmitter(), { unref: vi.fn() });
+    queueMicrotask(() => child.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })));
+    return child;
+  });
+  const instance = updater();
+  const manager = createUpdateManager({ currentVersion: "0.5.3", updater: instance, enabled: true });
+  instance.emit("update-downloaded", { version: "0.5.4" });
+  expect(manager.getState().phase).toBe("downloaded");
+  await clearElectronLocalData({ userDataDir: cache, updaterCacheDir: path.dirname(installer), clearUpdaterCache: true });
+  expect(existsSync(installer)).toBe(false);
+
+  // Even if nothing told the manager, installing ends in the state that allows a new check.
+  expect(await manager.installUpdate()).toBe(false);
+  expect(manager.getState()).toMatchObject({ phase: "error", error: "已下载的安装程序不可用，请重新检查更新。" });
+  expect(mocks.spawn).not.toHaveBeenCalled();
+
+  instance.emit("update-downloaded", { version: "0.5.4" });
+  manager.discardDownload();
+  expect(manager.getState().phase).toBe("idle");
+});
+
 test("asynchronous spawn failure is returned without requesting app quit", async () => {
   const instance = updater();
   const quit = vi.spyOn(instance, "quitAndInstall");
@@ -73,7 +127,7 @@ test("verified NSIS metadata supplies installer flags without invoking upstream 
   const quit = vi.spyOn(instance, "quitAndInstall");
   const pending = instance.launchInstaller();
   expect(mocks.spawn).toHaveBeenCalledWith(
-    "C:/update cache/RailWatch.exe", ["--updated", "--force-run", "/D=C:/RailWatch install"],
+    installer, ["--updated", "--force-run", "/D=C:/RailWatch install"],
     { detached: true, stdio: "ignore", windowsHide: false },
   );
   children[0].emit("spawn");
@@ -105,7 +159,7 @@ test.each([0, 1223])("elevation waits for helper exit and detects UAC cancellati
   await Promise.resolve();
   expect(settled).toBe(false);
   expect(mocks.spawn).toHaveBeenCalledOnce();
-  expectElevated(mocks.spawn.mock.calls[0], "C:/update cache/RailWatch.exe", "--updated --force-run");
+  expectElevated(mocks.spawn.mock.calls[0], installer, "--updated --force-run");
   children[0].emit("exit", code, null);
   expect(await outcome).toBe(code === 0 ? "launched" : "安装程序提权启动失败或已取消（1223）。");
 });
@@ -124,10 +178,10 @@ test("access denial falls back to elevation and waits for that launch", async ()
   await new Promise(resolve => setImmediate(resolve));
   expect(children).toHaveLength(2);
   expect(mocks.spawn).toHaveBeenNthCalledWith(1,
-    "C:/update cache/RailWatch.exe", ["--updated", "--force-run", "/D=C:/RailWatch install"],
+    installer, ["--updated", "--force-run", "/D=C:/RailWatch install"],
     { detached: true, stdio: "ignore", windowsHide: false },
   );
-  expectElevated(mocks.spawn.mock.calls[1], "C:/update cache/RailWatch.exe", '--updated --force-run "/D=C:/RailWatch install"');
+  expectElevated(mocks.spawn.mock.calls[1], installer, '--updated --force-run "/D=C:/RailWatch install"');
   children[1].emit("spawn");
   children[1].emit("exit", 0, null);
   await pending;

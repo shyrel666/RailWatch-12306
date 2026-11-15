@@ -1,0 +1,10 @@
+# Build and smoke-test tooling on top of the runtime dependencies.
+# Input for requirements.lock; environments install the lock, not this file.
+
+-r requirements.txt
+
+# Freezes the runtime into dist-runtime/ (scripts/build-runtime.mjs)
+pyinstaller==6.22.3
+
+# tests/packaged_smoke.py drives the packaged app over the DevTools websocket
+websocket-client

@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 let startup: typeof import("./startupSplash");
@@ -155,4 +157,41 @@ test("a lost window notification cannot leave the application inaccessible", () 
   expect(document.getElementById("startup-splash")).toBeNull();
   expect(document.getElementById("root")?.hasAttribute("inert")).toBe(false);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+test("startup splash stays uniformly dark and only notifies main process when dismissing", async () => {
+  delete document.documentElement.dataset.theme;
+  localStorage.clear();
+  try {
+    localStorage.setItem("railwatch.theme", "light");
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    const finishSplash = vi.fn();
+    vi.stubGlobal("railwatch", { whenWindowShown: () => Promise.resolve(), finishSplash });
+    startup.initializeStartupSplash();
+    await Promise.resolve();
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+    expect(finishSplash).not.toHaveBeenCalled();
+
+    startup.finishStartupSplash();
+    vi.advanceTimersByTime(1299);
+    expect(finishSplash).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(finishSplash).toHaveBeenCalledTimes(1);
+
+    const css = readFileSync(path.resolve("src/styles/startup.css"), "utf8");
+    const splashBlock = css.match(/#startup-splash\s*\{[\s\S]*?\}/)?.[0] ?? "";
+    expect(splashBlock).toContain("background: #101113;");
+    expect(css).not.toMatch(/data-theme="light"[\s\S]*#startup-splash/);
+    expect(css).not.toMatch(/prefers-color-scheme:\s*light/);
+  } finally {
+    vi.runAllTimers();
+    delete document.documentElement.dataset.theme;
+    localStorage.clear();
+  }
 });

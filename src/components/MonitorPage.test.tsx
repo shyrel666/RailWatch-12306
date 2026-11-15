@@ -59,6 +59,24 @@ describe("MonitorPage", () => {
     expect(screen.getByRole("table").textContent).toContain("大兴机场 → 天津西");
   });
 
+  test("a timed run that prepared without the requested prefill says why", () => {
+    const config = { ...defaultConfig, timer_enabled: true, auto_submit: true, sale_at: new Date(Date.now() + 60_000).toISOString() };
+    const waiting = { ...defaultStatus, monitoring: true, current_config: config, task: { run_id: "no-prefill", status: "waiting" } };
+    railwatchStore.setState({ config, status: { ...waiting, prefill_notice: "距起售不足 90 秒，直接采用常规查询准备" } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByText("本次未使用官方预填")).toBeTruthy();
+    expect(screen.getByText("距起售不足 90 秒，直接采用常规查询准备。到点后按常规余票查询执行，自动提交设置不变。")).toBeTruthy();
+    expect(screen.getByText("未使用预填，到点后常规查询")).toBeTruthy();
+    expect(screen.queryByText("预填已就绪，到点后直接购票")).toBeNull();
+    // An ordinary timed run, an armed pre-fill and a stopped task show no notice.
+    for (const status of [waiting, { ...waiting, prefill, prefill_notice: "过期的原因" },
+      { ...waiting, monitoring: false, prefill_notice: "距起售不足 90 秒" }]) {
+      act(() => railwatchStore.setState({ status }));
+      expect(screen.queryByText("本次未使用官方预填")).toBeNull();
+      expect(screen.queryByText("未使用预填，到点后常规查询")).toBeNull();
+    }
+  });
+
   test("prefill payment shows one confirmation without manufacturing query rows or hits", () => {
     railwatchStore.setState({ status: { ...defaultStatus, monitoring: true,
       task: { run_id: "recovery", status: "pending_payment" },

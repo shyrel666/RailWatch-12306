@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from railwatch_system import detect_proxy, get_app_version, inspect_data_dir, probe_connectivity
+from railwatch_system import detect_proxy, get_app_version, inspect_data_dir, pending_connectivity_snapshot, probe_connectivity
 
 
 class RailWatchSystemTests(unittest.TestCase):
@@ -35,6 +35,19 @@ class RailWatchSystemTests(unittest.TestCase):
         self.assertEqual(status["network_label"], "正常")
         self.assertTrue(status["railway_ok"])
         self.assertEqual(status["railway_label"], "正常")
+
+    def test_pending_connectivity_snapshot_returns_fast_labels_and_proxy(self):
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://user:secret@127.0.0.1:7890"}, clear=False):
+            status = pending_connectivity_snapshot()
+
+        self.assertFalse(status["network_ok"])
+        self.assertEqual(status["network_label"], "检测中")
+        self.assertFalse(status["railway_ok"])
+        self.assertEqual(status["railway_label"], "检测中")
+        self.assertIs(status["connectivity_pending"], True)
+        self.assertTrue(status["proxy_configured"])
+        self.assertEqual(status["proxy_label"], "已配置")
+        self.assertNotIn("secret", status["proxy_value"])
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ export function initializeStartupSplash(): void {
   let finishing = false;
   const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const dismiss = () => {
+    window.railwatch?.finishSplash?.();
     root.removeAttribute("inert");
     splash.setAttribute("aria-hidden", "true");
     splash.classList.add("startup-splash-leaving");

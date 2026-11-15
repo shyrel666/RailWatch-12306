@@ -40,10 +40,12 @@ test("successful clear drops the staged draft and asks to reload instead of reta
   clearData.mockResolvedValue({ cleared: true, cleanup_pending: false });
   const button = await openSettings();
   localStorage.setItem("railwatch.theme", "dark");
+  localStorage.setItem("railwatch.sidebarCollapsed", "1");
   await userEvent.click(button);
   expect((await screen.findAllByText("本地数据已清除")).length).toBeGreaterThan(0);
   expect(stageDraft).toHaveBeenCalledWith(null);
   expect(localStorage.getItem("railwatch.theme")).toBeNull();
+  expect(localStorage.getItem("railwatch.sidebarCollapsed")).toBeNull();
   expect(screen.getByRole("button", { name: "重新加载" })).toBeTruthy();
 });
 

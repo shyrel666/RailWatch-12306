@@ -9,6 +9,9 @@ const windowShown = new Promise<void>((resolve) => {
 
 contextBridge.exposeInMainWorld("railwatch", {
   whenWindowShown: () => windowShown,
+  finishSplash: () => {
+    ipcRenderer.send("railwatch:splash-finished");
+  },
   command: <T>(command: string, payload: Record<string, unknown> = {}) => {
     if (!isRailWatchCommand(command)) {
       return Promise.reject(new Error(`Unsupported RailWatch command: ${command}`));
@@ -66,6 +69,7 @@ contextBridge.exposeInMainWorld("railwatch", {
       nodeVersion: string;
       platform: string;
       arch: string;
+      runningUnderARM64Translation: boolean;
     }>;
   },
 });

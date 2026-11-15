@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { NsisUpdater } from "electron-updater";
 import { INSTALLER_UNAVAILABLE } from "./updateManager";
@@ -71,7 +72,11 @@ export class RailWatchNsisUpdater extends NsisUpdater {
   async launchInstaller(): Promise<void> {
     const installer = this.installerPath;
     const helper = this.downloadedUpdateHelper;
-    if (!installer || !helper?.downloadedFileInfo) {
+    // The updater only remembers the path. A local data reset, a disk cleaner or
+    // antivirus can delete the file, and launching it would then fail with ENOENT:
+    // a launch failure that looks retryable and never lets the user check again.
+    if (!installer || !helper?.downloadedFileInfo || !existsSync(installer) ||
+        (helper.packageFile && !existsSync(helper.packageFile))) {
       throw Object.assign(new Error("已下载的安装程序不可用，请重新检查更新。"), { code: INSTALLER_UNAVAILABLE });
     }
     const args = ["--updated"];

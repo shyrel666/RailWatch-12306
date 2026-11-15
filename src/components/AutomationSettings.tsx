@@ -66,6 +66,8 @@ export function AutomationSection({ config, update, runCommand, confirm, busy }:
   const watchInterval = config.order_watch_interval_seconds ?? ORDER_POLICY.order_watch_interval_seconds;
   const prefillEnabled = config.prefill_enabled ?? ORDER_POLICY.prefill_enabled;
   const showPrefill = config.timer_enabled && config.auto_submit;
+  // The runtime only arms the pre-fill when the browser clock is Beijing time (UTC+8).
+  const beijingClock = new Date().getTimezoneOffset() === -480;
   const showWatch = config.auto_submit || config.auto_alternate;
   const intervalInput = <InputNumber
     aria-label="订单核对间隔（秒）"
@@ -117,7 +119,8 @@ export function AutomationSection({ config, update, runCommand, confirm, busy }:
             <Switch aria-label="官方预填加速" checked={prefillEnabled} onChange={value => update({ prefill_enabled: value })} />
           </div>
           <div className="trip-automation-watch-sub">
-            <small>{prefillEnabled ? "起售前自动预填直连" : "已关闭，走常规余票查询"}</small>
+            <small>{!prefillEnabled ? "已关闭，走常规余票查询"
+              : beijingClock ? "起售前自动预填直连" : "本机时区不是北京时间，预填不会启用"}</small>
           </div>
         </section> : null}
         {showWatch ? <section className="trip-automation-watch" aria-label="订单跟踪">

@@ -11,6 +11,8 @@ files:
   - dist-electron/**/*
   - assets/images/icon.ico
   - assets/images/icon.png
+  - assets/images/trayTemplate.png
+  - assets/images/trayTemplate@2x.png
   - package.json
 extraResources:
   - from: dist-runtime
@@ -26,6 +28,7 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  include: build/installer.nsh
 mac:
   icon: assets/images/icon.png
   category: public.app-category.travel

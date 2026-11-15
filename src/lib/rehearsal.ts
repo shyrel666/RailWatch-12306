@@ -24,6 +24,8 @@ export type SalePath = {
 };
 export type RunReviewDetail = RunReviewSummary & {
   sale_path?: SalePath | null;
+  /** Why the run prepared without the official pre-fill although it was requested. */
+  prefill_notice?: string | null;
   segments: TimelineSegment[]; prediction: TimelineSegment[]; slowest: string | null;
   order_timings?: { kind: "regular" | "alternate"; segments: TimelineSegment[] }[];
   query_timings?: {

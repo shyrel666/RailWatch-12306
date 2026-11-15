@@ -144,6 +144,8 @@ export function SettingsPage({
   onEnvironmentCheckStart?: () => void;
 }) {
   const runtime = useRailWatchStore((state) => state.runtime);
+  const environmentProgress = useRailWatchStore(state => state.environmentProgress);
+  const showEnvironmentProgress = useRailWatchStore(state => state.setEnvironmentProgressVisible);
   const environmentReady = useRailWatchStore((state) => state.status.environment_ready);
   const loginReady = useRailWatchStore((state) => state.status.login_ready);
   const [checkingLogin, setCheckingLogin] = useState(false);
@@ -157,9 +159,11 @@ export function SettingsPage({
   const [traySaving, setTraySaving] = useState(false);
   const [trayReady, setTrayReady] = useState(false);
   const [trayError, setTrayError] = useState("");
+  const [isMac, setIsMac] = useState(false);
   const navRef = useRef<HTMLElement>(null);
   const [activeSection, selectSection] = useActiveSection(navRef, autoCheckEnvironment);
   const checkingEnvironment = busy === "checkEnvironment";
+  const preparingEnvironment = checkingEnvironment || busy === "downloadChromeDriver" || environmentProgress?.status === "running";
   useEffect(() => {
     if (!autoCheckEnvironment) return;
     const timer = window.setTimeout(() => {
@@ -176,6 +180,15 @@ export function SettingsPage({
     }).catch((error) => { if (alive) setTrayError(error instanceof Error ? error.message : "无法加载关闭偏好。"); });
     return () => { alive = false; };
   }, [setAutoRehearsal]);
+  useEffect(() => {
+    let alive = true;
+    void Promise.resolve(railwatchApi.getAppInfo?.())
+      .then((info) => {
+        if (alive && info?.platform === "darwin") setIsMac(true);
+      })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, []);
   const saveTrayPreference = async (next: boolean) => {
     setTraySaving(true);
     setTrayError("");
@@ -297,7 +310,7 @@ export function SettingsPage({
               className="settings-environment-check"
               type="primary"
               icon={<Activity size={15} />}
-              disabled={checkingEnvironment}
+              disabled={preparingEnvironment}
               loading={checkingEnvironment}
               onClick={() => void runCommand("checkEnvironment")}
             >
@@ -305,6 +318,14 @@ export function SettingsPage({
             </Button>
           }
         >
+          {environmentProgress && environmentProgress.status !== "success" && (
+            <div className={"environment-progress-summary " + environmentProgress.status}>
+              <span>{environmentProgress.message}</span>
+              <Button size="small" onClick={() => showEnvironmentProgress(true)}>
+                {environmentProgress.status === "running" ? "查看进度" : "查看结果"}
+              </Button>
+            </div>
+          )}
           <div className="health-grid">
             {health.map((item) => (
               <div className={"health-tile" + (item.ok ? " ok" : " warn")} key={item.label}>
@@ -325,7 +346,7 @@ export function SettingsPage({
             control={
               <Button
                 icon={<Download size={15} />}
-                disabled={checkingEnvironment}
+                disabled={preparingEnvironment}
                 loading={busy === "downloadChromeDriver"}
                 onClick={() => void runCommand("downloadChromeDriver")}
               >
@@ -345,14 +366,14 @@ export function SettingsPage({
                 <Button
                   icon={<LogIn size={15} />}
                   loading={busy === "openLogin"}
-                  disabled={!environmentReady || checkingEnvironment || checkingLogin}
+                  disabled={!environmentReady || preparingEnvironment || checkingLogin}
                   onClick={() => { setLoginResult(null); void runCommand("openLogin"); }}
                 >
                   打开登录
                 </Button>
                 <Button
                   loading={checkingLogin || busy === "checkLogin"}
-                  disabled={!environmentReady || checkingEnvironment || busy === "openLogin"}
+                  disabled={!environmentReady || preparingEnvironment || busy === "openLogin"}
                   onClick={() => void checkLogin()}
                 >
                   检查登录
@@ -381,10 +402,18 @@ export function SettingsPage({
         <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式、开售前检查与登录保持。">
           <SettingRow
             icon={PanelBottomClose}
-            title="关闭到托盘"
-            control={<Switch aria-label="关闭到托盘" checked={closeToTray} disabled={!trayReady || traySaving} loading={traySaving} onChange={(next) => void saveTrayPreference(next)} />}
+            title={isMac ? "关闭到菜单栏" : "关闭到托盘"}
+            control={
+              <Switch
+                aria-label={isMac ? "关闭到菜单栏" : "关闭到托盘"}
+                checked={closeToTray}
+                disabled={!trayReady || traySaving}
+                loading={traySaving}
+                onChange={(next) => void saveTrayPreference(next)}
+              />
+            }
           >
-            <p>关闭窗口后继续监控，从托盘图标重新打开或退出。</p>
+            <p>{isMac ? "关闭窗口后继续监控，从顶部菜单栏图标重新打开或退出。" : "关闭窗口后继续监控，从托盘图标重新打开或退出。"}</p>
           </SettingRow>
           <SettingRow
             icon={CalendarClock}
@@ -412,7 +441,7 @@ export function SettingsPage({
           </SettingRow>
           {trayError && <p role="alert" className="settings-error">{trayError}</p>}
         </SettingsSection>
-        <NotificationSettingsPanel />
+        <NotificationSettingsPanel isMac={isMac} />
         <SettingsSection id="settings-data" icon={HardDrive} title="本地数据" description="所有配置与记录只保存在这台电脑。">
           <div className="data-grid">
             <div className="data-tile">
@@ -463,7 +492,7 @@ export function SettingsPage({
               </Button>
             }
           >
-            <p>删除本地配置、登录信息与历史记录，不可撤销；不会取消官方订单。</p>
+            <p>删除本地配置、12306 登录信息、订单记录、窗口状态与更新缓存，不可撤销；不会取消官方订单。</p>
           </SettingRow>
         </SettingsSection>
       </div>

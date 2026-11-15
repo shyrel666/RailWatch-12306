@@ -1,0 +1,140 @@
+.railwatch-dialog.environment-progress-dialog .ant-modal-title {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+.environment-progress-dialog .ant-modal-header { margin-bottom: 22px; }
+.environment-progress-dialog .ant-modal-footer { margin-top: 24px; }
+.environment-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+  max-height: 58vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.environment-progress-hero { display: flex; align-items: flex-start; gap: 14px; }
+.environment-progress-hero > div { min-width: 0; }
+.environment-progress-hero h3 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 21px;
+  font-weight: 650;
+  line-height: 1.4;
+  letter-spacing: -.35px;
+}
+.environment-progress-hero p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.environment-progress-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.environment-progress.running .environment-progress-icon > svg { animation: environment-progress-spin 1.4s linear infinite; }
+.environment-progress.success .environment-progress-icon { background: var(--success-soft); color: var(--success); }
+.environment-progress.error .environment-progress-icon { background: var(--danger-soft); color: var(--danger); }
+.environment-download {
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--subtle);
+}
+.environment-download-caption { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
+.environment-download-caption > span { color: var(--muted); font-size: 12px; }
+.environment-download-caption > strong {
+  color: var(--text);
+  font-size: 28px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -.7px;
+}
+.environment-download-caption small { margin-left: 5px; color: var(--muted); font-size: 12px; font-weight: 400; letter-spacing: 0; }
+.environment-download-track { height: 5px; border-radius: 5px; overflow: hidden; background: var(--border-strong); }
+.environment-download-track > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 240ms ease; }
+.environment-download-track.indeterminate > span { width: 30%; animation: environment-progress-transfer 1.8s ease-in-out infinite; }
+.environment-download-metrics {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr 1.2fr;
+  gap: 12px;
+  margin: 18px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+.environment-download-metrics > div { min-width: 0; }
+.environment-download-metrics dt { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.environment-download-metrics dd { margin: 5px 0 0; color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+.environment-transfer-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.environment-transfer-notice svg { flex-shrink: 0; }
+.environment-progress-context { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px 16px; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.environment-progress-source { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.environment-progress-source > svg { flex-shrink: 0; }
+.environment-progress-version { grid-column: 2; grid-row: 1; justify-self: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.environment-progress-timing { grid-column: 3; grid-row: 1; justify-self: end; white-space: nowrap; }
+.environment-progress-estimate { grid-column: 1 / -1; width: 100%; }
+.environment-progress-timing,
+.environment-progress-footer > span { display: flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+.environment-progress-error {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: 8px;
+  background: var(--subtle);
+  max-height: 30vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.environment-progress-error > span { font-size: 11px; color: var(--muted); }
+.environment-progress-error > p { margin: 6px 0 0; color: var(--text); font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
+.environment-progress-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 16px; border-top: 1px solid var(--border); }
+.environment-progress-footer > span { text-align: left; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.environment-progress-footer > .environment-progress-footer-note { align-items: flex-start; gap: 6px; }
+.environment-progress-footer-note > svg { flex-shrink: 0; margin-top: 3px; color: var(--muted); }
+.environment-progress-footer > button { min-width: 80px; flex-shrink: 0; }
+.environment-progress-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  margin: 12px 0 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.environment-progress-summary > span { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.environment-progress-summary > button { flex-shrink: 0; }
+.environment-progress-summary.error { color: var(--danger); background: var(--danger-soft); }
+@keyframes environment-progress-spin { to { transform: rotate(360deg); } }
+@keyframes environment-progress-transfer { from { transform: translateX(-100%); } to { transform: translateX(435%); } }
+@media (max-width: 480px) {
+  .environment-progress-context { display: flex; flex-wrap: wrap; justify-content: space-between; }
+  .environment-progress-timing { margin-left: auto; }
+  .environment-download { padding: 16px; }
+  .environment-download-metrics { grid-template-columns: 1fr 1fr; }
+  .environment-download-metrics > div:first-child { grid-column: 1 / -1; }
+  .environment-progress-hero h3 { font-size: 19px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .environment-progress.running .environment-progress-icon > svg,
+  .environment-download-track.indeterminate > span { animation: none; }
+  .environment-download-track > span { transition: none; }
+}

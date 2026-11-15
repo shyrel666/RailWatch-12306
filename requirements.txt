@@ -1,4 +1,8 @@
 # RailWatch 12306 dependencies
+#
+# Direct runtime dependencies only. CI, release builds and local packaging
+# install the exact versions recorded in requirements.lock; regenerate it after
+# editing this file (the command is in the first lines of requirements.lock).
 
 # Core automation
 selenium==4.44.0
@@ -6,10 +10,10 @@ selenium==4.44.0
 # ChromeDriver auto-download
 requests==2.33.1
 
-# Voice notification (optional, Windows only: on macOS it pulls in a large pyobjc)
-pyttsx3>=2.90;sys_platform=='win32'
+# Finds and stops leftover controlled Chrome and ChromeDriver processes
+psutil==7.2.2
 
-# Windows voice API (optional, Windows only)
+# Windows DPAPI for notification secrets and file-sharing checks before clearing data
 pywin32>=300;sys_platform=='win32'
 
 # macOS keychain storage for notification secrets

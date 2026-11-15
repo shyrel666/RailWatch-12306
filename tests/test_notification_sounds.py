@@ -6,6 +6,9 @@ import unittest
 
 from railwatch_bridge import RailWatchBridge
 from railwatch_config_contract import merge_notification_settings, validate_notification_patch
+from scripts.keychain_isolation import isolate_system_keychain
+
+setUpModule = isolate_system_keychain  # These bridges save notification settings.
 
 
 class NotificationSoundTests(unittest.TestCase):

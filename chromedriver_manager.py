@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import io
 import json
 import os
 import platform
+import plistlib
 import re
 import sys
+import tempfile
+import time
 import zipfile
-from typing import Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 try:
     import requests
@@ -27,21 +31,121 @@ except ImportError:
     URLLIB_AVAILABLE = False
 
 
-# Chrome for Testing JSON API (Chrome 115+)
+# Chrome for Testing JSON APIs (Chrome 115+)
 CFT_URL = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+CFT_MILESTONE_URL = (
+    "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json"
+)
+CFT_BINARY_PREFIX = "https://storage.googleapis.com/chrome-for-testing-public"
 # Pre-115 ChromeDriver storage API
 LEGACY_URL_PREFIX = "https://chromedriver.storage.googleapis.com"
 
+# npmmirror China mirror endpoints (preferred first, with automatic official fallback)
+NPMMIRROR_CFT_API_PREFIX = "https://registry.npmmirror.com/-/binary/chrome-for-testing"
+NPMMIRROR_CFT_CDN_PREFIX = "https://cdn.npmmirror.com/binaries/chrome-for-testing"
+NPMMIRROR_PATCH_VERSIONS_URL = f"{NPMMIRROR_CFT_API_PREFIX}/latest-patch-versions-per-build.json"
+NPMMIRROR_CFT_URL = f"{NPMMIRROR_CFT_API_PREFIX}/known-good-versions-with-downloads.json"
+NPMMIRROR_LEGACY_API_PREFIX = "https://registry.npmmirror.com/-/binary/chromedriver"
+NPMMIRROR_LEGACY_CDN_PREFIX = "https://cdn.npmmirror.com/binaries/chromedriver"
+CHROME_DOWNLOAD_URL = "https://www.google.cn/chrome/"
 
-def _http_get(url: str, timeout: int = 30) -> bytes:
+_METADATA_TIMEOUT = 15
+_MAX_MIRROR_PATCH_CANDIDATES = 3
+_DOWNLOAD_CHUNK_SIZE = 16 * 1024
+_PROGRESS_INTERVAL = 0.25
+
+
+def _report_progress(callback: Optional[Callable[[dict], None]], payload: dict) -> None:
+    """Progress is advisory; a disconnected observer must not abort installation."""
+    if callback is not None:
+        try:
+            callback(payload)
+        except Exception:
+            pass
+
+
+def _read_download_chunks(
+    chunks: Iterable[bytes],
+    headers,
+    progress_callback: Callable[[dict], None],
+    started_at: float,
+) -> bytes:
+    """Collect a response while reporting measured transfer progress, at most 4 Hz."""
+    try:
+        total = int(headers.get("Content-Length", ""))
+    except (TypeError, ValueError):
+        total = 0
+    # requests decodes compressed responses; their Content-Length is not the size
+    # of the decoded chunks, so do not derive a misleading percentage or ETA.
+    if total <= 0 or headers.get("Content-Encoding", "identity").lower() not in ("", "identity"):
+        total = None
+
+    downloaded = 0
+    last_reported_at = started_at
+    content = io.BytesIO()
+
+    def report(now: float) -> None:
+        elapsed = max(0.0, now - started_at)
+        speed = downloaded / elapsed if downloaded and elapsed >= 0.5 else None
+        _report_progress(progress_callback, {
+            "downloaded_bytes": downloaded,
+            "total_bytes": total,
+            "bytes_per_second": speed,
+            "eta_seconds": max(0.0, (total - downloaded) / speed) if total and speed else None,
+            "elapsed_seconds": elapsed,
+        })
+
+    report(time.monotonic())
+    for chunk in chunks:
+        if not chunk:
+            continue
+        content.write(chunk)
+        downloaded += len(chunk)
+        if total is not None and downloaded > total:
+            # A stale/misreported length cannot be used for progress estimates.
+            total = None
+        now = time.monotonic()
+        if now - last_reported_at >= _PROGRESS_INTERVAL:
+            report(now)
+            last_reported_at = now
+    if total is not None and downloaded < total:
+        raise IOError(f"下载不完整：收到 {downloaded} / {total} 字节")
+    report(time.monotonic())
+    return content.getvalue()
+
+
+def _http_get(
+    url: str,
+    timeout: int = 30,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> bytes:
     """Fetch URL content, preferring requests (with redirects) over urllib."""
+    headers = {"User-Agent": "RailWatch/1.0"}
+    if progress_callback is not None:
+        headers["Accept-Encoding"] = "identity"
+    started_at = time.monotonic()
     if REQUESTS_AVAILABLE:
-        resp = requests.get(url, timeout=timeout, allow_redirects=True)
+        if progress_callback is not None:
+            resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
+            try:
+                resp.raise_for_status()
+                return _read_download_chunks(
+                    resp.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE), resp.headers,
+                    progress_callback, started_at,
+                )
+            finally:
+                resp.close()
+        resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
         resp.raise_for_status()
         return resp.content
     if URLLIB_AVAILABLE:
-        req = Request(url, headers={"User-Agent": "RailWatch/1.0"})
+        req = Request(url, headers=headers)
         with urlopen(req, timeout=timeout) as resp:
+            if progress_callback is not None:
+                return _read_download_chunks(
+                    iter(lambda: resp.read(_DOWNLOAD_CHUNK_SIZE), b""), resp.headers,
+                    progress_callback, started_at,
+                )
             return resp.read()
     raise RuntimeError("No HTTP library available (need requests or urllib).")
 
@@ -146,6 +250,28 @@ def _read_exe_version(path: str) -> Optional[str]:
     return None
 
 
+def _read_macos_plist_version(binary_path: str) -> Optional[str]:
+    """Read Chrome/Chromium major version from Contents/Info.plist without launching the app."""
+    contents_dir = os.path.dirname(os.path.dirname(binary_path))
+    plist_path = os.path.join(contents_dir, "Info.plist")
+    if not os.path.isfile(plist_path):
+        return None
+    try:
+        with open(plist_path, "rb") as handle:
+            info = plistlib.load(handle)
+        if not isinstance(info, dict):
+            return None
+        for key in ("CFBundleShortVersionString", "CFBundleVersion", "KSVersion"):
+            raw = info.get(key)
+            if isinstance(raw, str):
+                match = re.search(r"(\d+)\.\d+\.\d+(?:\.\d+)?", raw.strip())
+                if match:
+                    return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
 def _detect_chrome_macos() -> Optional[str]:
     paths = [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -154,18 +280,22 @@ def _detect_chrome_macos() -> Optional[str]:
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ]
     for p in paths:
-        if os.path.isfile(p):
-            try:
-                import subprocess
-                result = subprocess.run(
-                    [p, "--version"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                m = re.search(r"(\d+)\.\d+\.\d+\.\d+", result.stdout.strip())
-                if m:
-                    return m.group(1)
-            except Exception:
-                pass
+        if not os.path.isfile(p):
+            continue
+        major = _read_macos_plist_version(p)
+        if major:
+            return major
+        try:
+            import subprocess
+            result = subprocess.run(
+                [p, "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            m = re.search(r"(\d+)\.\d+\.\d+\.\d+", result.stdout.strip())
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
     return None
 
 
@@ -185,40 +315,321 @@ def _detect_chrome_linux() -> Optional[str]:
     return None
 
 
+@dataclass(frozen=True)
+class _DownloadCandidate:
+    url: str
+    version: str
+    source_label: str
+
+
+class _CandidateDownloadError(RuntimeError):
+    """Error during downloading, unpacking, or verifying a candidate binary."""
+
+
+class _LocalInstallError(RuntimeError):
+    """Filesystem failure while preparing target_dir or writing ChromeDriver locally."""
+
+
+def _prepare_target_dir(target_dir: str) -> None:
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except OSError as exc:
+        raise _LocalInstallError(f"准备 ChromeDriver 安装目录失败: {exc}") from exc
+
+
+def _fetch_metadata(url: str, progress_callback: Optional[Callable[[dict], None]] = None) -> bytes:
+    """Fetch small release metadata with a shorter timeout so dead hosts fail fast."""
+    if progress_callback is not None:
+        _report_progress(progress_callback, {
+            "downloaded_bytes": None, "total_bytes": None, "bytes_per_second": None,
+            "eta_seconds": None, "elapsed_seconds": None,
+        })
+        return _http_get(url, timeout=_METADATA_TIMEOUT, progress_callback=progress_callback)
+    return _http_get(url, timeout=_METADATA_TIMEOUT)
+
+
+def _is_http_404(exc: Exception) -> bool:
+    """Return True only when an HTTP endpoint explicitly reports 404 Not Found."""
+    if getattr(exc, "code", None) == 404:
+        return True
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 404
+
+
+def _parse_version_tuple(version: str) -> Optional[Tuple[int, ...]]:
+    """Parse dotted numeric version strings for deterministic descending comparisons."""
+    parts = version.strip().strip("/").split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def _cft_mirror_zip_url(version: str, platform_name: str) -> str:
+    return f"{NPMMIRROR_CFT_CDN_PREFIX}/{version}/{platform_name}/chromedriver-{platform_name}.zip"
+
+
+def _cft_official_zip_url(version: str, platform_name: str, official_url: Optional[str] = None) -> str:
+    return official_url or f"{CFT_BINARY_PREFIX}/{version}/{platform_name}/chromedriver-{platform_name}.zip"
+
+
+def _build_cft_candidates(
+    version: str,
+    platform_name: str,
+    *,
+    official_url: Optional[str] = None,
+    mirror_first: bool = True,
+) -> list[_DownloadCandidate]:
+    mirror = _DownloadCandidate(_cft_mirror_zip_url(version, platform_name), version, "npmmirror 镜像")
+    official = _DownloadCandidate(
+        _cft_official_zip_url(version, platform_name, official_url),
+        version,
+        "官方源",
+    )
+    return [mirror, official] if mirror_first else [official, mirror]
+
+
+def _build_pre115_candidates(
+    version: str,
+    platform_tag: str,
+    *,
+    mirror_first: bool = True,
+) -> list[_DownloadCandidate]:
+    mirror = _DownloadCandidate(
+        f"{NPMMIRROR_LEGACY_CDN_PREFIX}/{version}/chromedriver_{platform_tag}.zip",
+        version,
+        "npmmirror 镜像",
+    )
+    official = _DownloadCandidate(
+        f"{LEGACY_URL_PREFIX}/{version}/chromedriver_{platform_tag}.zip",
+        version,
+        "官方源",
+    )
+    return [mirror, official] if mirror_first else [official, mirror]
+
+
+def _find_platform_chromedriver_url(entry: dict, platform_name: str) -> Optional[str]:
+    downloads = entry.get("downloads", {}).get("chromedriver", [])
+    if not isinstance(downloads, list):
+        return None
+    for item in downloads:
+        if isinstance(item, dict) and item.get("platform") == platform_name:
+            url = item.get("url")
+            if isinstance(url, str) and url:
+                return url
+    return None
+
+
+def _extract_cft_match_from_versions(
+    data: dict,
+    major_version: str,
+    platform_name: str,
+) -> Optional[Tuple[str, str]]:
+    """Return (official_url, highest_matching_version) from a CfT known-good JSON payload."""
+    versions = data.get("versions", []) if isinstance(data, dict) else []
+    prefix = f"{major_version}."
+    best_key: Optional[Tuple[int, ...]] = None
+    best_result: Optional[Tuple[str, str]] = None
+    for entry in versions:
+        if not isinstance(entry, dict):
+            continue
+        ver = str(entry.get("version", ""))
+        if not ver.startswith(prefix):
+            continue
+        parsed = _parse_version_tuple(ver)
+        if parsed is None:
+            continue
+        official_url = _find_platform_chromedriver_url(entry, platform_name)
+        if not official_url:
+            continue
+        if best_key is None or parsed > best_key:
+            best_key = parsed
+            best_result = (official_url, ver)
+    return best_result
+
+
+def _mirror_has_cft_binary(
+    version: str, platform_name: str, progress_callback: Optional[Callable[[dict], None]] = None,
+) -> bool:
+    """Confirm that chromedriver-{platform}.zip exists in npmmirror for the given build."""
+    dir_url = f"{NPMMIRROR_CFT_API_PREFIX}/{version}/{platform_name}/"
+    try:
+        entries = json.loads(_fetch_metadata(dir_url, progress_callback))
+    except Exception:
+        return False
+    if not isinstance(entries, list):
+        return False
+    expected_name = f"chromedriver-{platform_name}.zip"
+    return any(
+        isinstance(item, dict)
+        and item.get("name") == expected_name
+        and item.get("type") == "file"
+        for item in entries
+    )
+
+
+def _fetch_lightweight_json(
+    url: str, progress_callback: Optional[Callable[[dict], None]] = None,
+) -> Tuple[Optional[dict], bool]:
+    """Fetch a small JSON index; return (data_or_none, should_try_same_host_fallback)."""
+    try:
+        data = json.loads(_fetch_metadata(url, progress_callback))
+    except Exception as exc:
+        return None, _is_http_404(exc)
+    return (data if isinstance(data, dict) else None), True
+
+
+def _resolve_cft_from_known_good(
+    metadata_url: str,
+    major_version: str,
+    platform_name: str,
+    *,
+    mirror_first: bool,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> list[_DownloadCandidate]:
+    """Resolve ChromeDriver URLs from a full known-good-versions JSON endpoint."""
+    try:
+        full_data = json.loads(_fetch_metadata(metadata_url, progress_callback))
+    except Exception:
+        return []
+    match = _extract_cft_match_from_versions(full_data, major_version, platform_name)
+    if not match:
+        return []
+    official_url, ver = match
+    return _build_cft_candidates(ver, platform_name, official_url=official_url, mirror_first=mirror_first)
+
+
+def _ranked_patch_versions(patch_data: Optional[dict], major_version: str) -> list[str]:
+    """Extract unique matching patch versions ordered highest-first by version tuple."""
+    if not isinstance(patch_data, dict):
+        return []
+    builds = patch_data.get("builds", {})
+    if not isinstance(builds, dict):
+        return []
+    prefix = f"{major_version}."
+    ranked: list[Tuple[Tuple[int, ...], str]] = []
+    for entry in builds.values():
+        if not isinstance(entry, dict):
+            continue
+        ver = str(entry.get("version", ""))
+        if not ver.startswith(prefix):
+            continue
+        parsed = _parse_version_tuple(ver)
+        if parsed is not None:
+            ranked.append((parsed, ver))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    unique: list[str] = []
+    for _, ver in ranked:
+        if ver not in unique:
+            unique.append(ver)
+    return unique
+
+
+def _resolve_cft_mirror_candidates(
+    major_version: str, platform_name: str, progress_callback: Optional[Callable[[dict], None]] = None,
+) -> list[_DownloadCandidate]:
+    """Resolve ChromeDriver URLs from npmmirror, preferring lightweight patch metadata."""
+    patch_data, allow_same_host_fallback = _fetch_lightweight_json(NPMMIRROR_PATCH_VERSIONS_URL, progress_callback)
+    if not allow_same_host_fallback:
+        return []
+
+    for ver in _ranked_patch_versions(patch_data, major_version)[:_MAX_MIRROR_PATCH_CANDIDATES]:
+        if _mirror_has_cft_binary(ver, platform_name, progress_callback):
+            return _build_cft_candidates(ver, platform_name, mirror_first=True)
+
+    return _resolve_cft_from_known_good(
+        NPMMIRROR_CFT_URL, major_version, platform_name, mirror_first=True, progress_callback=progress_callback,
+    )
+
+
+def _resolve_cft_official_candidates(
+    major_version: str, platform_name: str, progress_callback: Optional[Callable[[dict], None]] = None,
+) -> list[_DownloadCandidate]:
+    """Resolve ChromeDriver URLs from official Chrome for Testing APIs."""
+    milestone_data, allow_same_host_fallback = _fetch_lightweight_json(CFT_MILESTONE_URL, progress_callback)
+    if not allow_same_host_fallback:
+        return []
+
+    if isinstance(milestone_data, dict):
+        milestones = milestone_data.get("milestones", {})
+        entry = milestones.get(major_version) if isinstance(milestones, dict) else None
+        if isinstance(entry, dict):
+            ver = str(entry.get("version", ""))
+            official_url = _find_platform_chromedriver_url(entry, platform_name)
+            if ver and official_url:
+                return _build_cft_candidates(ver, platform_name, official_url=official_url, mirror_first=False)
+
+    return _resolve_cft_from_known_good(
+        CFT_URL, major_version, platform_name, mirror_first=False, progress_callback=progress_callback,
+    )
+
+
+def _resolve_pre115_candidates(
+    major_version: str,
+    platform_tag: str,
+    *,
+    api_prefix: str,
+    mirror_first: bool,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> list[_DownloadCandidate]:
+    try:
+        data = _fetch_metadata(f"{api_prefix}/LATEST_RELEASE_{major_version}", progress_callback)
+        full_version = data.decode("utf-8").strip()
+    except Exception:
+        return []
+    if not full_version:
+        return []
+    return _build_pre115_candidates(full_version, platform_tag, mirror_first=mirror_first)
+
+
+def _candidate_resolvers(
+    major_version: str, progress_callback: Optional[Callable[[dict], None]] = None,
+) -> list[Callable[[], list[_DownloadCandidate]]]:
+    """Return lazy metadata resolvers ordered from npmmirror to official upstream."""
+    major = int(major_version)
+    if major >= 115:
+        platform_name = _cft_platform_name()
+        if not platform_name:
+            return []
+        return [
+            lambda: _resolve_cft_mirror_candidates(major_version, platform_name, progress_callback),
+            lambda: _resolve_cft_official_candidates(major_version, platform_name, progress_callback),
+        ]
+    platform_tag = _pre115_platform_tag()
+    return [
+        lambda: _resolve_pre115_candidates(
+            major_version,
+            platform_tag,
+            api_prefix=NPMMIRROR_LEGACY_API_PREFIX,
+            mirror_first=True,
+            progress_callback=progress_callback,
+        ),
+        lambda: _resolve_pre115_candidates(
+            major_version,
+            platform_tag,
+            api_prefix=LEGACY_URL_PREFIX,
+            mirror_first=False,
+            progress_callback=progress_callback,
+        ),
+    ]
+
+
 def get_chromedriver_download_url(major_version: str) -> Optional[Tuple[str, str]]:
     """Return (download_url, version_string) for the given Chrome major version.
 
-    For Chrome 115+, uses the Chrome for Testing JSON API.
-    For Chrome versions before 115, uses the pre-115 storage API.
+    Prefers the npmmirror China mirror for faster domestic downloads and falls
+    back to the official Chrome for Testing / storage endpoints when needed.
     """
-    major = int(major_version)
-
-    if major >= 115:
-        return _get_cft_url(major_version)
-    return _get_pre115_url(major_version)
+    major_str = str(int(major_version))
+    for resolve in _candidate_resolvers(major_str):
+        candidates = resolve()
+        if candidates:
+            return candidates[0].url, candidates[0].version
+    return None
 
 
 def _get_cft_url(major_version: str) -> Optional[Tuple[str, str]]:
-    """Chrome for Testing API (Chrome 115+)."""
-    try:
-        data = json.loads(_http_get(CFT_URL))
-    except Exception:
-        return None
-
-    platform_name = _cft_platform_name()
-    if not platform_name:
-        return None
-
-    # Search from newest to oldest for matching major version
-    for entry in reversed(data.get("versions", [])):
-        ver = entry.get("version", "")
-        if not ver.startswith(major_version + "."):
-            continue
-        downloads = entry.get("downloads", {}).get("chromedriver", [])
-        for d in downloads:
-            if d.get("platform") == platform_name:
-                return d["url"], ver
-    return None
+    """Chrome for Testing API (Chrome 115+), preferring npmmirror with official fallback."""
+    return get_chromedriver_download_url(major_version)
 
 
 def _cft_platform_name() -> Optional[str]:
@@ -236,21 +647,11 @@ def _cft_platform_name() -> Optional[str]:
 
 def _get_pre115_url(major_version: str) -> Optional[Tuple[str, str]]:
     """ChromeDriver storage API for Chrome versions before 115."""
-    # Get the latest patch version for this major
-    try:
-        data = _http_get(f"{LEGACY_URL_PREFIX}/LATEST_RELEASE_{major_version}")
-        full_version = data.decode("utf-8").strip()
-    except Exception:
-        return None
-
-    platform_tag = _pre115_platform_tag()
-    url = f"{LEGACY_URL_PREFIX}/{full_version}/chromedriver_{platform_tag}.zip"
-    return url, full_version
+    return get_chromedriver_download_url(major_version)
 
 
 def _pre115_platform_tag() -> str:
     system = platform.system()
-    machine = platform.machine().lower()
     if system == "Windows":
         return "win32"
     if system == "Darwin":
@@ -258,102 +659,206 @@ def _pre115_platform_tag() -> str:
     return "linux64"
 
 
+def _extract_chromedriver_from_zip(zip_data: bytes, exe_name: str) -> bytes:
+    """Extract chromedriver binary bytes from a downloaded zip archive."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            members = [name for name in zf.namelist() if not name.endswith("/")]
+            target_name = next((name for name in members if os.path.basename(name) == exe_name), None)
+            if not target_name:
+                target_name = next(
+                    (name for name in members if os.path.basename(name).lower() == exe_name.lower()),
+                    None,
+                )
+            if not target_name:
+                raise _CandidateDownloadError(f"压缩包中未找到 {exe_name}")
+            with zf.open(target_name) as src:
+                return src.read()
+    except zipfile.BadZipFile as exc:
+        raise _CandidateDownloadError(f"下载的文件不是有效的 ZIP: {exc}") from exc
+
+
+def _install_verified_binary(
+    content: bytes,
+    target_dir: str,
+    exe_name: str,
+    expected_major: str,
+) -> Tuple[str, str]:
+    """Write, verify executable version against expected_major, and atomically install."""
+    _prepare_target_dir(target_dir)
+    dest_path = os.path.join(target_dir, exe_name)
+    tmp_suffix = ".tmp.exe" if platform.system() == "Windows" else ".tmp"
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{exe_name}.", suffix=tmp_suffix, dir=target_dir)
+    except OSError as exc:
+        raise _LocalInstallError(f"无法在目标目录创建 ChromeDriver 临时文件: {exc}") from exc
+
+    fd_closed = False
+    try:
+        try:
+            with os.fdopen(fd, "wb") as f:
+                fd_closed = True
+                f.write(content)
+            if platform.system() != "Windows":
+                os.chmod(tmp_path, 0o755)
+        except OSError as exc:
+            if not fd_closed:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise _LocalInstallError(f"写入 ChromeDriver 临时文件失败: {exc}") from exc
+
+        try:
+            detected_version = detect_chromedriver_version(tmp_path)
+            if not detected_version:
+                raise _CandidateDownloadError("下载的 ChromeDriver 无法执行或版本校验失败")
+            if detected_version.split(".")[0] != expected_major:
+                raise _CandidateDownloadError(
+                    f"ChromeDriver 版本校验不匹配：期望 Chrome {expected_major}，实际为 {detected_version}"
+                )
+        except _CandidateDownloadError:
+            raise
+        except Exception as exc:
+            raise _CandidateDownloadError(f"校验临时 ChromeDriver 失败: {exc}") from exc
+
+        try:
+            os.replace(tmp_path, dest_path)
+            if platform.system() != "Windows":
+                os.chmod(dest_path, 0o755)
+        except OSError as exc:
+            raise _LocalInstallError(f"安装 ChromeDriver 到目标目录失败: {exc}") from exc
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
+
+    return dest_path, detected_version
+
+
 def download_and_install_chromedriver(
     target_dir: str,
     major_version: Optional[str] = None,
     log_callback=None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> str:
     """Download ChromeDriver and install to target_dir.
 
-    Args:
-        target_dir: Directory to save chromedriver executable.
-        major_version: Chrome major version. Auto-detected if None.
-        log_callback: Optional callable for log messages.
+    Tries the npmmirror China mirror first and automatically falls back to
+    official Chrome for Testing / storage URLs if resolution, download,
+    archive integrity, or binary version verification fails.
 
-    Returns:
-        Path to installed chromedriver executable.
-
-    Raises:
-        RuntimeError: If Chrome not found, download fails, etc.
+    progress_callback receives complete snapshots with stage/message/source,
+    byte counts, measured bytes_per_second and eta_seconds (None if unknown).
+    Resolving metadata and downloading the archive are separate transfers;
+    the transfer ETA never represents the whole environment check.
     """
     log = log_callback or (lambda _: None)
+
+    def progress(stage: str, message: str, *, source=None, version=None, **metrics) -> None:
+        _report_progress(progress_callback, {
+            "stage": stage,
+            "message": message,
+            "source": source,
+            "version": version,
+            "downloaded_bytes": None,
+            "total_bytes": None,
+            "bytes_per_second": None,
+            "eta_seconds": None,
+            "elapsed_seconds": None,
+            **metrics,
+        })
 
     if not major_version:
         major_version = detect_chrome_version()
         if not major_version:
             raise RuntimeError(
-                "未检测到 Chrome 浏览器。请先安装 Chrome：https://www.google.com/chrome/"
+                f"未检测到 Chrome 浏览器。请先安装 Chrome：{CHROME_DOWNLOAD_URL}"
             )
+    else:
+        major_version = str(major_version).strip()
+
+    try:
+        major_int = int(major_version)
+    except ValueError as exc:
+        raise RuntimeError(f"无效的 Chrome 主版本号: {major_version}") from exc
+    major_version = str(major_int)
 
     log(f"检测到 Chrome 版本: {major_version}")
 
-    result = get_chromedriver_download_url(major_version)
-    if not result:
+    exe_name = "chromedriver.exe" if platform.system() == "Windows" else "chromedriver"
+    seen_urls: set[str] = set()
+    errors: list[str] = []
+
+    source = "npmmirror 镜像"
+
+    def metadata_progress(metrics: dict) -> None:
+        progress("resolving", f"正在从{source}获取驱动版本信息…", source=source, **metrics)
+
+    resolvers = (_candidate_resolvers(major_version, metadata_progress)
+                 if progress_callback is not None else _candidate_resolvers(major_version))
+    for resolver_index, resolve in enumerate(resolvers):
+        source = "npmmirror 镜像" if resolver_index == 0 else "官方源"
+        progress("resolving", f"正在从{source}查找匹配 Chrome {major_version} 的驱动…", source=source)
+        for candidate in resolve():
+            if candidate.url in seen_urls:
+                continue
+            seen_urls.add(candidate.url)
+            log(f"正在从{candidate.source_label}下载 ChromeDriver {candidate.version}...")
+            progress(
+                "connecting", f"正在连接{candidate.source_label}，准备下载 ChromeDriver…",
+                source=candidate.source_label, version=candidate.version,
+            )
+            try:
+                _prepare_target_dir(target_dir)
+                if progress_callback is not None:
+                    zip_data = _http_get(candidate.url, progress_callback=lambda metrics: progress(
+                        "downloading", f"正在从{candidate.source_label}下载 ChromeDriver {candidate.version}…",
+                        source=candidate.source_label, version=candidate.version, **metrics,
+                    ))
+                else:
+                    zip_data = _http_get(candidate.url)
+                progress(
+                    "extracting", "下载完成，正在解压 ChromeDriver…",
+                    source=candidate.source_label, version=candidate.version,
+                )
+                content = _extract_chromedriver_from_zip(zip_data, exe_name)
+                progress(
+                    "installing", "正在校验版本并安装 ChromeDriver…",
+                    source=candidate.source_label, version=candidate.version,
+                )
+                dest_path, verified_version = _install_verified_binary(
+                    content,
+                    target_dir,
+                    exe_name,
+                    major_version,
+                )
+                log(f"ChromeDriver {verified_version} 已安装到: {dest_path}")
+                progress(
+                    "complete", f"ChromeDriver {verified_version} 安装完成",
+                    source=candidate.source_label, version=verified_version,
+                )
+                return dest_path
+            except _LocalInstallError as exc:
+                raise RuntimeError(str(exc)) from exc
+            except Exception as exc:
+                errors.append(f"[{candidate.source_label}] {exc}")
+                log(f"从{candidate.source_label}获取 ChromeDriver 失败: {exc}")
+                progress(
+                    "retrying", f"{candidate.source_label}获取失败，正在尝试其他下载源…",
+                    source=candidate.source_label, version=candidate.version,
+                )
+
+    if not seen_urls:
         raise RuntimeError(
             f"未找到 Chrome {major_version} 对应的 ChromeDriver 下载地址。"
-            f"\n请手动下载: https://googlechromelabs.github.io/chrome-for-testing/"
+            "\n请手动下载（国内镜像）：https://registry.npmmirror.com/binary.html?path=chrome-for-testing/"
+            "\n或官方源：https://googlechromelabs.github.io/chrome-for-testing/"
         )
-
-    url, full_version = result
-    log(f"正在下载 ChromeDriver {full_version}...")
-
-    try:
-        zip_data = _http_get(url)
-    except Exception as exc:
-        raise RuntimeError(f"下载 ChromeDriver 失败: {exc}") from exc
-
-    # Extract chromedriver from zip
-    os.makedirs(target_dir, exist_ok=True)
-    exe_name = "chromedriver.exe" if platform.system() == "Windows" else "chromedriver"
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-            # Find the chromedriver executable in the zip (may be nested)
-            target_name = None
-            for name in zf.namelist():
-                basename = os.path.basename(name)
-                if basename == exe_name:
-                    target_name = name
-                    break
-            if not target_name:
-                # Try case-insensitive match
-                for name in zf.namelist():
-                    if name.lower().endswith(exe_name.lower()):
-                        target_name = name
-                        break
-            if not target_name:
-                raise RuntimeError(f"压缩包中未找到 {exe_name}")
-
-            with zf.open(target_name) as src:
-                content = src.read()
-
-    except zipfile.BadZipFile as exc:
-        raise RuntimeError(f"下载的文件不是有效的 ZIP: {exc}") from exc
-
-    dest_path = os.path.join(target_dir, exe_name)
-    # Write to temp file first, then rename atomically
-    import tempfile
-    fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=target_dir)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-        # On Windows, need to remove dest first if it exists
-        if os.path.exists(dest_path):
-            os.replace(tmp_path, dest_path)
-        else:
-            os.rename(tmp_path, dest_path)
-    except Exception:
-        # Clean up temp file on failure
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
-
-    # Make executable on non-Windows
-    if platform.system() != "Windows":
-        os.chmod(dest_path, 0o755)
-
-    log(f"ChromeDriver {full_version} 已安装到: {dest_path}")
-    return dest_path
+    raise RuntimeError(f"下载 ChromeDriver 失败: {'; '.join(errors)}")
 
 
 def get_chrome_version_info() -> str:

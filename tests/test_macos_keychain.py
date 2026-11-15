@@ -17,6 +17,13 @@ from railwatch_preferences import (
     unprotect_local_secret,
 )
 from railwatch_rehearsal_checks import check_alerts
+from scripts.keychain_isolation import in_memory_keychain
+
+
+def every_secret():
+    """A value for each secret of the channel table, so a channel added later is covered without editing the tests."""
+    return {field: f"https://secret-{field}.example/hook" if NOTIFICATION_FIELDS[field].get("type") == "url"
+            else f"secret-{field}" for field in NOTIFICATION_SECRET_FIELDS}
 
 
 class NotFound(Exception):
@@ -179,9 +186,7 @@ class KeychainBridgeTests(unittest.TestCase):
         self.assertNotIn("mail-secret", json.dumps(persisted))
         self.assertEqual(store.values, {"email_password": "mail-secret", "server_chan_key": "send"})
 
-        # Every secret of the channel table, so a channel added later is covered without editing this test.
-        secrets = {field: f"https://secret-{field}.example/hook" if NOTIFICATION_FIELDS[field].get("type") == "url"
-                   else f"secret-{field}" for field in NOTIFICATION_SECRET_FIELDS}
+        secrets = every_secret()
         self.assertLessEqual({"bark_key", "ntfy_topic_url", "ntfy_token"}, set(secrets))
         result = bridge.save_preferences(notification_settings=secrets)
         persisted = self.read_settings()
@@ -195,6 +200,25 @@ class KeychainBridgeTests(unittest.TestCase):
         writes = store.calls.count("write_all")
         bridge.save_preferences(notification_settings={"sound_loop": False})
         self.assertEqual(store.calls.count("write_all"), writes)  # Unchanged secrets skip the keychain.
+
+    def test_a_restart_reads_every_saved_secret_back_from_the_keychain(self, _):
+        store = FakeStore()
+        secrets = every_secret()
+        saved, _, _ = self.bridge(store)
+        saved.save_preferences(notification_settings={"server_chan_enabled": True, **secrets})
+        self.assertNotIn("secret-", json.dumps(self.read_settings()))  # The file cannot be where they come back from.
+
+        restored, finished, events = self.bridge(store)
+        self.assertTrue(finished.wait(5))
+        loaded = restored.load_preferences()["notification_settings"]
+        for field, value in secrets.items():
+            with self.subTest(field=field):
+                self.assertEqual(restored.notification_service.settings[field], value)
+                self.assertEqual(loaded[field], "")
+                self.assertTrue(loaded[f"{field}_configured"])
+        self.assertTrue(restored.notification_service.settings["server_chan_enabled"])
+        self.assertEqual([event["payload"]["status"] for event in events if event["event"] == "notificationCredentials"], ["ready"])
+        self.assertEqual(store.calls.count("read_all"), 1)  # One item, so one authorization prompt.
 
     def test_construction_never_touches_the_keychain(self, _):
         self.write_settings({"email_enabled": True, "email_password": "keychain:email_password"})
@@ -297,6 +321,43 @@ class KeychainBridgeTests(unittest.TestCase):
             bridge.save_preferences(notification_settings={"email_password": "new"})
         self.assertEqual(self.read_settings(), before)
         self.assertEqual(bridge.notification_service.settings["email_password"], "old")
+
+
+class SystemKeychainIsolationTests(unittest.TestCase):
+    """scripts.keychain_isolation: a bridge built without a secret store never opens the login keychain."""
+
+    def setUp(self):
+        # Only macOS gives such a bridge the system store; stand in for it on other systems.
+        for module in ("railwatch_bridge", "railwatch_preferences"):
+            patcher = patch(f"{module}.uses_system_keychain", return_value=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.data_dir = directory.name
+        self.path = os.path.join(self.data_dir, "notification_settings.json")
+
+    def test_a_store_without_an_injected_backend_is_refused(self):
+        store = MacSecretStore()
+        for use in (store.read_all, store.delete, lambda: store.write_all({"email_password": "mail"})):
+            with self.assertRaisesRegex(AssertionError, "login keychain"):
+                use()
+
+    def test_a_bridge_without_isolation_cannot_save_secrets(self):
+        bridge = RailWatchBridge(data_dir=self.data_dir)
+        with self.assertRaisesRegex(RuntimeError, "login keychain"):
+            bridge.save_preferences(notification_settings={"email_password": "mail"})
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_an_isolated_bridge_keeps_its_secrets_in_memory(self):
+        with in_memory_keychain() as keyring:
+            bridge = RailWatchBridge(data_dir=self.data_dir)
+            bridge.save_preferences(notification_settings={"email_password": "mail"})
+            self.assertEqual(json.loads(keyring.items[(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)]), {"email_password": "mail"})
+            with open(self.path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["email_password"], "keychain:email_password")
+            bridge.save_preferences(notification_settings={"email_password": None})
+            self.assertEqual(keyring.items, {})
 
 
 if __name__ == "__main__":

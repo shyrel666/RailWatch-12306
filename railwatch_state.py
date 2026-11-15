@@ -58,6 +58,8 @@ class RailWatchState:
     order: Mapping[str, object] = field(default_factory=dict)
     human_action: Mapping[str, object] = field(default_factory=dict)
     prefill: Mapping[str, object] = field(default_factory=dict)
+    # Why a timed auto-submit run that asked for the official pre-fill is not using it.
+    prefill_notice: str = ""
 
     @classmethod
     def initial(cls) -> "RailWatchState":

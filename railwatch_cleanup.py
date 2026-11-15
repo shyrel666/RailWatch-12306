@@ -16,6 +16,7 @@ from railwatch_preferences import atomic_write_json
 from railwatch_state import APP_SLUG
 
 PENDING_FILE = ".cleanup-pending.json"
+ELECTRON_USER_DATA_DIR = "electron"
 
 
 def checked_data_path(directory):
@@ -113,6 +114,23 @@ def release_orphan_browsers(directory, owned_driver_pid=0):
         raise RuntimeError("受控浏览器或驱动尚未退出，尚未删除数据。请关闭相关会话后重试。")
 
 
+def _is_reparse_or_symlink(path):
+    if path.is_symlink():
+        return True
+    st = path.lstat()
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse_flag and getattr(st, "st_file_attributes", 0) & reparse_flag)
+
+
+def _has_electron_subdir(target):
+    electron_dir = target / ELECTRON_USER_DATA_DIR
+    if not (electron_dir.exists() or electron_dir.is_symlink()):
+        return False
+    if _is_reparse_or_symlink(electron_dir):
+        raise RuntimeError("数据目录包含链接或联接，尚未删除数据。请先检查这些路径。")
+    return electron_dir.is_dir()
+
+
 def check_files_released(target):
     """Probe DELETE sharing before moving anything; do not change file contents."""
     if sys.platform != "win32":
@@ -121,9 +139,17 @@ def check_files_released(target):
     import win32file
     import pywintypes
     for root, dirs, files in os.walk(target, followlinks=False):
+        root_path = Path(root)
+        # Electron holds open Chromium handles in data_dir/electron during runtime resets;
+        # session/cache cleanup inside that directory is coordinated by the main process.
+        if root_path == target and ELECTRON_USER_DATA_DIR in dirs:
+            electron_dir = root_path / ELECTRON_USER_DATA_DIR
+            if _is_reparse_or_symlink(electron_dir):
+                raise RuntimeError("数据目录包含链接或联接，尚未删除数据。请先检查这些路径。")
+            dirs.remove(ELECTRON_USER_DATA_DIR)
         for name in dirs + files:
-            path = Path(root, name)
-            if path.is_symlink() or (path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            path = root_path / name
+            if _is_reparse_or_symlink(path):
                 raise RuntimeError("数据目录包含链接或联接，尚未删除数据。请先检查这些路径。")
             try:
                 handle = win32file.CreateFile(str(path), win32con.DELETE,
@@ -145,6 +171,46 @@ def _remove_tree(path):
     shutil.rmtree(path, onerror=writable_retry)
 
 
+def _move_siblings_to_backup(target, backup):
+    children = [entry for entry in target.iterdir() if entry.name != ELECTRON_USER_DATA_DIR]
+    if not children:
+        return []
+    backup.mkdir(exist_ok=True)
+    moved_names = []
+    try:
+        for entry in children:
+            os.replace(str(entry), str(backup / entry.name))
+            moved_names.append(entry.name)
+    except OSError as exc:
+        for name in reversed(moved_names):
+            try:
+                os.replace(str(backup / name), str(target / name))
+            except OSError:
+                pass
+        try:
+            backup.rmdir()
+        except OSError:
+            pass
+        raise RuntimeError("数据目录仍被占用或无修改权限，尚未删除数据。请退出其他实例后重试。") from exc
+    return moved_names
+
+
+def _rollback_siblings(target, backup, moved_names):
+    for entry in list(target.iterdir()):
+        if entry.name == ELECTRON_USER_DATA_DIR:
+            continue
+        if entry.is_dir() and not _is_reparse_or_symlink(entry):
+            _remove_tree(entry)
+        else:
+            entry.unlink(missing_ok=True)
+    for name in moved_names:
+        os.replace(str(backup / name), str(target / name))
+    try:
+        backup.rmdir()
+    except OSError:
+        pass
+
+
 def reset_directory(directory, initialize):
     """Switch to a fresh store before disposal; retain and report undeleted old files."""
     target = checked_data_path(directory)
@@ -158,14 +224,22 @@ def reset_directory(directory, initialize):
             pending = [checked_backup_path(target, entry) for entry in entries]
         except (OSError, ValueError) as exc:
             raise RuntimeError("旧数据清理记录无法读取，尚未删除数据。请检查数据目录。") from exc
+    preserve_electron = _has_electron_subdir(target)
     check_files_released(target)
     backup = checked_backup_path(target, target.parent / f".{APP_SLUG}-clearing-{uuid.uuid4().hex}")
-    moved = target.exists()
-    if moved:
+    moved_names = []
+    moved = False
+    if preserve_electron:
+        moved_names = _move_siblings_to_backup(target, backup)
+        if moved_names:
+            moved = True
+            pending.append(backup)
+    elif target.exists():
         try:
             os.replace(target, backup)
         except OSError as exc:
             raise RuntimeError("数据目录仍被占用或无修改权限，尚未删除数据。请退出其他实例后重试。") from exc
+        moved = True
         pending.append(backup)
     try:
         target.mkdir(exist_ok=True)
@@ -173,10 +247,13 @@ def reset_directory(directory, initialize):
         initialized = initialize()
     except Exception as exc:
         try:
-            if target.exists():
-                _remove_tree(checked_data_path(target))
-            if moved:
-                os.replace(backup, target)
+            if preserve_electron:
+                _rollback_siblings(target, backup, moved_names)
+            else:
+                if target.exists():
+                    _remove_tree(checked_data_path(target))
+                if moved:
+                    os.replace(backup, target)
         except Exception as rollback:
             raise RuntimeError(f"初始化失败且无法恢复目录；旧数据保留在 {backup}，请先恢复后再使用。") from rollback
         raise RuntimeError("新数据目录初始化失败，已恢复原数据，请检查磁盘空间与目录权限。") from exc

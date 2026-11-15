@@ -412,6 +412,12 @@
   background: var(--warning-soft);
   color: var(--warning);
 }
+.rw-update-note-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
 .rw-update-note.error {
   background: var(--danger-soft);
   color: var(--danger);

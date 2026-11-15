@@ -8,6 +8,9 @@ from unittest.mock import Mock, patch
 
 from railwatch_bridge import RailWatchBridge
 from railwatch_notify import NotificationService
+from scripts.keychain_isolation import isolate_system_keychain
+
+setUpModule = isolate_system_keychain  # These bridges save notification settings.
 
 
 class NotificationTests(unittest.TestCase):

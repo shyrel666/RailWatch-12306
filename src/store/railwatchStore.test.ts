@@ -158,6 +158,21 @@ describe("railwatchStore", () => {
 
     expect(store.getState().runtime.chromedriver_path).toBe("D:/RailWatch/chromedriver.exe");
     expect(store.getState().runtime.chrome_version).toBe("Chrome 148");
+    store.getState().applyRuntimeLabels({
+      network_ok: true,
+      network_label: "正常",
+      railway_ok: false,
+      railway_label: "异常",
+      proxy_configured: true,
+      proxy_label: "已配置",
+      proxy_value: "http://127.0.0.1:7890",
+    });
+    expect(store.getState().runtime.network_ok).toBe(true);
+    expect(store.getState().runtime.network_label).toBe("正常");
+    expect(store.getState().runtime.railway_ok).toBe(false);
+    expect(store.getState().runtime.railway_label).toBe("异常");
+    expect(store.getState().runtime.proxy_configured).toBe(true);
+    expect(store.getState().runtime.proxy_value).toBe("http://127.0.0.1:7890");
   });
 
   test("clears stale hits when backend state reports no hits", () => {
@@ -264,5 +279,75 @@ describe("railwatchStore", () => {
     });
     expect(store.getState().status).toEqual(active);
     expect(store.getState().runtime.state).toEqual(active);
+  });
+
+  test("preserves resolved connectivity labels when a pending runtime snapshot arrives later", () => {
+    const store = createRailWatchStore();
+    store.getState().applyRuntimeLabels({
+      network_ok: true,
+      network_label: "正常",
+      railway_ok: true,
+      railway_label: "正常",
+      proxy_configured: false,
+      proxy_label: "未配置",
+      proxy_value: "",
+      connectivity_pending: false,
+    });
+
+    // The placeholder is recognised by its flag; its proxy fields are live values.
+    const pendingSnapshot = {
+      ...store.getState().runtime,
+      chrome_version: "Chrome 140",
+      network_ok: false,
+      network_label: "占位文案",
+      railway_ok: false,
+      railway_label: "占位文案",
+      proxy_configured: true,
+      proxy_label: "已配置",
+      proxy_value: "http://127.0.0.1:7890",
+      connectivity_pending: true,
+    };
+
+    store.getState().applyRuntimeInfo(pendingSnapshot);
+    expect(store.getState().runtime.chrome_version).toBe("Chrome 140");
+    expect(store.getState().runtime.network_ok).toBe(true);
+    expect(store.getState().runtime.network_label).toBe("正常");
+    expect(store.getState().runtime.railway_ok).toBe(true);
+    expect(store.getState().runtime.railway_label).toBe("正常");
+    expect(store.getState().runtime.proxy_label).toBe("已配置");
+    expect(store.getState().runtime.connectivity_pending).toBe(false);
+
+    store.getState().applyRuntimeMetadata({ ...pendingSnapshot, chrome_version: "Chrome 141" });
+    expect(store.getState().runtime.chrome_version).toBe("Chrome 141");
+    expect(store.getState().runtime.network_label).toBe("正常");
+    expect(store.getState().runtime.railway_label).toBe("正常");
+    expect(store.getState().runtime.proxy_value).toBe("http://127.0.0.1:7890");
+  });
+
+  test("a completed runtime snapshot replaces earlier connectivity results, whatever its labels say", () => {
+    const store = createRailWatchStore();
+    store.getState().applyRuntimeLabels({
+      network_ok: true, network_label: "正常", railway_ok: true, railway_label: "正常", connectivity_pending: false,
+    });
+
+    store.getState().applyRuntimeMetadata({
+      ...store.getState().runtime,
+      network_ok: false, network_label: "检测中", railway_ok: false, railway_label: "异常", connectivity_pending: false,
+    });
+    expect(store.getState().runtime.network_ok).toBe(false);
+    expect(store.getState().runtime.network_label).toBe("检测中");
+    expect(store.getState().runtime.railway_label).toBe("异常");
+  });
+
+  test("a pending snapshot is shown as is while no connectivity result has arrived", () => {
+    const store = createRailWatchStore();
+    expect(store.getState().runtime.connectivity_pending).toBe(true);
+
+    store.getState().applyRuntimeInfo({
+      ...store.getState().runtime, chrome_version: "Chrome 140", connectivity_pending: true,
+    });
+    expect(store.getState().runtime.chrome_version).toBe("Chrome 140");
+    expect(store.getState().runtime.network_label).toBe("检测中");
+    expect(store.getState().runtime.connectivity_pending).toBe(true);
   });
 });

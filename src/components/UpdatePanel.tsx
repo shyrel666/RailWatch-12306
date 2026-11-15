@@ -2,7 +2,13 @@ import { Fragment, useMemo, type CSSProperties, type HTMLAttributes } from "reac
 import { ArrowUpRight, Info, LoaderCircle, RefreshCw, RotateCw, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { formatAppVersion } from "../lib/formatSystemStatus";
 import { parseReleaseNotes, type ReleaseNoteBlock, type ReleaseNoteSpan } from "../lib/releaseNotes";
-import { formatReleaseDate, getUpdateFacts, getUpdateSignal } from "../lib/updateDisplay";
+import {
+  formatMacArchLabel,
+  formatReleaseDate,
+  getUpdateFacts,
+  getUpdateSignal,
+  hasDirectManualDownload,
+} from "../lib/updateDisplay";
 import type { UpdateRuntimeState } from "../types";
 
 export type UpdatePanelProps = {
@@ -11,9 +17,11 @@ export type UpdatePanelProps = {
   isUpdating: boolean;
   isInstalling: boolean;
   hasManualDownload: boolean;
+  isRosettaMac?: boolean;
   onPrimaryAction: () => void;
   onClose: () => void;
   onOpenReleaseNotes?: () => void;
+  onDownloadNativeArm64?: () => void;
 };
 
 type Copy = { title: string; detail: string; footer: string; action: string };
@@ -67,7 +75,18 @@ function ReleaseNotes({ notes, date, onOpen }: { notes: string; date: string; on
  * The update as a departure: the installed version is the origin, the new one
  * the destination, and the download travels the track between them.
  */
-export function UpdatePanel({ state, statusLabel, isUpdating, isInstalling, hasManualDownload, onPrimaryAction, onClose, onOpenReleaseNotes }: UpdatePanelProps) {
+export function UpdatePanel({
+  state,
+  statusLabel,
+  isUpdating,
+  isInstalling,
+  hasManualDownload,
+  isRosettaMac,
+  onPrimaryAction,
+  onClose,
+  onOpenReleaseNotes,
+  onDownloadNativeArm64,
+}: UpdatePanelProps) {
   const checking = state.phase === "checking" || (isUpdating && !["available", "downloading", "downloaded"].includes(state.phase));
   const phase = checking ? "checking" : state.phase;
   const downloaded = phase === "downloaded";
@@ -76,6 +95,8 @@ export function UpdatePanel({ state, statusLabel, isUpdating, isInstalling, hasM
   const preparing = phase === "available" && !manual;
   const upToDate = phase === "not-available";
   const success = state.result?.ok ? state.result : undefined;
+  const directManual = manual && hasDirectManualDownload(state);
+  const manualTargetLabel = formatMacArchLabel(success?.targetArch);
   const latestVersion = state.latestVersion || success?.latestVersion || "";
   const releaseNotes = state.releaseNotes || success?.releaseNotes || "";
   const error = state.error || (phase === "error" && state.result && !state.result.ok ? state.result.error : "");
@@ -90,7 +111,14 @@ export function UpdatePanel({ state, statusLabel, isUpdating, isInstalling, hasM
     idle: { title: "尚未检查更新", detail: "检查新版本，让 RailWatch 保持最新。", footer: "当前版本仍可继续使用", action: "检查更新" },
     checking: { title: "正在检查更新", detail: "正在获取最新版本信息，请稍候。", footer: "你可以继续使用 RailWatch", action: "收起" },
     available: manual
-      ? { title: "发现新版本", detail: "前往发布页下载 macOS 安装包。", footer: "下载后按安装说明更新", action: "前往下载" }
+      ? directManual
+        ? {
+            title: "发现新版本",
+            detail: `将直接下载适配当前设备的 macOS ${manualTargetLabel} 安装包（.dmg）${isRosettaMac ? "；已自动为您切换为 Apple Silicon 原生版本" : ""}。`,
+            footer: "下载后打开 DMG 拖入“应用程序”即可更新",
+            action: "下载安装包",
+          }
+        : { title: "发现新版本", detail: "前往发布页下载 macOS 安装包。", footer: "下载后按安装说明更新", action: "前往下载" }
       : { title: "发现新版本", detail: "正在准备下载更新，请稍候。", footer: "更新将在后台下载", action: "收起" },
     downloading: { title: "正在下载更新", detail: "在后台下载，你可以继续使用 RailWatch。", footer: "下载完成后可重启安装", action: "收起" },
     downloaded: isInstalling
@@ -180,6 +208,19 @@ export function UpdatePanel({ state, statusLabel, isUpdating, isInstalling, hasM
               <ShieldCheck aria-hidden="true" size={15} />
               <span>安装前会检查正在运行的任务与订单。</span>
             </p>
+          ) : null}
+          {isRosettaMac && !directManual ? (
+            <div className="rw-update-note warning" role="note">
+              <TriangleAlert aria-hidden="true" size={15} />
+              <div className="rw-update-note-copy">
+                <span>检测到当前运行的是 Intel (x64) 转译版，建议改用 Apple Silicon 原生版。</span>
+                {onDownloadNativeArm64 ? (
+                  <button className="rw-update-release-link" onClick={onDownloadNativeArm64} type="button">
+                    下载 Apple Silicon (arm64) 原生版<ArrowUpRight aria-hidden="true" size={13} />
+                  </button>
+                ) : null}
+              </div>
+            </div>
           ) : null}
           {showNotes ? (
             <ReleaseNotes notes={releaseNotes} date={formatReleaseDate(success?.publishedAt)} onOpen={onOpenReleaseNotes} />

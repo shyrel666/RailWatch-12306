@@ -2,7 +2,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
   shown: undefined as undefined | (() => void),
-  bridge: undefined as undefined | { whenWindowShown: () => Promise<void> },
+  send: vi.fn(),
+  bridge: undefined as undefined | { whenWindowShown: () => Promise<void>; finishSplash: () => void },
 }));
 
 vi.mock("electron", () => ({
@@ -10,6 +11,7 @@ vi.mock("electron", () => ({
     once: (channel: string, callback: () => void) => {
       if (channel === "railwatch:window-shown") harness.shown = callback;
     },
+    send: harness.send,
   },
   contextBridge: {
     exposeInMainWorld: (_name: string, bridge: typeof harness.bridge) => { harness.bridge = bridge; },
@@ -19,6 +21,7 @@ vi.mock("electron", () => ({
 beforeEach(async () => {
   vi.resetModules();
   harness.shown = undefined;
+  harness.send.mockClear();
   harness.bridge = undefined;
   await import("../preload");
 });
@@ -39,4 +42,9 @@ test("a show event received before the renderer loads is remembered", async () =
 
   await expect(harness.bridge!.whenWindowShown()).resolves.toBeUndefined();
   await expect(harness.bridge!.whenWindowShown()).resolves.toBeUndefined();
+});
+
+test("finishSplash notifies main process when startup splash starts dismissing", () => {
+  harness.bridge!.finishSplash();
+  expect(harness.send).toHaveBeenCalledWith("railwatch:splash-finished");
 });

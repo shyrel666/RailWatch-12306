@@ -48,6 +48,9 @@ def validate_query_strategies(strategies):
     _check_range(sale, "presale_retry_seconds", 1, floor)
     _check_range(sale, "presale_retry_limit", 0, 3, (int,))
     _check_range(sale, "presale_retry_window_seconds", 0, 30)
+    # Extra login probes after an inconclusive pre-sale check; 0 stops on the first one.
+    _check_range(sale, "login_recheck_limit", 0, 3, (int,))
+    _check_range(sale, "login_recheck_interval_seconds", 2, 15)
     _check_range(settle, "quiet_ms", 50, 300)
     _check_range(settle, "poll_ms", 10, 100)
     _check_range(settle, "sale_poll_ms", 10, 100)

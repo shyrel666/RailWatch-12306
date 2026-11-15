@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App as AntApp, ConfigProvider } from "antd";
+import { App as AntApp, Button, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { CircleHelp, Info, TriangleAlert } from "lucide-react";
 import { useExportLogDialog } from "./components/ExportLogDialog";
@@ -13,10 +13,12 @@ import { MonitorPage } from "./components/MonitorPage";
 import { OrderCenterPage } from "./components/OrderCenterPage";
 import { RunReviews } from "./components/RunReviews";
 import { SettingsPage } from "./components/SettingsPage";
+import { EnvironmentProgressDialog } from "./components/EnvironmentProgressDialog";
 import { ShellLayout } from "./components/Shell";
 import { TripSetupPage } from "./components/TripSetupPage";
 import { railwatchApi } from "./lib/railwatchApi";
 import { exportEventLog } from "./lib/exportEventLog";
+import { isRosettaMacApp, resolveNativeArm64DownloadUrl } from "./lib/updateDisplay";
 import {
   useConfirmationBridge,
   type ThemedDialog,
@@ -26,6 +28,7 @@ import { useRailWatchStore } from "./store/useRailWatchStore";
 import type {
   BridgeEvent,
   ConfirmationRequest,
+  EnvironmentProgress,
   HumanActionPayload,
   LogEntry,
   MonitorTickPayload,
@@ -34,6 +37,7 @@ import type {
   RailWatchPreferences,
   RailWatchStatus,
   RuntimeInfo,
+  RuntimeLabelsPatch,
   TicketHit,
   TripDraft,
   TripState,
@@ -85,6 +89,9 @@ type DraftSnapshot = {
 function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   const runtime = useRailWatchStore((state) => state.runtime);
   const status = useRailWatchStore((state) => state.status);
+  const environmentProgress = useRailWatchStore(state => state.environmentProgress);
+  const environmentProgressVisible = useRailWatchStore(state => state.environmentProgressVisible);
+  const setEnvironmentProgressVisible = useRailWatchStore(state => state.setEnvironmentProgressVisible);
   const activePage = useRailWatchStore((state) => state.activePage);
   const eventPanelVisible = useRailWatchStore(
     (state) => state.eventPanelVisible,
@@ -97,9 +104,9 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
   const { choosePath, dialog: exportDialog } = useExportLogDialog();
   const exportingRef = useRef(false);
   const [pendingCommands, setPendingCommands] = useState<{ command: string }[]>([]);
-  const environmentCheckRef = useRef(false);
+  const environmentOperationRef = useRef(false);
   // Startup and other commands can finish while Chrome is still downloading.
-  const busy = pendingCommands.find(pending => pending.command === "checkEnvironment")?.command
+  const busy = pendingCommands.find(pending => pending.command === "checkEnvironment" || pending.command === "downloadChromeDriver")?.command
     ?? pendingCommands.at(-1)?.command ?? null;
   const [startupReady, setStartupReady] = useState(false);
   useEffect(() => {
@@ -180,6 +187,9 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       )
         return;
       switch (event.event) {
+        case "environmentProgress":
+          state.applyEnvironmentProgress(event.payload as EnvironmentProgress);
+          break;
         case "rehearsalStarted":
           state.applyRehearsalStarted(event.payload as import("./lib/rehearsal").RehearsalStarted); break;
         case "rehearsalStep":
@@ -249,6 +259,9 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         case "runtimeExit":
         case "runtimeUnavailable":
           finishStartupSplash();
+          if (state.environmentProgress?.status === "running") {
+            state.finishEnvironmentOperation(state.environmentProgress.operation, "运行时中断，环境准备未完成，请重试。");
+          }
           state.resetRehearsalProgress();
           state.applyState({
             ...state.status,
@@ -275,7 +288,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
           notification.destroy("runtime-state");
           void loadTripRef.current();
           void railwatchApi
-            .command<RuntimeInfo>("getRuntimeInfo")
+            .command<RuntimeInfo>("getRuntimeInfo", { probe: false })
             .then((info) => railwatchStore.getState().applyRuntimeInfo(info))
             .catch(() => undefined);
           notification.info({
@@ -294,12 +307,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
           void railwatchApi.stopUrgentAlert();
           break;
         case "labels":
-          state.applyRuntimeLabels(
-            event.payload as {
-              chromedriver_path?: string;
-              chrome_version?: string;
-            },
-          );
+          state.applyRuntimeLabels(event.payload as RuntimeLabelsPatch);
           break;
         default:
           break;
@@ -348,9 +356,16 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       successText?: string,
     ): Promise<T | undefined> => {
       if (clearingDataRef.current) return undefined;
-      if (command === "checkEnvironment") {
-        if (environmentCheckRef.current) return undefined;
-        environmentCheckRef.current = true;
+      const environmentOperation = command === "checkEnvironment" || command === "downloadChromeDriver" ? command : null;
+      if (environmentOperation) {
+        if (environmentOperationRef.current) {
+          railwatchStore.getState().setEnvironmentProgressVisible(true);
+          return undefined;
+        }
+        environmentOperationRef.current = true;
+        message.destroy("environment-check");
+        message.destroy("environment-download");
+        railwatchStore.getState().beginEnvironmentOperation(environmentOperation);
       }
       if (command === "clearLocalData") {
         clearingDataRef.current = true;
@@ -362,7 +377,16 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         if (command !== "clearLocalData" || !value || typeof value !== "object" || !("cleared" in value) || !value.cleared) return;
         latestDraft.current = null;
         railwatchApi.stageDraft(null);
-        try { localStorage.removeItem("railwatch.theme"); } catch { /* The preferences file is authoritative. */ }
+        try {
+          for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+            const storageKey = localStorage.key(index);
+            if (storageKey?.startsWith("railwatch.")) localStorage.removeItem(storageKey);
+          }
+          localStorage.removeItem("railwatch.theme");
+          localStorage.removeItem("railwatch.sidebarCollapsed");
+        } catch {
+          /* The preferences file is authoritative. */
+        }
         const result = value as { cleanup_pending?: boolean; warning?: string; remaining_paths?: string[] };
         await showThemedDialog({ kind: "info", title: result.cleanup_pending ? "部分旧文件尚未清除" : "本地数据已清除",
           content: result.cleanup_pending ? `${result.warning}\n旧文件位置：\n${(result.remaining_paths ?? []).join("\n")}`
@@ -385,6 +409,7 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
           "cancelled" in result &&
           result.cancelled
         ) {
+          if (environmentOperation) railwatchStore.getState().finishEnvironmentOperation(environmentOperation, "操作未完成，请重试。");
           return undefined;
         }
         if (isConfirmation(result)) {
@@ -407,6 +432,11 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         }
         if (isStatusPayload(result)) {
           railwatchStore.getState().applyState(result);
+          if (environmentOperation) {
+            railwatchStore.getState().finishEnvironmentOperation(environmentOperation,
+              result.phase === "error" || result.error_message || !result.environment_ready
+                ? result.error_message || result.status_message || "环境检查未完成，请重试。" : undefined);
+          }
           if (
             command === "checkEnvironment" &&
             result.environment_ready &&
@@ -419,6 +449,15 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
               className: "railwatch-environment-success",
               duration: 3,
             });
+          }
+        }
+        if (environmentOperation) {
+          railwatchStore.getState().finishEnvironmentOperation(environmentOperation);
+          const completed = railwatchStore.getState();
+          if (!completed.environmentProgressVisible && completed.environmentProgress) {
+            const key = environmentOperation === "checkEnvironment" ? "environment-check" : "environment-download";
+            if (completed.environmentProgress.status === "error") message.error({ key, content: completed.environmentProgress.message });
+            else if (environmentOperation === "downloadChromeDriver") message.success({ key, content: completed.environmentProgress.message });
           }
         }
         if (command === "saveConfig" && result) {
@@ -437,12 +476,15 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
         if (command === "saveConfig") railwatchStore.getState().markConfigSaveError(error instanceof Error ? error.message : String(error));
         if (queryRequestId) railwatchStore.getState().endManualQuery(queryRequestId, error instanceof Error ? error.message : String(error));
         const errorText = error instanceof Error ? error.message : String(error);
-        message.error(command === "clearLocalData" ? errorText.replace(/^Error invoking remote method ['"]railwatch:command['"]:\s*(?:Error:\s*)?/, "") : errorText);
+        if (environmentOperation) railwatchStore.getState().finishEnvironmentOperation(environmentOperation, errorText);
+        message.error(environmentOperation ? {
+          key: environmentOperation === "checkEnvironment" ? "environment-check" : "environment-download", content: errorText,
+        } : command === "clearLocalData" ? errorText.replace(/^Error invoking remote method ['"]railwatch:command['"]:\s*(?:Error:\s*)?/, "") : errorText);
         return undefined;
       } finally {
         if (queryRequestId && railwatchStore.getState().manualQueryPending) railwatchStore.getState().endManualQuery(queryRequestId);
         setPendingCommands(current => current.filter(pending => pending !== pendingCommand));
-        if (command === "checkEnvironment") environmentCheckRef.current = false;
+        if (environmentOperation) environmentOperationRef.current = false;
         if (command === "clearLocalData") clearingDataRef.current = false;
       }
     },
@@ -506,34 +548,85 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
     const unsubscribe = railwatchApi.onEvent(applyEvent);
     void (async () => {
       try {
-        const runtimeInfo = await runCommand<RuntimeInfo>("getRuntimeInfo");
-        if (runtimeInfo) {
-          railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
-        }
-        await loadTrip();
+        const runtimeTask = runCommand<RuntimeInfo>("getRuntimeInfo", { probe: false }).then((runtimeInfo) => {
+          if (alive && runtimeInfo) {
+            railwatchStore.getState().applyRuntimeInfo(runtimeInfo);
+          }
+        });
+        await Promise.all([runtimeTask, loadTrip()]);
       } finally {
         if (alive) setStartupReady(true);
       }
     })();
 
-    const refreshRuntime = window.setInterval(() => {
-      if (clearingDataRef.current) return;
+    const refreshRuntimeInfo = () => {
+      if (clearingDataRef.current || document.visibilityState === "hidden") return;
       void railwatchApi
-        .command<RuntimeInfo>("getRuntimeInfo")
+        .command<RuntimeInfo>("getRuntimeInfo", { probe: false })
         .then((runtimeInfo) => {
           if (runtimeInfo) {
             railwatchStore.getState().applyRuntimeMetadata(runtimeInfo);
           }
         })
         .catch(() => undefined);
-    }, 30000);
+    };
+
+    const refreshRuntime = window.setInterval(refreshRuntimeInfo, 180000);
+    document.addEventListener("visibilitychange", refreshRuntimeInfo);
 
     return () => {
       alive = false;
       window.clearInterval(refreshRuntime);
+      document.removeEventListener("visibilitychange", refreshRuntimeInfo);
       unsubscribe();
     };
   }, [applyEvent, loadTrip, runCommand]);
+
+  useEffect(() => {
+    let alive = true;
+    void railwatchApi
+      .getAppInfo()
+      .then((info) => {
+        if (!alive || !isRosettaMacApp(info)) return;
+        const noticeKey = "railwatch-rosetta-translation";
+        notification.warning({
+          key: noticeKey,
+          title: "当前运行的是 Intel (x64) 版本",
+          description:
+            "检测到这台 Apple Silicon Mac 正在通过 Rosetta 2 转译运行，建议改用 Apple Silicon (arm64) 原生版安装包以获得更佳性能与续航。",
+          placement: "topRight",
+          duration: 0,
+          actions: (
+            <Button
+              size="small"
+              type="primary"
+              onClick={() => {
+                void railwatchApi
+                  .getUpdateState()
+                  .catch(() => null)
+                  .then((latestState) => railwatchApi.openExternal(resolveNativeArm64DownloadUrl(latestState)))
+                  .then((opened) => {
+                    if (opened.ok) {
+                      notification.destroy(noticeKey);
+                    } else {
+                      message.error(opened.error || "无法打开 Apple Silicon 原生版下载链接。");
+                    }
+                  })
+                  .catch(() => {
+                    message.error("无法打开 Apple Silicon 原生版下载链接。");
+                  });
+              }}
+            >
+              下载 Apple Silicon 原生版
+            </Button>
+          ),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [message, notification]);
 
   useEffect(() => {
     if (!tripInitialized || editRevision === 0 || clearingDataRef.current) return;
@@ -597,6 +690,11 @@ function RailWatchAppContent({ appearance }: RailWatchAppContentProps) {
       >
         {content}
       </ShellLayout>
+      <EnvironmentProgressDialog
+        progress={environmentProgress}
+        open={environmentProgressVisible}
+        onClose={() => setEnvironmentProgressVisible(false)}
+      />
       {exportDialog}
     </ThemeContext.Provider>
   );

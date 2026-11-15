@@ -116,6 +116,8 @@ class PolicyRangeTests(unittest.TestCase):
         valid = (("sale_start", "presale_retry_seconds", 1), ("sale_start", "presale_retry_seconds", 3),
                  ("sale_start", "presale_retry_limit", 0), ("sale_start", "presale_retry_limit", 3),
                  ("sale_start", "presale_retry_window_seconds", 0), ("sale_start", "presale_retry_window_seconds", 30),
+                 ("sale_start", "login_recheck_limit", 0), ("sale_start", "login_recheck_limit", 3),
+                 ("sale_start", "login_recheck_interval_seconds", 2), ("sale_start", "login_recheck_interval_seconds", 15),
                  ("query_settle", "quiet_ms", 50), ("query_settle", "quiet_ms", 300),
                  ("query_settle", "poll_ms", 10), ("query_settle", "sale_poll_ms", 100),
                  ("query_settle", "resettle_timeout_ms", 0), ("query_settle", "resettle_timeout_ms", 2000))
@@ -125,6 +127,9 @@ class PolicyRangeTests(unittest.TestCase):
         invalid = (("sale_start", "presale_retry_seconds", .5), ("sale_start", "presale_retry_seconds", 3.5),
                    ("sale_start", "presale_retry_limit", 4), ("sale_start", "presale_retry_limit", 1.0),
                    ("sale_start", "presale_retry_limit", True), ("sale_start", "presale_retry_window_seconds", 31),
+                   ("sale_start", "login_recheck_limit", 4), ("sale_start", "login_recheck_limit", -1),
+                   ("sale_start", "login_recheck_limit", 1.0), ("sale_start", "login_recheck_limit", None),
+                   ("sale_start", "login_recheck_interval_seconds", 1), ("sale_start", "login_recheck_interval_seconds", 16),
                    ("query_settle", "quiet_ms", 49), ("query_settle", "quiet_ms", 301),
                    ("query_settle", "poll_ms", 0), ("query_settle", "sale_poll_ms", 101),
                    ("query_settle", "resettle_timeout_ms", -1), ("query_settle", "resettle_timeout_ms", None))

@@ -62,3 +62,23 @@ test("unmount cancels an outstanding picker", async () => {
   view.unmount();
   await waitFor(() => expect(chosen).toHaveBeenCalledWith(null));
 });
+
+test("lists switchable drives and normalizes bare Windows drive paths", async () => {
+  vi.mocked(railwatchApi.getExportLocations).mockResolvedValue({
+    directory: "C:/logs",
+    fileName: "events.txt",
+    shortcuts: [{ name: "下载", path: "C:/downloads" }],
+    drives: [{ name: "C:\\", path: "C:\\" }, { name: "D:\\", path: "D:\\" }],
+  });
+  render(<Harness />);
+  await userEvent.click(screen.getByText("打开导出"));
+  const driveButton = await screen.findByRole("button", { name: "D:\\" });
+  await userEvent.click(driveButton);
+  expect(railwatchApi.listExportDirectory).toHaveBeenCalledWith("D:\\");
+
+  const location = screen.getByRole("textbox", { name: "保存文件夹" });
+  await userEvent.clear(location);
+  await userEvent.type(location, "e:");
+  await userEvent.click(screen.getByRole("button", { name: "前往" }));
+  expect(railwatchApi.listExportDirectory).toHaveBeenCalledWith("E:\\");
+});

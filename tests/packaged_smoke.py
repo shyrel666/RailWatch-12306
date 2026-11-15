@@ -1,9 +1,14 @@
 """Smoke the packaged Electron/preload/runtime contract using temporary user data.
 
-Usage: python tests/packaged_smoke.py [--exe PATH]
+Usage: python tests/packaged_smoke.py [--exe PATH] [--non-ascii-profile]
 Windows defaults to release/win-unpacked; macOS needs the app executable, e.g.
 "release/mac-arm64/RailWatch 12306.app/Contents/MacOS/RailWatch 12306".
+
+--non-ascii-profile keeps the user data under a folder named like a Chinese
+account with a space in it; on Windows the app is also copied there and run from
+the copy, the way a per-user install sits under C:\\Users\\<account>.
 """
+import argparse
 import base64
 import json
 import os
@@ -11,7 +16,6 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from urllib.request import urlopen
 import websocket
@@ -21,8 +25,9 @@ sys.path.insert(0, str(ROOT))
 from railwatch_config_contract import default_config
 from railwatch_orders import OrderIntent, OrderJournal, OrderResult
 from scripts.ci_keychain import use_test_keychain
+from scripts.smoke_profile import install_under_profile, temporary_profile
 
-EXE =ROOT / "release" / "win-unpacked" / "RailWatch 12306.exe"
+DEFAULT_EXE = ROOT / "release" / "win-unpacked" / "RailWatch 12306.exe"
 IS_WINDOWS = sys.platform == "win32"
 
 
@@ -50,10 +55,12 @@ def stop(process):
     process.wait(timeout=10)
 
 
-def main():
-    with tempfile.TemporaryDirectory(prefix="railwatch-package-test-") as tmp:
-        # macOS temporary folders live under /var, a symlink to /private/var.
-        tmp = os.path.realpath(tmp)
+def main(executable: Path, non_ascii: bool = False):
+    # Each round keeps its own log and screenshot under build/qa.
+    evidence = "-non-ascii" if non_ascii else ""
+    with temporary_profile("railwatch-package-test-", non_ascii) as tmp:
+        if non_ascii and IS_WINDOWS:
+            executable = install_under_profile(executable, executable.parent, tmp)
         data_dir, env = isolated_user_data(tmp)
         data_dir.mkdir(parents=True)
         old_config = default_config()
@@ -81,8 +88,8 @@ def main():
             options["startupinfo"] = startup
         log_dir = ROOT / "build" / "qa"
         log_dir.mkdir(parents=True, exist_ok=True)
-        with open(log_dir / "packaged-smoke.log", "w", encoding="utf-8") as log:
-            process = subprocess.Popen([str(EXE), f"--remote-debugging-port={port}", f"--remote-allow-origins=http://localhost:{port}", f"--user-data-dir={tmp}/electron"], env=env, stdout=log, stderr=log, **options)
+        with open(log_dir / f"packaged-smoke{evidence}.log", "w", encoding="utf-8") as log:
+            process = subprocess.Popen([str(executable), f"--remote-debugging-port={port}", f"--remote-allow-origins=http://localhost:{port}", f"--user-data-dir={tmp}/electron"], env=env, stdout=log, stderr=log, **options)
             ws = None
             try:
                 endpoint = None
@@ -145,12 +152,20 @@ def main():
                     if evaluate("document.querySelector('.st-btn-start')?.disabled") is False:
                         break
                     time.sleep(0.2)
+                # The startup splash covers the page for its first seconds. Give it time to
+                # leave so the screenshot shows the monitor page; the checks do not depend on it.
+                for _ in range(75):
+                    if evaluate("!document.getElementById('startup-splash')"):
+                        break
+                    time.sleep(0.2)
                 image = call("Page.captureScreenshot", {"format":"png"})
-                (log_dir / "packaged-monitor.png").write_bytes(base64.b64decode(image["data"]))
+                screenshot = log_dir / f"packaged-monitor{evidence}.png"
+                screenshot.write_bytes(base64.b64decode(image["data"]))
                 assert evaluate("document.querySelector('.st-btn-start')?.disabled") is False, evaluate("document.querySelector('.page-surface')?.innerText")
                 print(json.dumps({"preload":True,"runtime":True,"legacy_config":True,"draft":True,
                     "legacy_order":True,"valid_start_without_results":True,"stop":True,
-                    "screenshot":str(log_dir / "packaged-monitor.png")}, ensure_ascii=False))
+                    "executable":str(executable),"data_dir":str(data_dir),
+                    "screenshot":str(screenshot)}, ensure_ascii=False))
                 try: call("Browser.close")
                 except (websocket.WebSocketException, OSError): pass
                 process.wait(timeout=15)
@@ -160,10 +175,14 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--exe":
-        EXE = Path(sys.argv[2]).resolve()
-    elif not IS_WINDOWS:
+    parser = argparse.ArgumentParser(description="Smoke the packaged app with temporary user data.")
+    parser.add_argument("--exe", type=Path, help="packaged app executable; required off Windows")
+    parser.add_argument("--non-ascii-profile", action="store_true",
+                        help="keep user data, and on Windows a copy of the app, under a Chinese-named folder with a space")
+    arguments = parser.parse_args()
+    if arguments.exe is None and not IS_WINDOWS:
         raise SystemExit("Pass --exe with the packaged app executable on this platform.")
-    if not EXE.is_file():
-        raise SystemExit(f"Packaged app not found: {EXE}")
-    main()
+    packaged = (arguments.exe or DEFAULT_EXE).resolve()
+    if not packaged.is_file():
+        raise SystemExit(f"Packaged app not found: {packaged}")
+    main(packaged, arguments.non_ascii_profile)

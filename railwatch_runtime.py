@@ -36,6 +36,7 @@ class RailWatchRuntime:
         max_workers: int = 4,
     ):
         self._write_lock = threading.Lock()
+        self._output_closed = False
         self._maintenance_guard = threading.Lock()
         self._active_commands = 0
         self._clearing_data = False
@@ -117,9 +118,17 @@ class RailWatchRuntime:
                 if clearing:
                     self._clearing_data = False
 
+    def _dispatch_get_runtime_info(self, payload: dict):
+        kwargs = {}
+        if "probe" in payload:
+            kwargs["probe"] = bool(payload["probe"])
+        if "force" in payload:
+            kwargs["force"] = bool(payload["force"])
+        return self.bridge.get_runtime_info(**kwargs) if kwargs else self.bridge.get_runtime_info()
+
     def _dispatch(self, command: str, payload: dict):
         handlers = {
-            "getRuntimeInfo": lambda: self.bridge.get_runtime_info(),
+            "getRuntimeInfo": lambda: self._dispatch_get_runtime_info(payload),
             "loadConfig": lambda: self.bridge.load_config(),
             "saveConfig": lambda: self.bridge.save_config(payload.get("config") or payload),
             "loadTripState": lambda: self.bridge.load_trip_state(),
@@ -187,8 +196,24 @@ class RailWatchRuntime:
         self._station_executor.shutdown(wait=True)
         self._executor.shutdown(wait=True)
 
+    def close_output(self, timeout: float = 2.0) -> None:
+        """Stop writing to stdout before the interpreter shuts down.
+
+        Background threads keep emitting events after the command loop ends. One
+        caught inside a stdout write when finalization starts never releases the
+        stream's lock, and Python aborts with "could not acquire lock for <stdout>
+        at interpreter shutdown". Taking the write lock waits for such a write to
+        finish; later events are dropped. A writer stuck on a pipe that nobody
+        reads is not waited for beyond `timeout`.
+        """
+        if self._write_lock.acquire(timeout=timeout):
+            self._output_closed = True
+            self._write_lock.release()
+
     def _stdout_writer(self, payload: dict) -> None:
         with self._write_lock:
+            if self._output_closed:
+                return
             sys.stdout.write(dumps_json(payload) + "\n")
             sys.stdout.flush()
 
@@ -206,6 +231,8 @@ def main() -> int:
     finally:
         runtime.bridge.stop_idle_watch()
         runtime.shutdown()
+        # Every accepted command has answered by now; see close_output for the rest.
+        runtime.close_output()
     return 0
 
 

@@ -5,6 +5,8 @@ import { DEFAULT_DATE_STRATEGY } from "../lib/dateStrategy";
 import { DEFAULT_ORDER_POLICY } from "../lib/orderPolicy";
 import { conditionsMatch, mergeQuerySnapshots, queryFamily, queryRows, type QueryViews } from "../lib/queryResults";
 import type {
+  EnvironmentOperation,
+  EnvironmentProgress,
   HumanActionPayload,
   LogEntry,
   MissingTargets,
@@ -18,6 +20,7 @@ import type {
   RailWatchStatus,
   ResultsPayload,
   RuntimeInfo,
+  RuntimeLabelsPatch,
   TicketHit,
   TripDraftReadResult,
 } from "../types";
@@ -67,6 +70,7 @@ export const defaultRuntimeInfo: RuntimeInfo = {
   proxy_configured: false,
   proxy_label: "检测中",
   proxy_value: "",
+  connectivity_pending: true,
   state: defaultStatus,
 };
 
@@ -105,6 +109,12 @@ export const defaultConfig: RailWatchConfig = {
 };
 
 export type RailWatchStore = {
+  environmentProgress: EnvironmentProgress | null;
+  environmentProgressVisible: boolean;
+  beginEnvironmentOperation: (operation: EnvironmentOperation) => void;
+  applyEnvironmentProgress: (progress: EnvironmentProgress) => void;
+  finishEnvironmentOperation: (operation: EnvironmentOperation, error?: string) => void;
+  setEnvironmentProgressVisible: (visible: boolean) => void;
   rehearsalEnabled: boolean;
   setRehearsalEnabled: (enabled: boolean) => void;
   rehearsal: { activeId: string | null; trigger: "manual" | "task" | null; checks: RehearsalCheck[]; report: RehearsalReport | null; fingerprint: string | null; pendingFingerprint: string | null; lastStartedAt?: number; historyCleared?: boolean };
@@ -165,7 +175,7 @@ export type RailWatchStore = {
   eventPanelVisible: boolean;
   applyRuntimeInfo: (runtime: RuntimeInfo) => void;
   applyRuntimeMetadata: (runtime: RuntimeInfo) => void;
-  applyRuntimeLabels: (patch: Partial<Pick<RuntimeInfo, "chromedriver_path" | "chrome_version">>) => void;
+  applyRuntimeLabels: (patch: RuntimeLabelsPatch) => void;
   applyState: (status: RailWatchStatus) => void;
   applyLog: (entry: LogEntry) => void;
   applyResults: (payload: ResultsPayload) => void;
@@ -192,9 +202,48 @@ const logLevelByFilter: Record<string, string | string[]> = {
 
 export const MAX_LOG_ENTRIES = 1000;
 
+/**
+ * A snapshot taken before the background probe reported can arrive after the
+ * probe's labels event. Its placeholder network and 12306 fields must not
+ * replace results that are already shown. Proxy fields are always live.
+ */
+function mergeRuntimeSnapshot(current: RuntimeInfo, incoming: RuntimeInfo): RuntimeInfo {
+  if (!incoming.connectivity_pending || current.connectivity_pending) return incoming;
+  return {
+    ...incoming,
+    network_ok: current.network_ok,
+    network_label: current.network_label,
+    railway_ok: current.railway_ok,
+    railway_label: current.railway_label,
+    connectivity_pending: false,
+  };
+}
+
 export function createRailWatchStore() {
   let nextLogId = 0;
   return createStore<RailWatchStore>((set, get) => ({
+    environmentProgress: null,
+    environmentProgressVisible: false,
+    beginEnvironmentOperation: operation => {
+      const now = Date.now() / 1000;
+      set({ environmentProgress: { operation, status: "running", started_at: now, updated_at: now,
+        stage: "checking", message: operation === "checkEnvironment" ? "正在检查本机运行环境…" : "正在查找匹配的 ChromeDriver…" },
+        environmentProgressVisible: true });
+    },
+    applyEnvironmentProgress: progress => {
+      const current = get().environmentProgress;
+      // Only a user-started operation owns this dialog. Ignore unrelated or late events.
+      if (!current || current.operation !== progress.operation || current.status !== "running") return;
+      set({ environmentProgress: progress });
+    },
+    finishEnvironmentOperation: (operation, error) => {
+      const current = get().environmentProgress;
+      if (!current || current.operation !== operation || current.status !== "running") return;
+      set({ environmentProgress: { operation, started_at: current.started_at, updated_at: Date.now() / 1000,
+        status: error ? "error" : "success", stage: error ? "error" : "complete",
+        message: error || (operation === "checkEnvironment" ? "运行环境已就绪，可以继续登录。" : "ChromeDriver 已安装，可以检查运行环境。") } });
+    },
+    setEnvironmentProgressVisible: environmentProgressVisible => set({ environmentProgressVisible }),
     rehearsalEnabled: false,
     setRehearsalEnabled: rehearsalEnabled => set({ rehearsalEnabled }),
     rehearsal: { activeId: null, trigger: null, checks: [], report: null, fingerprint: null, pendingFingerprint: null },
@@ -273,18 +322,19 @@ export function createRailWatchStore() {
     logPaused: false,
     eventPanelVisible: false,
     applyRuntimeInfo: (runtime) => {
+      const merged = mergeRuntimeSnapshot(get().runtime, runtime);
       const current = get().status;
-      if (current.task?.run_id && !runtime.state.task?.run_id) {
-        set({ runtime: { ...runtime, state: current } });
+      if (current.task?.run_id && !merged.state.task?.run_id) {
+        set({ runtime: { ...merged, state: current } });
         return;
       }
-      set({ runtime });
-      get().applyState(runtime.state);
+      set({ runtime: merged });
+      get().applyState(merged.state);
     },
     applyRuntimeMetadata: (runtime) => {
       // Periodic health requests can complete after a newer state event. Keep
       // that event as the authority and refresh only runtime metadata here.
-      set({ runtime: { ...runtime, state: get().status } });
+      set({ runtime: { ...mergeRuntimeSnapshot(get().runtime, runtime), state: get().status } });
     },
     applyRuntimeLabels: (patch) => {
       set({ runtime: { ...get().runtime, ...patch } });

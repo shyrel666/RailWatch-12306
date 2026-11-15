@@ -45,7 +45,9 @@ describe("ipcSecurity", () => {
   });
 
   test("requires main-process confirmation for destructive or automated commands", () => {
-    expect(getCommandConfirmation("clearLocalData", {})).toMatchObject({ title: "清除本地数据" });
+    const clearPrompt = getCommandConfirmation("clearLocalData", {});
+    expect(clearPrompt).toMatchObject({ title: "清除本地数据" });
+    expect(clearPrompt?.message).toContain("更新缓存");
     expect(getCommandConfirmation("closeBrowser", {})).toMatchObject({ title: "关闭浏览器" });
     expect(getCommandConfirmation("startMonitor", { config: { auto_submit: true } })).toMatchObject({ title: "核对本次监控" });
     expect(getCommandConfirmation("startMonitor", { config: { auto_alternate: true } })).toMatchObject({ title: "核对本次监控" });

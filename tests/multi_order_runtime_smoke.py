@@ -15,7 +15,12 @@ from railwatch_orders import OrderIntent, OrderJournal, OrderResult
 
 
 def main():
-    executable = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "build/qa/efficiency-phase2/runtime/railwatch_runtime.exe"
+    default_name = "railwatch_runtime.exe" if sys.platform == "win32" else "railwatch_runtime"
+    executable = (
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else ROOT / "build" / "qa" / "efficiency-phase2" / "runtime" / "railwatch_runtime" / default_name
+    )
     if not executable.is_file():
         raise RuntimeError("Build the phase-two runtime first, or pass its path")
     with tempfile.TemporaryDirectory(prefix="railwatch-multi-runtime-") as temporary:

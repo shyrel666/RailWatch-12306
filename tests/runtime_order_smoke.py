@@ -4,7 +4,11 @@ Windows protects secrets with DPAPI. macOS keeps them in the default keychain,
 which CI points at a temporary keychain before running this script. No browser,
 12306 login or network action is involved.
 
-Usage: python tests/runtime_order_smoke.py [--exe PATH_TO_RUNTIME]
+Usage: python tests/runtime_order_smoke.py [--exe PATH_TO_RUNTIME] [--non-ascii-profile]
+
+--non-ascii-profile keeps the data under a folder named like a Chinese account
+with a space in it; on Windows the runtime is also copied there and run from the
+copy, the way a per-user install sits under C:\\Users\\<account>.
 """
 import argparse
 import json
@@ -13,13 +17,13 @@ from pathlib import Path
 import queue
 import subprocess
 import sys
-import tempfile
 import threading
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from railwatch_orders import OrderIntent, OrderJournal, OrderResult
 from scripts.ci_keychain import use_test_keychain
+from scripts.smoke_profile import install_under_profile, temporary_profile
 
 IS_MACOS = sys.platform == "darwin"
 KEYCHAIN_SERVICE = "org.railwatch.railwatch12306"
@@ -29,9 +33,8 @@ CONFIG = {"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-
 
 
 def default_executable() -> Path:
-    if sys.platform == "win32":
-        return ROOT / "dist-runtime" / "railwatch_runtime.exe"
-    return ROOT / "dist-runtime" / "railwatch_runtime" / "railwatch_runtime"
+    executable = "railwatch_runtime.exe" if sys.platform == "win32" else "railwatch_runtime"
+    return ROOT / "dist-runtime" / "railwatch_runtime" / executable
 
 
 def isolated_environment(home: str) -> dict:
@@ -191,10 +194,10 @@ def check_unreadable_secret(executable: Path, directory: Path, environment: dict
     assert json.loads(preferences_path.read_text(encoding="utf-8")) == damaged
 
 
-def check_clear_removes_secrets(executable: Path):
+def check_clear_removes_secrets(executable: Path, non_ascii: bool = False):
     """Without an unfinished order, clearing local data also removes stored secrets."""
-    with tempfile.TemporaryDirectory(prefix="railwatch-runtime-clear-") as temporary:
-        home = os.path.realpath(temporary)  # The clear guard rejects aliased paths such as /var -> /private/var.
+    # The profile path is canonical: the clear guard rejects aliased paths such as /var -> /private/var.
+    with temporary_profile("railwatch-runtime-clear-", non_ascii) as home:
         directory = data_directory(home)
         session = RuntimeSession(executable, isolated_environment(home))
         prefs = session.request("prefs", "savePreferences", {"notification_settings": {"email_password": "clear-secret"}})
@@ -212,13 +215,19 @@ def check_clear_removes_secrets(executable: Path):
 def main():
     parser = argparse.ArgumentParser(description="Smoke the packaged Python runtime.")
     parser.add_argument("--exe", type=Path, default=default_executable(), help="runtime executable to test")
-    executable = parser.parse_args().exe.resolve()
+    parser.add_argument("--non-ascii-profile", action="store_true",
+                        help="keep the data, and on Windows a copy of the runtime, under a Chinese-named folder with a space")
+    arguments = parser.parse_args()
+    executable = arguments.exe.resolve()
+    non_ascii = arguments.non_ascii_profile
     if not executable.is_file():
         raise RuntimeError(f"Runtime not found at {executable}; build it with npm run build:runtime first")
-    with tempfile.TemporaryDirectory(prefix="railwatch-runtime-orders-") as temporary:
-        directory, environment = check_recovery_and_secrets(executable, os.path.realpath(temporary))
+    with temporary_profile("railwatch-runtime-orders-", non_ascii) as home:
+        if non_ascii and sys.platform == "win32":
+            executable = install_under_profile(executable, executable.parent, home)
+        directory, environment = check_recovery_and_secrets(executable, home)
         check_unreadable_secret(executable, directory, environment)
-    check_clear_removes_secrets(executable)
+        check_clear_removes_secrets(executable, non_ascii)
     protection = "keychain" if IS_MACOS else "DPAPI"
     print(f"Packaged runtime {executable}: restart recovery, {protection} protection, unreadable-secret fallback, "
           "duplicate-start and clear-data guards, and secret cleanup passed; no browser/network actions.")

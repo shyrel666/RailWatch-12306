@@ -111,7 +111,7 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
     return {
       title: "清除本地数据",
       okText: "清除数据", danger: true,
-      message: "将关闭 RailWatch 受控浏览器，并删除本地配置、登录信息、订单与复盘记录、日志和下载的驱动。不会取消官方订单。是否继续？",
+      message: "将关闭 RailWatch 受控浏览器，并删除本地配置、12306 登录信息、订单与复盘记录、日志、界面/窗口状态、更新缓存和下载的驱动。不会取消官方订单。是否继续？",
     };
   }
   if (command === "closeBrowser") {

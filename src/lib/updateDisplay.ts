@@ -1,8 +1,31 @@
 import type { BoardTone } from "../components/DepartureBoard";
-import type { UpdateRuntimeState } from "../types";
+import type { AppInfo, MacArch, UpdateRuntimeState } from "../types";
+
+export const LATEST_MAC_RELEASE_URL = "https://github.com/shyrel666/RailWatch-12306/releases/latest";
 
 export type UpdateSignal = { tone: BoardTone; live: boolean };
 export type UpdateFact = { label: string; value: string };
+
+export function isRosettaMacApp(info?: AppInfo | null): boolean {
+  return info?.platform === "darwin" && info.runningUnderARM64Translation === true;
+}
+
+export function hasDirectManualDownload(state: UpdateRuntimeState): boolean {
+  if (state.installMode !== "manual" || !state.result?.ok || !state.result.hasUpdate) return false;
+  return Boolean(state.result.downloadUrl && state.result.downloadUrl !== state.result.releaseUrl);
+}
+
+export function formatMacArchLabel(arch?: MacArch): string {
+  return arch === "arm64" ? "Apple Silicon (arm64)" : arch === "x64" ? "Intel (x64)" : "当前芯片";
+}
+
+export function resolveNativeArm64DownloadUrl(state?: UpdateRuntimeState | null): string {
+  const result = state?.result;
+  if (result?.ok && result.targetArch === "arm64" && result.downloadUrl) {
+    return result.downloadUrl;
+  }
+  return LATEST_MAC_RELEASE_URL;
+}
 
 /**
  * One lamp for every update entry point, so the sidebar, the About page and the
@@ -60,7 +83,7 @@ export function formatRemaining(seconds: number): string {
 
 /** Transfer figures for the departure-board facts row; empty when nothing is known. */
 export function getUpdateFacts(state: UpdateRuntimeState): UpdateFact[] {
-  if (state.phase === "downloaded") {
+  if (state.phase === "downloaded" || (state.phase === "available" && state.installMode === "manual")) {
     return state.packageSize ? [{ label: "安装包", value: formatBytes(state.packageSize) }] : [];
   }
   if (state.phase !== "downloading" || state.downloadTransferred === undefined) return [];

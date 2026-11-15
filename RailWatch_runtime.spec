@@ -8,6 +8,18 @@ from PyInstaller.utils.hooks import collect_submodules
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 
+# The interpreter running this spec is the one that gets frozen. Refuse any
+# version other than the one pinned for CI and release builds, so a local
+# default Python cannot end up inside an installer.
+with open(os.path.join(SPECPATH, ".python-version"), encoding="utf-8") as pinned_file:
+    pinned_python = ".".join(pinned_file.read().strip().split(".")[:2])
+running_python = "%d.%d" % sys.version_info[:2]
+if running_python != pinned_python:
+    raise SystemExit(
+        f"The runtime must be built with Python {pinned_python} (.python-version), not {running_python}. "
+        "Use `npm run build:runtime`: it builds from requirements.lock in its own virtual environment."
+    )
+
 # selenium >= 4.44 lazy-loads every browser submodule (chrome.options, edge.service, ...)
 # through module __getattr__, so static import analysis never sees them and the frozen
 # app only fails at runtime when the browser is first launched. Force-collect them.
@@ -32,10 +44,6 @@ for optional_file in (
 ):
     if os.path.exists(optional_file):
         datas.append((optional_file, "."))
-
-assets_dir = "assets"
-if os.path.isdir(assets_dir):
-    datas.append((assets_dir, assets_dir))
 
 
 a = Analysis(
@@ -66,50 +74,31 @@ if missing:
 
 pyz = PYZ(a.pure)
 
-if IS_MACOS:
-    # onedir: nothing is unpacked on each launch, and every Mach-O stays a separate
-    # file that electron-builder signs inside the .app. UPX would break signatures.
-    exe = EXE(
-        pyz,
-        a.scripts,
-        [],
-        exclude_binaries=True,
-        name="railwatch_runtime",
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=False,
-        console=True,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-    )
-    coll = COLLECT(
-        exe,
-        a.binaries,
-        a.datas,
-        strip=False,
-        upx=False,
-        name="railwatch_runtime",
-    )
-else:
-    exe = EXE(
-        pyz,
-        a.scripts,
-        a.binaries,
-        a.datas,
-        [],
-        name="railwatch_runtime",
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=True,
-        console=True,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-    )
+# onedir with UPX disabled across platforms: avoids per-launch %TEMP% unpacking,
+# _MEI* temp leaks on force-stop, UPX AV false positives, and keeps every Mach-O
+# binary separate for macOS .app signing.
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="railwatch_runtime",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="railwatch_runtime",
+)

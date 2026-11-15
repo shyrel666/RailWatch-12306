@@ -40,3 +40,8 @@ RailWatch should never upload 12306 cookies, sessions, passwords or local user c
 - RailWatch does not complete payment for the user.
 - Electron renderer code must access native capabilities only through the preload allowlist.
 - Python runtime commands must keep destructive actions confirmation-gated.
+
+## ChromeDriver Downloads
+
+- To support domestic users without reliable direct access to Google hosts, automatic ChromeDriver installation requests the third-party `npmmirror` mirror (`registry.npmmirror.com` / `cdn.npmmirror.com`) over HTTPS first and falls back to official Chrome for Testing / `googleapis.com` URLs when needed.
+- Upstream Chrome for Testing manifests do not publish SHA-256 checksums and upstream ChromeDriver binaries are unsigned, so RailWatch validates HTTPS download completion, ZIP extraction, and local `--version` major-version compatibility on a temporary binary before replacing an existing driver. Users requiring stricter provenance can place a manually verified `chromedriver` binary directly in the application data directory.

@@ -44,6 +44,7 @@ const LONG_RUNNING_COMMANDS = new Set([
   "downloadChromeDriver",
 ]);
 const LONG_RUNNING_TIMEOUT_MS = 600_000;
+const PROGRESS_EXTENDED_COMMANDS = new Set(["checkEnvironment", "downloadChromeDriver"]);
 
 export class JsonLineDecoder {
   private buffer = "";
@@ -74,18 +75,25 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  progressOperation?: string;
 };
 
 export class PendingRequests {
   private pending = new Map<string, PendingRequest>();
 
-  create(id: string, timeoutMs: number): Promise<unknown> {
+  create(id: string, timeoutMs: number, progressOperation?: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.reject(id, new Error(`Python runtime request timed out after ${timeoutMs}ms`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timeout });
+      this.pending.set(id, { resolve, reject, timeout, progressOperation });
     });
+  }
+
+  refreshProgress(operation: string): void {
+    for (const request of this.pending.values()) {
+      if (request.progressOperation === operation) request.timeout.refresh();
+    }
   }
 
   resolve(response: RuntimeResponse): void {
@@ -129,12 +137,10 @@ export type RuntimeCommand = {
 
 export const RUNTIME_MISSING_MESSAGE = "运行时文件缺失，请重新安装 RailWatch 12306。";
 
-/** Windows ships a onefile exe; macOS ships a PyInstaller onedir folder. */
+/** Packaged builds ship a PyInstaller onedir directory on both Windows and macOS. */
 export function packagedRuntimeExecutable(resourcesPath: string, platform: NodeJS.Platform = process.platform): string {
-  const root = path.join(resourcesPath, "railwatch-runtime");
-  return platform === "win32"
-    ? path.join(root, "railwatch_runtime.exe")
-    : path.join(root, "railwatch_runtime", "railwatch_runtime");
+  const filename = platform === "win32" ? "railwatch_runtime.exe" : "railwatch_runtime";
+  return path.join(resourcesPath, "railwatch-runtime", "railwatch_runtime", filename);
 }
 
 type RuntimeCommandEnvironment = {
@@ -277,8 +283,8 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
       if (this.child !== child) return;
       this.emit("started");
       const recovering = this.restartAttempts > 0 || this.manualRecovery;
-      // Frozen startup plus connectivity fallbacks can exceed ten seconds.
-      void this.request("getRuntimeInfo", {}, { timeoutMs: 30000 }).then(info => {
+      // Frozen startup skips blocking connectivity probes via { probe: false }.
+      void this.request("getRuntimeInfo", { probe: false }, { timeoutMs: 30000 }).then(info => {
         if (this.child !== child) return;
         if (!info || typeof info !== "object" || !("state" in info) || !info.state || typeof info.state !== "object") {
           throw new Error("Runtime readiness response is invalid");
@@ -317,7 +323,12 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
     const timeoutMs =
       options.timeoutMs ?? (LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS);
     const id = String(this.nextId++);
-    const promise = this.pending.create(id, timeoutMs) as Promise<T>;
+    // A slow but active driver download can legitimately exceed ten minutes.
+    // Only default environment requests use an inactivity timeout; an explicit
+    // caller deadline and every other command retain their fixed deadlines.
+    const progressOperation = options.timeoutMs === undefined && PROGRESS_EXTENDED_COMMANDS.has(command)
+      ? command : undefined;
+    const promise = this.pending.create(id, timeoutMs, progressOperation) as Promise<T>;
     this.child.stdin.write(JSON.stringify({ id, command, payload }) + "\n", (error) => {
       if (error) this.pending.reject(id, error);
     });
@@ -387,6 +398,13 @@ export class RailWatchPythonRuntimeClient extends EventEmitter {
 
   private handleMessage(message: RuntimeMessage): void {
     if (message.type === "event") {
+      const progress = message.payload;
+      if (message.event === "environmentProgress" && progress && typeof progress === "object"
+          && "operation" in progress && typeof progress.operation === "string"
+          && PROGRESS_EXTENDED_COMMANDS.has(progress.operation)
+          && "status" in progress && progress.status === "running") {
+        this.pending.refreshProgress(progress.operation);
+      }
       this.emit("event", message);
       return;
     }

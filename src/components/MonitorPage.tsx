@@ -122,6 +122,8 @@ export function MonitorPage({
   const order = status.order;
   const prefill = status.prefill;
   const prefillDirect = Boolean(prefill && !prefill.fallback);
+  // Set only when the run asked for the pre-fill and prepared without it.
+  const prefillNotice = status.monitoring && !prefill ? status.prefill_notice : null;
   const unresolvedOrder = hasUnresolvedOrder(order);
   const seatCapabilities = useRailWatchStore(state => state.runtime.seat_capabilities);
   const automationIssue = automationConfigIssue(draftConfig, seatCapabilities);
@@ -188,7 +190,7 @@ export function MonitorPage({
   const saleAt = config.timer_enabled && config.sale_at ? Date.parse(config.sale_at) : NaN;
   const display =
     waitingForSale && Number.isFinite(saleAt) && saleAt > now
-      ? { caption: "距定时开售", value: saleCountdown(saleAt, now), note: prefillDirect ? "预填已就绪，到点后直接购票" : "到点后自动开始查询", tone: "led" as const }
+      ? { caption: "距定时开售", value: saleCountdown(saleAt, now), note: prefillDirect ? "预填已就绪，到点后直接购票" : prefillNotice ? "未使用预填，到点后常规查询" : "到点后自动开始查询", tone: "led" as const }
       : status.monitoring
         ? {
             caption: "已运行",
@@ -263,6 +265,11 @@ export function MonitorPage({
           </>
         }
       />
+
+      {prefillNotice ? (
+        <Alert id="monitor-prefill-notice" type="info" showIcon message="本次未使用官方预填"
+          description={`${prefillNotice}。到点后按常规余票查询执行，自动提交设置不变。`} />
+      ) : null}
 
       {order?.status ? (
         <Alert

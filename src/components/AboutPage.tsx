@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { App as AntApp, Button, ConfigProvider } from "antd";
+import { Alert, App as AntApp, Button, ConfigProvider } from "antd";
 import {
   ArrowUpRight,
   Download,
@@ -14,7 +14,7 @@ import { formatAppVersion } from "../lib/formatSystemStatus";
 import { railwatchApi } from "../lib/railwatchApi";
 import { getBoardTheme } from "../lib/theme";
 import { useAppUpdate } from "../lib/useAppUpdate";
-import { getUpdateSignal } from "../lib/updateDisplay";
+import { getUpdateSignal, isRosettaMacApp, resolveNativeArm64DownloadUrl } from "../lib/updateDisplay";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { AppInfo, UpdateRuntimeState } from "../types";
 import { BrandWordmark } from "./BrandWordmark";
@@ -55,7 +55,8 @@ function UpdateTrack({ state }: { state: UpdateRuntimeState }) {
 }
 
 function environmentFields(info: AppInfo) {
-  const system = [PLATFORM_NAMES[info.platform] ?? info.platform, info.arch].filter(Boolean).join(" ");
+  const arch = isRosettaMacApp(info) ? `${info.arch}（Rosetta 转译）` : info.arch;
+  const system = [PLATFORM_NAMES[info.platform] ?? info.platform, arch].filter(Boolean).join(" ");
   return [
     { label: "Electron", value: info.electronVersion },
     { label: "Chromium", value: info.chromeVersion },
@@ -148,6 +149,25 @@ export function AboutPage() {
           </div>
         </section>
       </ConfigProvider>
+
+      {appInfo && appInfo !== "unavailable" && isRosettaMacApp(appInfo) ? (
+        <Alert
+          className="about-rosetta-alert"
+          type="warning"
+          showIcon
+          title="检测到在 Apple Silicon Mac 上运行了 Intel (x64) 版本"
+          description="当前应用正通过 Rosetta 2 转译运行，建议下载并替换为 Apple Silicon (arm64) 原生版，以获得更佳性能与续航。"
+          action={
+            <Button
+              size="small"
+              type="primary"
+              onClick={() => void openLink(resolveNativeArm64DownloadUrl(updateState))}
+            >
+              下载 Apple Silicon 原生版
+            </Button>
+          }
+        />
+      ) : null}
 
       <nav aria-label="项目与文档" className="about-section">
         <h2 className="about-section-title">项目与文档</h2>

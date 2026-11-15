@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConfigProvider } from "antd";
@@ -67,6 +69,35 @@ test("official prefill toggle pairs side-by-side with order tracking for timed a
   });
   expect(screen.queryByRole("region", { name: "官方预填加速" })).toBeNull();
   expect(screen.getByRole("region", { name: "订单跟踪" }).parentElement!.classList.contains("split")).toBe(false);
+});
+
+test("official prefill warns when the computer clock is not Beijing time", () => {
+  resetStore();
+  railwatchStore.setState({
+    config: { ...defaultConfig, timer_enabled: true, auto_submit: true, sale_at: "2026-11-07T16:00:00+08:00" },
+  });
+  const offset = vi.spyOn(Date.prototype, "getTimezoneOffset");
+  try {
+    for (const [minutes, text] of [[-480, "起售前自动预填直连"], [0, "本机时区不是北京时间，预填不会启用"],
+      [-540, "本机时区不是北京时间，预填不会启用"]] as const) {
+      offset.mockReturnValue(minutes);
+      const view = render(<TripSetupPage runCommand={vi.fn(async () => undefined)} confirm={vi.fn(async () => true)} busy={null} />);
+      expect(within(screen.getByRole("region", { name: "官方预填加速" })).getByText(text)).toBeTruthy();
+      view.unmount();
+    }
+    // A switched-off pre-fill keeps its own text whatever the clock is.
+    offset.mockReturnValue(0);
+    railwatchStore.setState({ config: { ...railwatchStore.getState().config, prefill_enabled: false } });
+    render(<TripSetupPage runCommand={vi.fn(async () => undefined)} confirm={vi.fn(async () => true)} busy={null} />);
+    expect(within(screen.getByRole("region", { name: "官方预填加速" })).getByText("已关闭，走常规余票查询")).toBeTruthy();
+
+    const pagesCss = readFileSync(path.resolve("src/styles/pages.css"), "utf8");
+    const subSmallRule = pagesCss.match(/\.trip-automation-watch-sub\s*>\s*small\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(subSmallRule).toContain("white-space: normal");
+    expect(subSmallRule).not.toContain("ellipsis");
+  } finally {
+    offset.mockRestore();
+  }
 });
 
 test("waitlist seat labels use runtime capabilities and preserve an explicit multi-seat selection", async () => {

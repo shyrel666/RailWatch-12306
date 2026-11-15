@@ -21,6 +21,9 @@ from railwatch_preferences import (
     save_ui_preferences,
 )
 from railwatch_runtime import RailWatchRuntime
+from scripts.keychain_isolation import isolate_system_keychain
+
+setUpModule = isolate_system_keychain  # These bridges save notification settings.
 
 
 class PreferencePatchTests(unittest.TestCase):

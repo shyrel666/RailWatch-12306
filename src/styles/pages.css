@@ -1070,8 +1070,8 @@ html[data-theme="dark"] .chart-card {
 .automation-feature > small { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .trip-automation-aux { padding-top: 12px; border-top: 1px solid var(--border); }
 .trip-automation-aux.split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
-.trip-automation-watch { display: flex; flex-direction: column; justify-content: center; gap: 6px; min-width: 0; }
-.trip-automation-aux:not(.split) > .trip-automation-watch { min-height: 36px; }
+.trip-automation-watch { display: flex; flex-direction: column; justify-content: flex-start; gap: 6px; min-width: 0; }
+.trip-automation-aux:not(.split) > .trip-automation-watch { justify-content: center; min-height: 36px; }
 .trip-automation-aux.split > .trip-automation-watch:first-child { padding: 2px 14px 2px 2px; }
 .trip-automation-aux.split > .trip-automation-watch + .trip-automation-watch { padding: 2px 2px 2px 14px; border-left: 1px solid var(--border); }
 .trip-automation-watch-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -1080,7 +1080,8 @@ html[data-theme="dark"] .chart-card {
 .trip-automation-watch-label > strong { font-weight: 500; white-space: nowrap; }
 .trip-automation-watch-head > .ant-switch { flex-shrink: 0; }
 .trip-automation-watch-sub { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; padding-left: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.trip-automation-watch-sub > small, .trip-automation-watch-sub > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trip-automation-watch-sub > small { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.trip-automation-watch-sub > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .trip-automation-watch-interval { flex-shrink: 0; width: 108px; }
 .trip-automation-aux.split .trip-automation-watch-interval { width: 98px; }
 @media (max-width: 520px) {
@@ -2045,6 +2046,12 @@ html[data-theme="dark"] .chart-card {
 .toggle-tile small {
   color: var(--muted);
   line-height: 1.5;
+}
+.toggle-grid-note {
+  margin: 8px 2px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 .notification-sound-settings {
   margin-top: 10px;

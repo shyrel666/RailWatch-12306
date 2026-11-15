@@ -7,12 +7,16 @@ on:
 jobs:
   test:
     name: Test Electron app and Python runtime
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    # A keychain or permission dialog on a headless runner would otherwise wait for hours.
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # The two systems installers are built for. Python and Node versions are
+        # not part of the matrix: .python-version and .nvmrc pin what ships.
+        os: [windows-latest, macos-15]
 
     steps:
       - name: Checkout
@@ -21,19 +25,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version-file: .python-version
           cache: pip
+          cache-dependency-path: requirements.lock
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+        run: python -m pip install --require-hashes -r requirements.lock
 
       - name: Install Node dependencies
         run: npm ci
@@ -42,10 +45,48 @@ jobs:
         run: python -m unittest discover -s tests -p "test_*.py"
 
       - name: Compile Python modules
-        run: python -m py_compile railwatch_rehearsal.py railwatch_rehearsal_checks.py railwatch_rehearsal_drill.py railwatch_run_review.py railwatch_prefill.py railwatch_trip_check.py railwatch_state.py gui_12306_0.py anti_detect.py chromedriver_manager.py railwatch_preferences.py railwatch_bridge.py railwatch_runtime.py
+        run: python -m compileall -q -l . railwatch_policies
 
       - name: Run Electron and renderer tests
         run: npm run test
 
       - name: Build Electron renderer and main process
         run: npm run build
+
+      # Release builds freeze the runtime the same way; a break shows up here
+      # instead of on the release tag.
+      - name: Build the frozen runtime
+        run: npm run build:runtime
+
+      # The macOS runtime needs the temporary keychain that the release workflow sets up.
+      - name: Verify the frozen runtime starts and restores orders
+        if: ${{ runner.os == 'Windows' }}
+        run: python -X utf8 tests/runtime_order_smoke.py
+
+      # A per-user install keeps the app, its data and the Chrome profile under
+      # C:\Users\<account>, and Chinese account names with a space are common.
+      - name: Verify the frozen runtime under a non-ASCII profile path
+        if: ${{ runner.os == 'Windows' }}
+        run: python -X utf8 tests/runtime_order_smoke.py --non-ascii-profile
+
+      # The release workflow smokes the final Windows app the same way. Running
+      # it here first keeps a broken app from surfacing only on the release tag.
+      - name: Package the unpacked app
+        if: ${{ runner.os == 'Windows' }}
+        run: npm run package:unpacked
+
+      - name: Smoke the packaged app
+        if: ${{ runner.os == 'Windows' }}
+        run: python -X utf8 tests/packaged_smoke.py
+
+      - name: Smoke the packaged app under a non-ASCII profile path
+        if: ${{ runner.os == 'Windows' }}
+        run: python -X utf8 tests/packaged_smoke.py --non-ascii-profile
+
+      - name: Upload smoke evidence
+        if: ${{ always() && runner.os == 'Windows' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-windows-smoke
+          if-no-files-found: ignore
+          path: build/qa

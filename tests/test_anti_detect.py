@@ -1,214 +1,108 @@
-import builtins
-import json
-import os
+import unittest
 from pathlib import Path
 
-from anti_detect import AntiDetect, DeviceProfile, RailDeviceIdProtector, USER_AGENTS
+import anti_detect
+from anti_detect import (
+    AdaptiveRateLimiter,
+    RailDeviceIdProtector,
+    apply_chrome_launch_hardening,
+    build_automation_hygiene_script,
+)
+
+ANTI_DETECT_PATH = Path(__file__).resolve().parents[1] / "anti_detect.py"
 
 
-def test_legacy_device_profile_is_migrated_without_regeneration(tmp_path):
-    legacy = DeviceProfile.generate_random().to_dict()
-    original_user_agent = legacy["user_agent"]
-    original_screen_width = legacy["screen_width"]
-    legacy.pop("canvas_noise_seed")
-    legacy.pop("audio_noise_seed")
-    profile_path = tmp_path / "device_profile.json"
-    profile_path.write_text(json.dumps(legacy), encoding="utf-8")
+class AntiDetectTests(unittest.TestCase):
+    def test_module_carries_no_fingerprint_spoofing_or_behaviour_simulation(self):
+        for name in ("AntiDetect", "DeviceProfile", "BehaviorSimulator", "USER_AGENTS", "create_anti_detect_driver"):
+            self.assertFalse(hasattr(anti_detect, name))
+        source = ANTI_DETECT_PATH.read_text(encoding="utf-8")
+        for marker in ("--user-agent=", "undetected", "toDataURL", "WebGLRenderingContext", "getChannelData"):
+            self.assertNotIn(marker, source)
 
-    logs = []
-    profile = AntiDetect(str(tmp_path), log_callback=logs.append).get_or_create_profile()
+    def test_device_id_tracker_reports_consistent_cookie(self):
+        class FakeDriver:
+            def get_cookies(self):
+                return [{"name": "RAIL_DEVICEID", "value": "abc"}]
 
-    assert profile.user_agent == original_user_agent
-    assert profile.screen_width == original_screen_width
-    assert isinstance(profile.canvas_noise_seed, int)
-    assert isinstance(profile.audio_noise_seed, int)
-    saved = json.loads(profile_path.read_text(encoding="utf-8"))
-    assert saved["user_agent"] == original_user_agent
-    assert "canvas_noise_seed" in saved
-    assert "audio_noise_seed" in saved
-    assert not any("重新生成" in message for message in logs)
+        logs = []
+        tracker = RailDeviceIdProtector(FakeDriver(), log_callback=logs.append)
+        tracker.save_device_id()
 
+        self.assertIs(tracker.check_consistency(), True)
+        self.assertTrue(logs[0].startswith("💾 已记录 RAIL_DEVICEID"))
 
-def test_device_profile_from_dict_seeds_are_stable_for_same_legacy_profile():
-    legacy = DeviceProfile.generate_random().to_dict()
-    legacy.pop("canvas_noise_seed")
-    legacy.pop("audio_noise_seed")
+    def test_device_id_tracker_warns_on_cookie_change_without_restoring(self):
+        class FakeDriver:
+            def __init__(self):
+                self.cookies = [{"name": "RAIL_DEVICEID", "value": "abc"}]
+                self.add_cookie_calls = []
 
-    first = DeviceProfile.from_dict(legacy)
-    second = DeviceProfile.from_dict(legacy)
+            def get_cookies(self):
+                return self.cookies
 
-    assert first.canvas_noise_seed == second.canvas_noise_seed
-    assert first.audio_noise_seed == second.audio_noise_seed
+            def add_cookie(self, cookie):
+                self.add_cookie_calls.append(cookie)
 
+        driver = FakeDriver()
+        logs = []
+        tracker = RailDeviceIdProtector(driver, log_callback=logs.append)
+        tracker.save_device_id()
+        driver.cookies = [{"name": "RAIL_DEVICEID", "value": "changed"}]
 
-def test_user_agent_pool_matches_windows_profile_values():
-    assert all("Windows NT" in user_agent for user_agent in USER_AGENTS)
+        self.assertIs(tracker.check_consistency(), False)
+        self.assertEqual(driver.add_cookie_calls, [])
+        self.assertTrue(any("变化" in message for message in logs))
 
+    def test_anti_detect_header_uses_compliance_risk_control_language(self):
+        source = ANTI_DETECT_PATH.read_text(encoding="utf-8")
+        header = source.split('"""', 2)[1]
 
-def test_legacy_profile_migration_returns_profile_when_save_fails(tmp_path, monkeypatch):
-    legacy = DeviceProfile.generate_random().to_dict()
-    original_user_agent = legacy["user_agent"]
-    legacy.pop("canvas_noise_seed")
-    legacy.pop("audio_noise_seed")
-    profile_path = tmp_path / "device_profile.json"
-    profile_path.write_text(json.dumps(legacy), encoding="utf-8")
-    real_open = builtins.open
+        self.assertNotIn("基础检测绕过", header)
+        self.assertNotIn("绕过 navigator.webdriver", header)
+        self.assertNotIn("成功率 >95%", header)
+        self.assertNotIn("TLS 指纹优化", header)
+        self.assertIn("风险控制", header)
+        self.assertIn("不绕过登录、验证码、订单确认、支付或网站规则", header)
 
-    def open_with_write_failure(path, mode="r", *args, **kwargs):
-        if os.path.abspath(os.fspath(path)) == os.path.abspath(os.fspath(profile_path)) and "w" in mode:
-            raise OSError("profile is locked")
-        return real_open(path, mode, *args, **kwargs)
+    def test_apply_chrome_launch_hardening_sets_automation_hygiene_only(self):
+        class FakeOptions:
+            def __init__(self):
+                self.arguments = []
+                self.experimental = {}
 
-    monkeypatch.setattr(builtins, "open", open_with_write_failure)
-    logs = []
+            def add_argument(self, value):
+                self.arguments.append(value)
 
-    profile = AntiDetect(str(tmp_path), log_callback=logs.append).get_or_create_profile()
+            def add_experimental_option(self, key, value):
+                self.experimental[key] = value
 
-    assert profile.user_agent == original_user_agent
-    assert isinstance(profile.canvas_noise_seed, int)
-    assert isinstance(profile.audio_noise_seed, int)
-    assert any("迁移设备指纹配置写回失败" in message for message in logs)
-    assert not any("重新生成" in message for message in logs)
+        options = FakeOptions()
+        apply_chrome_launch_hardening(options)
 
+        self.assertIn("--disable-blink-features=AutomationControlled", options.arguments)
+        self.assertIn("enable-automation", options.experimental["excludeSwitches"])
+        self.assertIs(options.experimental["useAutomationExtension"], False)
+        self.assertEqual(options.arguments, ["--disable-blink-features=AutomationControlled"])
 
-def test_anti_detect_script_guards_optional_browser_apis(tmp_path):
-    anti_detect = AntiDetect(str(tmp_path), log_callback=lambda message: None)
-    profile = DeviceProfile.generate_random()
+    def test_automation_hygiene_script_avoids_fingerprint_spoofing(self):
+        script = build_automation_hygiene_script()
 
-    script = anti_detect._build_anti_detect_script(profile)
+        self.assertIn("webdriver", script)
+        self.assertIn("cdc_", script)
+        self.assertNotIn("toDataURL", script)
+        self.assertNotIn("WebGLRenderingContext", script)
+        self.assertNotIn("devicePixelRatio", script)
+        self.assertNotIn("hardwareConcurrency", script)
 
-    assert "const _mediaEnumerateDevices = navigator.mediaDevices && navigator.mediaDevices.enumerateDevices;" in script
-    assert "if (_mediaEnumerateDevices) {" in script
-    assert "typeof WebGLRenderingContext !== 'undefined'" in script
-    assert "typeof AudioBuffer !== 'undefined'" in script
-    assert ".filter(fn => typeof fn === 'function')" in script
+    def test_rate_limiter_consumes_risk_alert_once(self):
+        limiter = AdaptiveRateLimiter(5, 3, 30, log_callback=lambda _: None)
+        limiter.on_error("操作过快，请稍后再试")
 
-
-def test_inject_anti_detect_scripts_uses_cdp_source(tmp_path):
-    class FakeDriver:
-        def __init__(self):
-            self.commands = []
-
-        def execute_cdp_cmd(self, command, payload):
-            self.commands.append((command, payload))
-
-    driver = FakeDriver()
-    anti_detect = AntiDetect(str(tmp_path), log_callback=lambda message: None)
-    anti_detect.inject_anti_detect_scripts(driver)
-
-    command, payload = driver.commands[0]
-    assert command == "Page.addScriptToEvaluateOnNewDocument"
-    assert "navigator" in payload["source"]
-    assert "webdriver" in payload["source"]
+        self.assertIs(limiter.risk_detected, True)
+        self.assertEqual(limiter.consume_risk_alert(), "操作过快，请稍后再试")
+        self.assertIsNone(limiter.consume_risk_alert())
 
 
-def test_device_id_tracker_reports_consistent_cookie():
-    class FakeDriver:
-        def get_cookies(self):
-            return [{"name": "RAIL_DEVICEID", "value": "abc"}]
-
-    logs = []
-    tracker = RailDeviceIdProtector(FakeDriver(), log_callback=logs.append)
-    tracker.save_device_id()
-
-    assert tracker.check_consistency() is True
-    assert logs[0].startswith("💾 已记录 RAIL_DEVICEID")
-
-
-def test_device_id_tracker_warns_on_cookie_change_without_restoring():
-    class FakeDriver:
-        def __init__(self):
-            self.cookies = [{"name": "RAIL_DEVICEID", "value": "abc"}]
-            self.add_cookie_calls = []
-
-        def get_cookies(self):
-            return self.cookies
-
-        def add_cookie(self, cookie):
-            self.add_cookie_calls.append(cookie)
-
-    driver = FakeDriver()
-    logs = []
-    tracker = RailDeviceIdProtector(driver, log_callback=logs.append)
-    tracker.save_device_id()
-    driver.cookies = [{"name": "RAIL_DEVICEID", "value": "changed"}]
-
-    assert tracker.check_consistency() is False
-    assert driver.add_cookie_calls == []
-    assert any("变化" in message for message in logs)
-
-
-def test_anti_detect_header_uses_compliance_risk_control_language():
-    source = Path("anti_detect.py").read_text(encoding="utf-8")
-    header = source.split('"""', 2)[1]
-
-    assert "基础检测绕过" not in header
-    assert "绕过 navigator.webdriver" not in header
-    assert "成功率 >95%" not in header
-    assert "TLS 指纹优化" not in header
-    assert "风险控制" in header
-    assert "不绕过登录、验证码、订单确认、支付或网站规则" in header
-
-
-def test_generate_random_uses_host_stable_profile_not_random_draw():
-    first = DeviceProfile.generate_random(chrome_major="131")
-    second = DeviceProfile.generate_random(chrome_major="131")
-
-    assert first == second
-    assert "Chrome/131.0.0.0" in first.user_agent
-    assert first.timezone == "Asia/Shanghai"
-    assert first.screen_width >= 1280
-    assert first.canvas_noise == 0.0
-
-
-def test_host_stable_profile_ua_follows_detected_major():
-    profile = DeviceProfile.generate_random(chrome_major="137")
-    assert "Chrome/137.0.0.0" in profile.user_agent
-    assert "Windows NT 10.0" in profile.user_agent
-
-
-def test_apply_chrome_launch_hardening_sets_automation_hygiene_only():
-    class FakeOptions:
-        def __init__(self):
-            self.arguments = []
-            self.experimental = {}
-
-        def add_argument(self, value):
-            self.arguments.append(value)
-
-        def add_experimental_option(self, key, value):
-            self.experimental[key] = value
-
-    from anti_detect import apply_chrome_launch_hardening
-
-    options = FakeOptions()
-    apply_chrome_launch_hardening(options)
-
-    assert "--disable-blink-features=AutomationControlled" in options.arguments
-    assert "enable-automation" in options.experimental["excludeSwitches"]
-    assert options.experimental["useAutomationExtension"] is False
-    assert not any(arg.startswith("--user-agent=") for arg in options.arguments)
-
-
-def test_automation_hygiene_script_avoids_fingerprint_spoofing():
-    from anti_detect import build_automation_hygiene_script
-
-    script = build_automation_hygiene_script()
-
-    assert "webdriver" in script
-    assert "cdc_" in script
-    assert "toDataURL" not in script
-    assert "WebGLRenderingContext" not in script
-    assert "devicePixelRatio" not in script
-    assert "hardwareConcurrency" not in script
-
-
-def test_rate_limiter_consumes_risk_alert_once():
-    from anti_detect import AdaptiveRateLimiter
-
-    limiter = AdaptiveRateLimiter(5, 3, 30, log_callback=lambda _: None)
-    limiter.on_error("操作过快，请稍后再试")
-
-    assert limiter.risk_detected is True
-    assert limiter.consume_risk_alert() == "操作过快，请稍后再试"
-    assert limiter.consume_risk_alert() is None
+if __name__ == "__main__":
+    unittest.main()

@@ -8,12 +8,15 @@ echo
 echo "=== RailWatch 12306 macOS Packaging ==="
 echo
 
-for tool in node npm python3; do
+for tool in node npm; do
   if ! command -v "$tool" > /dev/null 2>&1; then
     echo "ERROR: $tool was not found in PATH." >&2
     exit 1
   fi
 done
+# The runtime is frozen with the Python pinned in .python-version. Stop here,
+# before anything is changed, when that interpreter is not installed.
+node scripts/build-runtime.mjs --check
 
 PACKAGE_VERSION="${1:-}"
 INSTALL_DEPS="${2:-}"
@@ -45,13 +48,13 @@ else
 fi
 
 echo
-echo "[3/5] Checking Python packaging dependencies"
-if [ "$INSTALL_DEPS" = "--install-deps" ] || ! python3 -c "import PyInstaller, keyring" > /dev/null 2>&1; then
-  echo "Installing Python packaging dependencies"
-  python3 -m pip install --upgrade pip
-  python3 -m pip install -r requirements.txt pyinstaller
+echo "[3/5] Checking Python packaging environment"
+if [ "$INSTALL_DEPS" = "--install-deps" ]; then
+  rm -rf build/python-venv
+  echo "Removed build/python-venv. The runtime build recreates it from requirements.lock."
 else
-  echo "Skipping Python packaging dependencies. Use \"$0 $PACKAGE_VERSION --install-deps\" to reinstall."
+  echo "The runtime build keeps build/python-venv in step with requirements.lock."
+  echo "Use \"$0 $PACKAGE_VERSION --install-deps\" to recreate it."
 fi
 
 echo

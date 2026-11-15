@@ -373,6 +373,8 @@ em {
 .dialog-title { display: inline-flex; align-items: center; gap: 10px; }
 .dialog-title svg { color: var(--muted); }
 .export-picker { display: flex; flex-direction: column; gap: 12px; padding-top: 12px; }
+.export-drives { gap: 6px; }
+.export-drives .export-drive-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
 .export-location-bar { display: flex; gap: 8px; }
 .export-location-bar .ant-input { min-width: 0; }
 .export-folder-list { height: min(240px, 32vh); overflow: auto; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }

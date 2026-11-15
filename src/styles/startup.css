@@ -1,4 +1,5 @@
-/* Rendered directly by index.html, before React and the runtime are ready. */
+/* Rendered directly by index.html, before React and the runtime are ready.
+   Keep the splash canvas uniformly dark to match the dark logo badge regardless of theme. */
 #startup-splash {
   position: fixed;
   inset: 0;

@@ -1,11 +1,17 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { formatAppVersion } from "./formatSystemStatus";
 import { railwatchApi } from "./railwatchApi";
+import {
+  formatMacArchLabel,
+  hasDirectManualDownload,
+  isRosettaMacApp,
+  resolveNativeArm64DownloadUrl,
+} from "./updateDisplay";
 import type { UpdateRuntimeState } from "../types";
 
-function manualReleaseUrl(state: UpdateRuntimeState): string {
+function manualDownloadUrl(state: UpdateRuntimeState): string {
   if (state.installMode !== "manual" || !state.result?.ok || !state.result.hasUpdate) return "";
-  return state.result.releaseUrl;
+  return state.result.downloadUrl || state.result.releaseUrl;
 }
 
 export type AppUpdateController = {
@@ -16,12 +22,14 @@ export type AppUpdateController = {
   hasPendingUpdate: boolean;
   isUpdating: boolean;
   isInstalling: boolean;
+  isRosettaMac?: boolean;
   openPanel: string | null;
   setOpenPanel: Dispatch<SetStateAction<string | null>>;
   handleCheckUpdate: () => Promise<void>;
   handleInstallUpdate: () => Promise<void>;
   handlePrimaryAction: () => Promise<void>;
   handleOpenReleaseNotes: () => Promise<void>;
+  handleDownloadNativeArm64?: () => Promise<void>;
 };
 
 export const AppUpdateContext = createContext<AppUpdateController | null>(null);
@@ -33,6 +41,12 @@ export function getUpdateStatusLabel(state: UpdateRuntimeState): string {
       return "正在检查更新…";
     case "available":
       if (state.installMode === "manual") {
+        if (hasDirectManualDownload(state)) {
+          const target = formatMacArchLabel(state.result?.ok ? state.result.targetArch : undefined);
+          return latest
+            ? `发现新版本 ${latest}，可直接下载 macOS (${target}) 安装包`
+            : `发现新版本，可直接下载 macOS (${target}) 安装包`;
+        }
         return latest ? `发现新版本 ${latest}，请前往发布页下载 macOS 安装包` : "发现新版本，请前往发布页下载 macOS 安装包";
       }
       return latest ? `发现新版本 ${latest}，正在准备下载…` : "发现新版本，正在准备下载…";
@@ -69,6 +83,7 @@ export function useAppUpdate(currentVersion: string, controller?: AppUpdateContr
   });
   const [checking, setChecking] = useState(false);
   const [isInstalling, setInstalling] = useState(false);
+  const [isRosettaMac, setIsRosettaMac] = useState(false);
   const [openPanel, setOpenPanel] = useState<string | null>(null);
   const stateRef = useRef(updateState);
   const stateRevision = useRef(0);
@@ -94,6 +109,10 @@ export function useAppUpdate(currentVersion: string, controller?: AppUpdateContr
 
     void railwatchApi.getUpdateState().then((state) => {
       if (active && stateRevision.current === initialRevision) publish(state);
+    }).catch(() => undefined);
+
+    void railwatchApi.getAppInfo().then((info) => {
+      if (active) setIsRosettaMac(isRosettaMacApp(info));
     }).catch(() => undefined);
 
     return () => {
@@ -163,7 +182,7 @@ export function useAppUpdate(currentVersion: string, controller?: AppUpdateContr
   const isUpdating = checking || updateState.phase === "checking" || updateState.phase === "downloading";
   const hasPendingUpdate =
     hasDownloadedUpdate || updateState.phase === "available" || updateState.phase === "downloading";
-  const downloadPageUrl = updateState.phase === "available" ? manualReleaseUrl(updateState) : "";
+  const downloadPageUrl = updateState.phase === "available" ? manualDownloadUrl(updateState) : "";
   const hasManualDownload = Boolean(downloadPageUrl);
 
   const handlePrimaryAction = useCallback(async () => {
@@ -173,11 +192,12 @@ export function useAppUpdate(currentVersion: string, controller?: AppUpdateContr
       return;
     }
     if (downloadPageUrl) {
+      const failMessage = hasDirectManualDownload(stateRef.current) ? "无法打开安装包下载链接。" : "无法打开发布页。";
       try {
         const result = await railwatchApi.openExternal(downloadPageUrl);
-        if (!result.ok) publish({ ...stateRef.current, error: result.error || "无法打开发布页。" });
+        if (!result.ok) publish({ ...stateRef.current, error: result.error || failMessage });
       } catch (error) {
-        publish({ ...stateRef.current, error: error instanceof Error ? error.message : "无法打开发布页。" });
+        publish({ ...stateRef.current, error: error instanceof Error ? error.message : failMessage });
       }
       return;
     }
@@ -195,6 +215,21 @@ export function useAppUpdate(currentVersion: string, controller?: AppUpdateContr
     }
   }, [publish]);
 
+  const handleDownloadNativeArm64 = useCallback(async () => {
+    const url = resolveNativeArm64DownloadUrl(stateRef.current);
+    try {
+      const opened = await railwatchApi.openExternal(url);
+      if (!opened.ok) {
+        publish({ ...stateRef.current, error: opened.error || "无法打开 Apple Silicon 原生版下载链接。" });
+      }
+    } catch (error) {
+      publish({
+        ...stateRef.current,
+        error: error instanceof Error ? error.message : "无法打开 Apple Silicon 原生版下载链接。",
+      });
+    }
+  }, [publish]);
+
   return shared ?? {
     updateState,
     statusLabel: getUpdateStatusLabel(updateState),
@@ -203,11 +238,13 @@ export function useAppUpdate(currentVersion: string, controller?: AppUpdateContr
     hasPendingUpdate,
     isUpdating,
     isInstalling,
+    isRosettaMac,
     openPanel,
     setOpenPanel,
     handleCheckUpdate,
     handleInstallUpdate,
     handlePrimaryAction,
     handleOpenReleaseNotes,
+    handleDownloadNativeArm64,
   };
 }

@@ -88,6 +88,7 @@ function Detail({ detail, busy }: { detail: RunReviewDetail; busy: boolean }) {
         ? `首个有效查询：起售后 ${seconds(firstValid.offset_ms)}，第 ${firstValid.round} 轮取得；此前 ${firstValid.presale_rounds} 轮仍显示未开售，其中快速重查 ${firstValid.sale_retries} 次。`
         : "首个有效查询未记录：起售后的查询记录不完整，或尚未取得已开售的有效结果。"}</p> : null}
       {detail.sale_path ? <p className="rv-section-note">{salePathNote(detail.sale_path)}</p> : null}
+      {detail.prefill_notice ? <p className="rv-section-note">准备阶段未使用官方预填：{detail.prefill_notice}。</p> : null}
       <TimelineWaterfall segments={segments} prediction={detail.prediction ?? []} origin={timed ? "距起售" : undefined} />
     </section>
     {orders.length ? <section className="rv-section" aria-label="下单分步耗时">

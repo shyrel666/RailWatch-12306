@@ -5,6 +5,7 @@ from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from railwatch_bridge import RailWatchBridge
+from railwatch_policies import QUERY_STRATEGIES
 from railwatch_task import MonitorTask
 
 
@@ -52,7 +53,53 @@ class SaleLoginCheckTests(unittest.TestCase):
         self.assertFalse(self.wait(1060, {"auto_submit": True}))
         self.assertFalse(self.bridge.state.login_ready)
         self.assertTrue(self.task.cancel.is_set())
+        # The first probe plus the two packaged rechecks, five seconds apart.
+        self.assertEqual(len(self.probes), 3)
+        self.assertAlmostEqual(self.probes[1] - self.probes[0], 5, delta=0.21)
+        self.assertAlmostEqual(self.probes[2] - self.probes[1], 5, delta=0.21)
+        self.assertTrue(all(1060 - tick > 10 for tick in self.probes))
+        self.assertLess(self.clock, 1060)
+
+    def test_one_inconclusive_probe_is_rechecked_and_the_sale_continues(self):
+        self.bridge.driver.execute_async_script.side_effect = ["unknown", "ok"]
+        self.assertTrue(self.wait(1060, {"auto_submit": True}))
+        self.assertEqual(len(self.probes), 2)
+        self.assertTrue(self.bridge.state.login_ready)
+        self.assertFalse(self.task.cancel.is_set())
+        self.assertGreaterEqual(self.clock, 1060)
+
+    def test_probe_exception_counts_as_inconclusive_and_is_rechecked(self):
+        self.bridge.driver.execute_async_script.side_effect = [TimeoutError("script timeout"), "ok"]
+        self.assertTrue(self.wait(1060, {"auto_alternate": True}))
+        self.assertEqual(len(self.probes), 2)
+
+    def test_recheck_that_finds_an_expired_login_stops_before_sale(self):
+        self.bridge.driver.execute_async_script.side_effect = ["unknown", "expired"]
+        self.assertFalse(self.wait(1060, {"auto_submit": True}))
+        self.assertEqual(len(self.probes), 2)
+        self.assertLess(self.clock, 1060)
+        self.assertTrue(self.task.cancel.is_set())
+
+    def test_no_recheck_when_it_could_not_finish_before_the_final_ten_seconds(self):
+        self.bridge.driver.execute_async_script.return_value = "unknown"
+        # 18 seconds left: a recheck five seconds later could still be running at T-10.
+        self.assertFalse(self.wait(1018, {"auto_submit": True}))
         self.assertEqual(len(self.probes), 1)
+        self.assertTrue(self.task.cancel.is_set())
+
+    def test_recheck_limit_zero_stops_on_the_first_inconclusive_probe(self):
+        self.bridge.driver.execute_async_script.return_value = "unknown"
+        with patch.dict(QUERY_STRATEGIES["sale_start"], {"login_recheck_limit": 0}):
+            self.assertFalse(self.wait(1060, {"auto_submit": True}))
+        self.assertEqual(len(self.probes), 1)
+        self.assertTrue(self.task.cancel.is_set())
+
+    def test_rechecks_do_not_add_periodic_keep_alive_probes(self):
+        self.bridge.driver.execute_async_script.side_effect = ["ok", "unknown", "ok"]
+        self.assertTrue(self.wait(1180, {"auto_submit": True, "keep_alive": True}))
+        # Periodic probe at T-120, final check at T-60, one recheck at T-55.
+        self.assertEqual(len(self.probes), 3)
+        self.assertAlmostEqual(self.probes[2] - self.probes[1], 5, delta=0.21)
 
     def test_expired_login_stops_before_sale(self):
         self.bridge.driver.execute_async_script.return_value = "expired"

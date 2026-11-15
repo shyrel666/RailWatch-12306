@@ -9,6 +9,7 @@ export type AppInfo = {
   nodeVersion: string;
   platform: string;
   arch: string;
+  runningUnderARM64Translation?: boolean;
 };
 
 export type RiskLevel = "notice" | "warning" | "active" | "success" | "critical" | string;
@@ -164,6 +165,8 @@ export type TicketHit = {
 
 export type RailWatchStatus = {
   prefill?: PrefillProgress | null;
+  /** Why a timed auto-submit run that asked for the official pre-fill is not using it. */
+  prefill_notice?: string | null;
   human_action?: HumanActionPayload | null;
   activity?: TaskActivity;
   order?: OrderStage;
@@ -308,6 +311,8 @@ export type RuntimeInfo = {
   proxy_configured: boolean;
   proxy_label: string;
   proxy_value: string;
+  /** True while the network and 12306 fields are placeholders: the background probe has not reported yet. */
+  connectivity_pending?: boolean;
   automation_route?: string;
   server_time_offset_seconds?: number;
   server_time_last_error?: string;
@@ -434,7 +439,42 @@ export type HumanActionPayload = {
   priority?: "urgent" | "normal" | string;
 };
 
+export type RuntimeLabelsPatch = Partial<
+  Pick<
+    RuntimeInfo,
+    | "chromedriver_path"
+    | "chrome_version"
+    | "network_ok"
+    | "network_label"
+    | "railway_ok"
+    | "railway_label"
+    | "proxy_configured"
+    | "proxy_label"
+    | "proxy_value"
+    | "connectivity_pending"
+  >
+>;
+
+export type EnvironmentOperation = "checkEnvironment" | "downloadChromeDriver";
+
+export type EnvironmentProgress = {
+  operation: EnvironmentOperation;
+  status: "running" | "success" | "error";
+  started_at: number;
+  updated_at: number;
+  stage: "checking" | "resolving" | "connecting" | "downloading" | "extracting" | "installing" | "retrying" | "verifying" | "complete" | "error";
+  message: string;
+  source?: string | null;
+  version?: string | null;
+  downloaded_bytes?: number | null;
+  total_bytes?: number | null;
+  bytes_per_second?: number | null;
+  eta_seconds?: number | null;
+  elapsed_seconds?: number | null;
+};
+
 export type BridgeEvent =
+  | { event: "environmentProgress"; payload: EnvironmentProgress }
   | { event: "queryStarted"; payload: QueryAttempt }
   | { event: "log"; payload: LogEntry }
   | { event: "state"; payload: RailWatchStatus }
@@ -442,7 +482,7 @@ export type BridgeEvent =
   | { event: "notify"; payload: NotifyPayload }
   | { event: "humanAction"; payload: HumanActionPayload }
   | { event: "monitorTick"; payload: MonitorTickPayload }
-  | { event: "labels"; payload: { chromedriver_path?: string; chrome_version?: string } }
+  | { event: "labels"; payload: RuntimeLabelsPatch }
   | { event: string; payload: unknown };
 
 export type ConfirmationRequest = {
@@ -458,6 +498,8 @@ export type UpdateAsset = {
   sha256?: string;
 };
 
+export type MacArch = "arm64" | "x64";
+
 export type UpdateCheckSuccess = {
   ok: true;
   currentVersion: string;
@@ -467,6 +509,8 @@ export type UpdateCheckSuccess = {
   releaseNotes: string;
   publishedAt: string;
   releaseUrl: string;
+  downloadUrl?: string;
+  targetArch?: MacArch;
   assets: UpdateAsset[];
   source?: "updater";
 };
@@ -519,7 +563,7 @@ export type ConfirmRequestPayload = {
 };
 
 export type ExportLocation = { name: string; path: string };
-export type ExportLocations = { directory: string; fileName: string; shortcuts: ExportLocation[] };
+export type ExportLocations = { directory: string; fileName: string; shortcuts: ExportLocation[]; drives?: ExportLocation[] };
 export type ExportDirectory = { directory: string; parent: string; folders: ExportLocation[]; files: string[] };
 
 /** Latest query timings of one run, oldest first. `hit` is null for records written before it was tracked. */

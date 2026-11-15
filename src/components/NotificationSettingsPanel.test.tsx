@@ -173,3 +173,18 @@ test("stopping an in-flight preview ignores a late response and unmounting relea
   view.unmount();
   expect(stop).toHaveBeenCalledTimes(calls + 1);
 });
+
+test("macOS explains how to keep urgent notifications on screen, only while desktop notifications are on", async () => {
+  mockSoundPreferences();
+  const hint = /把通知样式改为「持续」/;
+  const mac = render(<NotificationSettingsPanel isMac />);
+  const desktop = await screen.findByRole("switch", { name: "桌面通知" });
+  expect(screen.getByText(hint)).toBeTruthy();
+  await userEvent.click(desktop);
+  expect(screen.queryByText(hint)).toBeNull();
+  mac.unmount();
+
+  render(<NotificationSettingsPanel />);
+  await screen.findByRole("switch", { name: "桌面通知" });
+  expect(screen.queryByText(hint)).toBeNull();
+});

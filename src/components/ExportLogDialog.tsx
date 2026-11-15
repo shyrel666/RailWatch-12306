@@ -1,8 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Input, Modal } from "antd";
-import { ArrowUp, FileText, Folder, FolderOpen } from "lucide-react";
+import { ArrowUp, FileText, Folder, FolderOpen, HardDrive } from "lucide-react";
 import { railwatchApi } from "../lib/railwatchApi";
 import type { ExportDirectory, ExportLocation } from "../types";
+
+function normalizeLocationKey(value: string): string {
+  const unified = value.replace(/\\/g, "/");
+  if (unified === "/") return "/";
+  return unified.replace(/\/+$/, "").toLowerCase();
+}
+
+function findActiveDrivePath(directory: string, drives: ExportLocation[]): string | null {
+  const current = normalizeLocationKey(directory);
+  if (!current || !drives.length) return null;
+  let bestPath: string | null = null;
+  let bestLen = -1;
+  for (const drive of drives) {
+    const key = normalizeLocationKey(drive.path);
+    const matches = key === "/"
+      ? current.startsWith("/")
+      : current === key || current.startsWith(`${key}/`);
+    if (matches && key.length > bestLen) {
+      bestLen = key.length;
+      bestPath = drive.path;
+    }
+  }
+  return bestPath;
+}
+
+function normalizeDirectoryInput(value: string): string {
+  const trimmed = value.trim();
+  return /^[A-Za-z]:$/.test(trimmed) ? `${trimmed.toUpperCase()}\\` : value;
+}
 
 export function useExportLogDialog() {
   const [request, setRequest] = useState<{ defaultPath?: string; open: boolean } | null>(null);
@@ -32,6 +61,7 @@ function ExportLogDialog({ open, defaultPath, onFinish, afterClose }: {
   open: boolean; defaultPath?: string; onFinish: (path: string | null) => void; afterClose: () => void;
 }) {
   const [shortcuts, setShortcuts] = useState<ExportLocation[]>([]);
+  const [drives, setDrives] = useState<ExportLocation[]>([]);
   const [listing, setListing] = useState<ExportDirectory | null>(null);
   const [directory, setDirectory] = useState("");
   const [fileName, setFileName] = useState("railwatch-events.txt");
@@ -41,7 +71,8 @@ function ExportLogDialog({ open, defaultPath, onFinish, afterClose }: {
   const revision = useRef(0);
   const alive = useRef(true);
   const savingRef = useRef(false);
-  const browse = useCallback(async (path: string) => {
+  const browse = useCallback(async (rawPath: string) => {
+    const path = normalizeDirectoryInput(rawPath);
     const current = ++revision.current;
     setLoading(true);
     setError("");
@@ -66,6 +97,7 @@ function ExportLogDialog({ open, defaultPath, onFinish, afterClose }: {
     void railwatchApi.getExportLocations(defaultPath).then(value => {
       if (!current) return;
       setShortcuts(value.shortcuts);
+      setDrives(value.drives ?? []);
       setFileName(value.fileName);
       void browse(value.directory);
     }).catch(() => {
@@ -73,6 +105,7 @@ function ExportLogDialog({ open, defaultPath, onFinish, afterClose }: {
     });
     return () => { current = false; alive.current = false; revision.current++; };
   }, [open, defaultPath, browse]);
+  const activeDrivePath = findActiveDrivePath(directory, drives);
   const save = async () => {
     if (savingRef.current || loading || !listing || directory !== listing.directory || !fileName.trim()) return;
     savingRef.current = true;
@@ -97,6 +130,12 @@ function ExportLogDialog({ open, defaultPath, onFinish, afterClose }: {
       <div className="button-row" aria-label="常用保存位置">
         {shortcuts.map((item, index) => <Button key={index} size="small" disabled={saving} onClick={() => void browse(item.path)}>{item.name}</Button>)}
       </div>
+      {drives.length ? <div className="button-row export-drives" aria-label="磁盘与卷">
+        {drives.map(drive => <Button key={drive.path} size="small" icon={<HardDrive size={13} />}
+          className={activeDrivePath === drive.path ? "export-drive-active" : undefined}
+          aria-pressed={activeDrivePath === drive.path}
+          disabled={saving} onClick={() => void browse(drive.path)}>{drive.name}</Button>)}
+      </div> : null}
       <div className="export-location-bar">
         <Button icon={<ArrowUp size={15} />} aria-label="上一级文件夹" disabled={saving || loading || !listing || listing.parent === listing.directory}
           onClick={() => listing && void browse(listing.parent)} />

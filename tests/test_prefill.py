@@ -1365,5 +1365,72 @@ class BridgePrefillSafetyRegressionTests(unittest.TestCase):
         self.assertIsNotNone(bridge.order_journal.pending())
 
 
+class BridgePrefillNoticeTests(unittest.TestCase):
+    """A timed auto-submit run that asked for the pre-fill says why it is not using it."""
+    bridge = BridgePrefillSafetyRegressionTests.bridge
+
+    def run_worker(self, config=None, *, now=NOW_1550, prepare=None):
+        bridge, task = self.bridge()
+        config = {**BASE_CONFIG, **(config or {})}
+        states = []
+        bridge.event_callback = lambda event: states.append(event["payload"]) if event.get("event") == "state" else None
+        def monitor(*args, **kwargs):
+            value = TicketMonitor(*args, **kwargs)
+            value.prepare = Mock(return_value=True)
+            value._apply_loop_date = Mock()
+            value._fill_query_params = Mock(return_value=True)
+            value.run = Mock()
+            return value
+        adapter = Mock()
+        adapter.prepare.side_effect = prepare
+        with patch("railwatch_bridge.time.time", return_value=now),              patch("railwatch_bridge.guard_browser", return_value=nullcontext()),              patch("railwatch_bridge.TicketMonitor", side_effect=monitor),              patch("railwatch_bridge.PrefillAdapter", return_value=adapter) as adapter_class:
+            bridge._monitor_worker(config, task)
+        events = bridge.order_journal.run_events(task.run_id)
+        prepared = next(event for event in events if event["stage"] == "prepared")
+        return bridge, adapter_class, prepared, events, states
+
+    def test_short_lead_skip_is_published_and_kept_for_the_review(self):
+        bridge, adapter_class, prepared, events, states = self.run_worker(now=SALE_1600 - 60)
+        adapter_class.assert_not_called()
+        self.assertIn("距起售不足 90 秒", bridge.state.prefill_notice)
+        self.assertEqual(states[-1]["prefill_notice"], bridge.state.prefill_notice)
+        self.assertEqual(prepared["detail"]["prefill_notice"], bridge.state.prefill_notice)
+        self.assertEqual(build_run_review(events)["prefill_notice"], bridge.state.prefill_notice)
+        self.assertTrue(any("本次未使用官方预填" in entry["message"] for entry in bridge.log_entries))
+        # A skip is not a fallback: nothing was armed and no pre-fill page was opened.
+        self.assertNotIn("prefill_fallback", [event["stage"] for event in events])
+
+    def test_preparation_fallback_publishes_its_reason(self):
+        reason = "当前余票页未显示官方购票信息预填入口"
+        bridge, adapter_class, prepared, events, _ = self.run_worker(
+            prepare=PrefillFallback(reason, stage="entry_unavailable"))
+        adapter_class.assert_called_once()
+        self.assertEqual(bridge.state.prefill_notice, reason)
+        self.assertEqual(prepared["detail"]["prefill_notice"], reason)
+        self.assertEqual(build_run_review(events)["prefill_notice"], reason)
+
+    def test_preparation_exception_publishes_a_notice_without_internal_details(self):
+        bridge, _, prepared, _, _ = self.run_worker(prepare=RuntimeError("内部细节 secret"))
+        self.assertEqual(bridge.state.prefill_notice, "官方预填准备异常，已自动回退常规查询")
+        self.assertNotIn("secret", json.dumps(prepared["detail"], ensure_ascii=False))
+
+    def test_no_notice_when_the_user_did_not_ask_for_the_prefill(self):
+        for patch_config in ({"prefill_enabled": False}, {"auto_submit": False}):
+            with self.subTest(patch_config=patch_config):
+                bridge, adapter_class, prepared, events, _ = self.run_worker(patch_config)
+                adapter_class.assert_not_called()
+                self.assertEqual(bridge.state.prefill_notice, "")
+                self.assertNotIn("prefill_notice", prepared["detail"])
+                self.assertIsNone(build_run_review(events)["prefill_notice"])
+
+    def test_armed_prefill_carries_no_notice(self):
+        plan = ArmedPrefillPlan("2026-11-21", ("张三",), (
+            PrefillCandidate("G8821", "2026-11-21", "北京南", "天津", "二等座"),), SALE_1600)
+        bridge, _, prepared, _, states = self.run_worker(prepare=lambda *args, **kwargs: plan)
+        self.assertEqual(bridge.state.prefill_notice, "")
+        self.assertNotIn("prefill_notice", prepared["detail"])
+        self.assertIsNone(states[-1]["prefill_notice"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,8 @@ class MonitorTask:
     last_tick: float = field(default_factory=time.monotonic)
     last_login_check: float = float("-inf")
     sale_login_checked: bool = False
+    sale_login_rechecks: int = 0
+    sale_login_retry_at: float = float("-inf")
 
     def __post_init__(self):
         self.config = deepcopy(self.config)

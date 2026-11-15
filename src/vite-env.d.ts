@@ -7,6 +7,7 @@ declare global {
   interface Window {
     railwatch?: {
       whenWindowShown?: () => Promise<void>;
+      finishSplash?: () => void;
       command: <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
       stageDraft: (draft: { config: Record<string, unknown>; revision: number } | null) => void;
       onEvent: (callback: (event: BridgeEvent) => void) => () => void;

@@ -14,6 +14,7 @@ import type { RailWatchStatus } from "../types";
 
 function resetStore() {
   railwatchStore.setState({
+    environmentProgress: null, environmentProgressVisible: false,
     rehearsalEnabled: false,
     runtime: {
       ...defaultRuntimeInfo,
@@ -34,6 +35,36 @@ describe("SettingsPage", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  test.each(["checkEnvironment", "downloadChromeDriver"] as const)("keeps progress accessible while %s runs and removes the summary on success", async operation => {
+    railwatchStore.getState().beginEnvironmentOperation(operation);
+    railwatchStore.getState().setEnvironmentProgressVisible(false);
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    const { container } = render(<SettingsPage busy={null} runCommand={runCommand} />);
+
+    expect(container.querySelector(".environment-progress-summary")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "查看进度" }));
+    expect(railwatchStore.getState().environmentProgressVisible).toBe(true);
+
+    act(() => railwatchStore.getState().finishEnvironmentOperation(operation));
+    expect(container.querySelector(".environment-progress-summary")).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看结果" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看进度" })).toBeNull();
+    expect(screen.getByRole("button", { name: "检查环境" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("keeps failed environment preparation visible and lets the user reopen its result", async () => {
+    railwatchStore.getState().beginEnvironmentOperation("checkEnvironment");
+    railwatchStore.getState().finishEnvironmentOperation("checkEnvironment", "驱动下载失败，请检查网络。");
+    railwatchStore.getState().setEnvironmentProgressVisible(false);
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    render(<SettingsPage busy={null} runCommand={runCommand} />);
+
+    expect(screen.getByText("驱动下载失败，请检查网络。")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "查看结果" }));
+    expect(railwatchStore.getState().environmentProgressVisible).toBe(true);
+    expect(screen.getByRole("button", { name: "检查环境" }).hasAttribute("disabled")).toBe(false);
   });
 
   test("login stays disabled until the environment is ready and locks again if readiness is lost", async () => {
@@ -203,5 +234,45 @@ describe("SettingsPage", () => {
     await userEvent.click(toggle);
     await waitFor(() => expect(railwatchStore.getState().rehearsalEnabled).toBe(false));
     expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
+  test("macOS displays menu bar wording instead of tray wording", async () => {
+    const appInfoSpy = vi.spyOn(railwatchApi, "getAppInfo").mockResolvedValue({
+      appVersion: "1.0.0",
+      electronVersion: "35.0.0",
+      chromeVersion: "134.0.0.0",
+      nodeVersion: "22.0.0",
+      platform: "darwin",
+      arch: "arm64",
+      runningUnderARM64Translation: false,
+    });
+    vi.spyOn(railwatchApi, "command").mockResolvedValue({ theme: "light", close_to_tray: false, notification_settings: {} } as never);
+    try {
+      render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+      expect(await screen.findByRole("switch", { name: "关闭到菜单栏" })).toBeTruthy();
+      expect(screen.getByText(/从顶部菜单栏图标重新打开或退出/)).toBeTruthy();
+    } finally {
+      appInfoSpy.mockRestore();
+    }
+  });
+
+  test("macOS notification settings explain how to keep urgent notifications on screen", async () => {
+    const appInfoSpy = vi.spyOn(railwatchApi, "getAppInfo").mockResolvedValue({
+      appVersion: "1.0.0",
+      electronVersion: "39.0.0",
+      chromeVersion: "142.0.0.0",
+      nodeVersion: "22.0.0",
+      platform: "darwin",
+      arch: "arm64",
+      runningUnderARM64Translation: false,
+    });
+    vi.spyOn(railwatchApi, "command").mockResolvedValue(
+      { theme: "light", close_to_tray: false, notification_settings: { desktop_urgent: true } } as never);
+    try {
+      render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+      expect(await screen.findByText(/把通知样式改为「持续」/)).toBeTruthy();
+    } finally {
+      appInfoSpy.mockRestore();
+    }
   });
 });

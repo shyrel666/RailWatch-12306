@@ -48,7 +48,7 @@ function missingSetup(channel: Channel, settings: NotificationSettings, patch: N
   });
 }
 
-export function NotificationSettingsPanel() {
+export function NotificationSettingsPanel({ isMac = false }: { isMac?: boolean } = {}) {
   const [settings, setSettings] = useState<NotificationSettings | null>(null);
   const [patch, setPatch] = useState<NotificationSettingsPatch>({});
   const [status, setStatus] = useState<Record<string, Delivery>>({});
@@ -226,6 +226,10 @@ export function NotificationSettingsPanel() {
         <Switch aria-label={item.label} size="small" checked={enabled(item.field)} onChange={(next) => change(item.field, next)} />
       </label>)}
     </div>
+    {/* Windows keeps urgent toasts on screen by itself; on macOS only the user can choose that style. */}
+    {isMac && enabled("desktop_urgent") && <p className="toggle-grid-note">
+      macOS 默认让通知显示几秒后自动消失。要让紧急通知留在屏幕上，请到系统设置的「通知」里找到 RailWatch 12306，把通知样式改为「持续」（较早的 macOS 是把提醒样式改为「提醒」）。
+    </p>}
     <div className="notification-sound-settings" role="group" aria-label="提示音设置">
       <div className="notification-sound-row">
         <span className="setting-icon" aria-hidden="true"><BellRing size={16} /></span>

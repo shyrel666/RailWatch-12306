@@ -10,6 +10,9 @@ from unittest.mock import Mock, patch
 from railwatch_cleanup import (PENDING_FILE, WINDOWS_CLEANUP, checked_data_path,
                                check_files_released, release_orphan_browsers, reset_directory)
 from railwatch_state import APP_SLUG
+from scripts.keychain_isolation import isolate_system_keychain
+
+setUpModule = isolate_system_keychain  # Clearing local data deletes the keychain item.
 
 
 class CleanupTests(unittest.TestCase):
@@ -102,6 +105,14 @@ class CleanupTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "PowerShell matching")
     def test_powershell_only_stops_identified_orphans_and_rechecks_identity(self):
+        self.check_powershell_cleanup(self.target)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell matching")
+    def test_powershell_matches_a_chinese_profile_path_with_a_space(self):
+        """Per-user data sits under C:\\Users\\<account>; the path reaches PowerShell through the environment."""
+        self.check_powershell_cleanup(Path(r"C:\Users\张三 的电脑\AppData\Local") / APP_SLUG)
+
+    def check_powershell_cleanup(self, target):
         # Shadow every process command: this executes no real process termination.
         prefix = r'''
 $script:rows = ConvertFrom-Json $env:RAILWATCH_TEST_PROCESSES
@@ -116,8 +127,8 @@ function Stop-Process {
     $script:rows = @($script:rows | Where-Object { $_.ProcessId -ne $Id })
 }
 '''
-        profile = str(self.target / "chrome_profile_12306")
-        driver = str(self.target / "chromedriver.exe")
+        profile = str(target / "chrome_profile_12306")
+        driver = str(target / "chromedriver.exe")
         def row(pid, parent, name, exe="", cmd="", created=2):
             return dict(ProcessId=pid, ParentProcessId=parent, Name=name, ExecutablePath=exe, CommandLine=cmd, CreationDate=created)
         rows = [row(11, 999, "chromedriver.exe", driver),
@@ -178,3 +189,64 @@ function Stop-Process {
                     self.fail("must not clear")
         with runtime._command_slot("clearLocalData"):
             pass
+
+    def test_reset_directory_preserves_locked_electron_subdir_and_clears_siblings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / APP_SLUG
+            electron_dir = data_dir / "electron"
+            profile_dir = data_dir / "chrome_profile"
+            electron_dir.mkdir(parents=True)
+            profile_dir.mkdir(parents=True)
+            (electron_dir / "Cookies").write_text("electron-session", encoding="utf-8")
+            (profile_dir / "login").write_text("stale-profile", encoding="utf-8")
+            (data_dir / "config.json").write_text("{}", encoding="utf-8")
+
+            lock_path = electron_dir / "LOCK"
+            with open(lock_path, "wb") as _held_lock:
+                initialized, remaining = reset_directory(
+                    str(data_dir),
+                    lambda: (data_dir / "config.json").write_text('{"fresh":true}', encoding="utf-8") or True,
+                )
+
+            self.assertTrue(initialized)
+            self.assertEqual(remaining, [])
+            self.assertFalse(profile_dir.exists())
+            self.assertEqual((data_dir / "config.json").read_text(encoding="utf-8"), '{"fresh":true}')
+            self.assertEqual((electron_dir / "Cookies").read_text(encoding="utf-8"), "electron-session")
+
+    def test_reset_directory_rolls_back_siblings_without_removing_electron(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / APP_SLUG
+            electron_dir = data_dir / "electron"
+            electron_dir.mkdir(parents=True)
+            (electron_dir / "Cookies").write_text("keep-electron", encoding="utf-8")
+            (data_dir / "config.json").write_text('{"old":1}', encoding="utf-8")
+
+            def fail_init():
+                (data_dir / "partial.txt").write_text("broken", encoding="utf-8")
+                raise OSError("disk full")
+
+            with self.assertRaisesRegex(RuntimeError, "已恢复原数据"):
+                reset_directory(str(data_dir), fail_init)
+
+            self.assertEqual((data_dir / "config.json").read_text(encoding="utf-8"), '{"old":1}')
+            self.assertFalse((data_dir / "partial.txt").exists())
+            self.assertEqual((electron_dir / "Cookies").read_text(encoding="utf-8"), "keep-electron")
+
+    def test_reset_directory_still_rejects_locked_sibling_when_electron_present(self):
+        import sys
+        if sys.platform != "win32":
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / APP_SLUG
+            electron_dir = data_dir / "electron"
+            profile_dir = data_dir / "chrome_profile"
+            electron_dir.mkdir(parents=True)
+            profile_dir.mkdir(parents=True)
+            held_file = profile_dir / "Cookies"
+            held_file.write_text("locked", encoding="utf-8")
+
+            with open(held_file, "rb"):
+                with self.assertRaisesRegex(RuntimeError, "文件仍被占用"):
+                    reset_directory(str(data_dir), lambda: True)
+            self.assertTrue(held_file.exists())

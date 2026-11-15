@@ -53,6 +53,22 @@ test("timed runs show the first valid query and late re-renders without guessing
   expect(within(await screen.findByRole("region", { name: "阶段时间线" })).getByText(/首个有效查询未记录/)).toBeTruthy();
 });
 
+test("a run that prepared without the requested prefill keeps the reason in its review", async () => {
+  const detail = (prefill_notice: string | null) => ({ run_id: "run-1", started_at: 1, target_at: 2, conclusion: "已停止",
+    segments: [], prediction: [], preparation_margin_ms: null, first_valid_query: null, prefill_notice });
+  let notice: string | null = "距起售不足 90 秒，直接采用常规查询准备";
+  vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "runReviews" ?
+    { items: [{ run_id: "run-1", started_at: 1, target_at: 2, conclusion: "已停止" }], next_cursor: null } :
+    detail(notice)) as never);
+  render(<RunReviews />);
+  const timeline = await screen.findByRole("region", { name: "阶段时间线" });
+  expect(within(timeline).getByText("准备阶段未使用官方预填：距起售不足 90 秒，直接采用常规查询准备。")).toBeTruthy();
+  cleanup();
+  notice = null;
+  render(<RunReviews />);
+  expect(within(await screen.findByRole("region", { name: "阶段时间线" })).queryByText(/准备阶段未使用官方预填/)).toBeNull();
+});
+
 test("the newest run opens without a click and keeps an incomplete timeline explicit", async () => {
   const command = vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "runReviews" ?
     { items: [{ run_id: "run-1", started_at: 1, target_at: null, conclusion: "未命中", trip: { from_station: "北京", to_station: "上海" } }], next_cursor: null } :

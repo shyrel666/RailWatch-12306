@@ -252,6 +252,7 @@ def build_run_review(events, report=None):
             "query_timings": query_timing_summary(ordered),
             "first_valid_query": first_valid_query(ordered, target_at, wake),
             "sale_path": sale_path(ordered, target_at),
+            "prefill_notice": (prepared or {}).get("detail", {}).get("prefill_notice") or None,
             "preparation_margin_ms": margin, "query_median_ms": median(rounds) if rounds and first_known else None,
             "history_complete": all(s["duration_ms"] is not None for s in segments),
             "note": "未记录的阶段不推测补齐；可能未命中、未执行对应路径，或查询遥测已按 20,000 条上限清理。官方处理为本机观察时间。",

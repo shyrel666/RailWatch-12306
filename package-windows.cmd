@@ -9,7 +9,9 @@ echo.
 
 where node >nul 2>nul || goto missing_node
 where npm >nul 2>nul || goto missing_npm
-where python >nul 2>nul || goto missing_python
+rem The runtime is frozen with the Python pinned in .python-version. Stop here,
+rem before anything is changed, when that interpreter is not installed.
+node scripts/build-runtime.mjs --check || goto missing_python
 
 set "PACKAGE_VERSION=%~1"
 set "INSTALL_DEPS=%~2"
@@ -42,22 +44,17 @@ call npm ci || goto failed
 :after_node_deps
 
 echo.
-echo [3/5] Checking Python packaging dependencies
-if /i "%INSTALL_DEPS%"=="--install-deps" goto install_python_deps
-python -c "import PyInstaller" >nul 2>nul
-if errorlevel 1 (
-  goto install_python_deps
-) else (
-  echo Skipping Python packaging dependencies. Use "%~nx0 %PACKAGE_VERSION% --install-deps" to reinstall.
-)
-goto after_python_deps
+echo [3/5] Checking Python packaging environment
+if /i not "%INSTALL_DEPS%"=="--install-deps" goto keep_python_env
+if exist "build\python-venv" rmdir /s /q "build\python-venv" || goto failed
+echo Removed build\python-venv. The runtime build recreates it from requirements.lock.
+goto after_python_env
 
-:install_python_deps
-echo Installing Python packaging dependencies
-python -m pip install --upgrade pip || goto failed
-python -m pip install -r requirements.txt pyinstaller || goto failed
+:keep_python_env
+echo The runtime build keeps build\python-venv in step with requirements.lock.
+echo Use "%~nx0 %PACKAGE_VERSION% --install-deps" to recreate it.
 
-:after_python_deps
+:after_python_env
 
 echo.
 echo Cleaning previous release output
@@ -102,7 +99,7 @@ pause
 exit /b 1
 
 :missing_python
-echo ERROR: Python was not found in PATH.
+echo ERROR: The Python version pinned in .python-version is not installed. See the message above.
 pause
 exit /b 1
 

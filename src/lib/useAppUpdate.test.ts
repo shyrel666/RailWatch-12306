@@ -101,6 +101,34 @@ describe("update controller", () => {
     expect(check).not.toHaveBeenCalled();
   });
 
+  test("a downloaded update whose installer is gone can be checked for again", async () => {
+    vi.spyOn(railwatchApi, "getUpdateState").mockResolvedValue(downloaded);
+    const check = vi.spyOn(railwatchApi, "checkUpdate").mockResolvedValue(available);
+    const missing = "已下载的安装程序不可用，请重新检查更新。";
+    // The main process moves to "error" before it answers the install request.
+    vi.spyOn(railwatchApi, "installUpdate").mockImplementation(async () => {
+      listeners.forEach(listener => listener({ ...downloaded, phase: "error", error: missing }));
+      return { ok: false, error: `更新安装失败：${missing}` };
+    });
+    const { result } = renderHook(() => useAppUpdate("0.7.0"));
+    await waitFor(() => expect(result.current.updateState.phase).toBe("downloaded"));
+    await act(async () => { await result.current.handleCheckUpdate(); });
+    expect(check).not.toHaveBeenCalled();  // A downloaded update only offers installation.
+
+    await act(async () => { await result.current.handlePrimaryAction(); });
+    expect(result.current.updateState).toMatchObject({ phase: "error", error: `更新安装失败：${missing}` });
+    expect(result.current.hasDownloadedUpdate).toBe(false);
+    await act(async () => { await result.current.handlePrimaryAction(); });
+    expect(check).toHaveBeenCalledOnce();
+    expect(result.current.updateState.phase).toBe("available");
+
+    // Clearing local data deletes the installer; the main process then reports idle.
+    await act(async () => { listeners.forEach(listener => listener(downloaded)); });
+    await act(async () => { listeners.forEach(listener => listener(idle)); });
+    await act(async () => { await result.current.handlePrimaryAction(); });
+    expect(check).toHaveBeenCalledTimes(2);
+  });
+
   test("shared entry points use one subscription and preserve blocked installation errors", async () => {
     vi.spyOn(railwatchApi, "getUpdateState").mockResolvedValue(downloaded);
     let finish!: (value: { ok: boolean; error?: string }) => void;

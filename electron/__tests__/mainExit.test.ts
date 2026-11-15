@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
@@ -14,16 +17,34 @@ const harness = vi.hoisted(() => ({
   sendRequest: undefined as undefined | ((request: any) => void),
   send: vi.fn(), reload: vi.fn(), rendererUrl: "",
   loadFailure: undefined as Error | undefined, loadErrorDialog: vi.fn(), closeWindow: vi.fn(),
-  installUpdate: vi.fn(), updateState: vi.fn(),
+  installUpdate: vi.fn(), updateState: vi.fn(), discardDownload: vi.fn(),
   setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn(), setAppUserModelId: vi.fn(),
   windowOptions: undefined as any, updaterOptions: undefined as any, autoUpdater: {} as Record<string, unknown>,
   previewSound: vi.fn(), stopPreview: vi.fn(), updateSound: vi.fn(), validateSound: vi.fn(),
   openAudio: vi.fn(), prepareAudio: vi.fn(), storeAudio: vi.fn(),
+  clearStorageData: vi.fn(async () => undefined),
+  clearCache: vi.fn(async () => undefined),
+  userDataDir: "",
+  // Unset by default, so importing main never redirects userData or touches the real updater cache.
+  homeDir: "", setPath: undefined as undefined | ((name: string, value: string) => void),
+  trayInstances: [] as Array<{ icon: unknown; on: ReturnType<typeof vi.fn>; setToolTip: ReturnType<typeof vi.fn>; setContextMenu: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }>,
+  nativeTheme: { themeSource: "system" as "system" | "light" | "dark", shouldUseDarkColors: true },
+  nativeThemeListeners: new Map<string, (...args: any[]) => void>(),
+  primaryWorkArea: { x: 0, y: 0, width: 1440, height: 900 },
+  allWorkAreas: [{ x: 0, y: 0, width: 1440, height: 900 }],
+  bounds: { x: 100, y: 80, width: 1200, height: 800 },
+  normalBounds: { x: 100, y: 80, width: 1200, height: 800 },
+  maximized: false,
+  maximize: vi.fn(),
+  setBackgroundColor: vi.fn(),
 }));
 vi.mock("electron", () => ({
   app: { requestSingleInstanceLock: () => true, quit: harness.quit,
     on: (name: string, listener: (...args: any[]) => void) => harness.listeners.set(name, listener),
     setAppUserModelId: harness.setAppUserModelId, getVersion: () => "0.4.2",
+    getPath: (name: string) => (name === "userData" ? harness.userDataDir
+      : name === "home" && harness.homeDir ? harness.homeDir : path.resolve(`mock-${name}`)),
+    get setPath() { return harness.setPath; },
     whenReady: () => ({ then: (callback: () => void) => { harness.ready = callback; } }) },
   ipcMain: { on: (name: string, listener: (...args: any[]) => void) => harness.ipcListeners.set(name, listener),
     handle: (name: string, listener: (...args: any[]) => any) => harness.ipcHandlers.set(name, listener) },
@@ -36,13 +57,39 @@ vi.mock("electron", () => ({
     reload = harness.reload;
     isDestroyed = () => false; isMinimized = () => false;
     isVisible = () => harness.visible;
+    isMaximized = () => harness.maximized;
+    maximize = harness.maximize;
+    getBounds = () => ({ ...harness.bounds });
+    getNormalBounds = () => ({ ...harness.normalBounds });
+    setBackgroundColor = harness.setBackgroundColor;
     focus = vi.fn();
   },
   Menu: { setApplicationMenu: harness.setApplicationMenu, buildFromTemplate: harness.buildFromTemplate },
   nativeImage: { createFromPath: () => ({ resize: () => "tray-image" }) },
+  nativeTheme: {
+    get themeSource() { return harness.nativeTheme.themeSource; },
+    set themeSource(value: "system" | "light" | "dark") { harness.nativeTheme.themeSource = value; },
+    get shouldUseDarkColors() { return harness.nativeTheme.shouldUseDarkColors; },
+    on: (name: string, listener: (...args: any[]) => void) => harness.nativeThemeListeners.set(name, listener),
+  },
+  screen: {
+    getPrimaryDisplay: () => ({ workArea: harness.primaryWorkArea }),
+    getAllDisplays: () => harness.allWorkAreas.map((workArea) => ({ workArea })),
+  },
   dialog: { showMessageBox: harness.loadErrorDialog, showOpenDialog: harness.openAudio },
-  Tray: class { on = vi.fn(); setToolTip = vi.fn(); setContextMenu = vi.fn(); destroy = vi.fn(); },
+  Tray: class {
+    icon: unknown;
+    on = vi.fn();
+    setToolTip = vi.fn();
+    setContextMenu = vi.fn();
+    destroy = vi.fn();
+    constructor(icon: unknown) {
+      this.icon = icon;
+      harness.trayInstances.push(this);
+    }
+  },
   powerMonitor: { on: vi.fn() }, powerSaveBlocker: {}, shell: {},
+  session: { defaultSession: { clearStorageData: harness.clearStorageData, clearCache: harness.clearCache } },
 }));
 vi.mock("electron-updater", () => ({ autoUpdater: harness.autoUpdater }));
 vi.mock("../nsisUpdater", () => ({ RailWatchNsisUpdater: class {} }));
@@ -51,7 +98,7 @@ vi.mock("../pythonRuntime", () => ({
 }));
 vi.mock("../updateManager", () => ({ createUpdateManager: (options: unknown) => {
   harness.updaterOptions = options;
-  return { installUpdate: harness.installUpdate, getState: harness.updateState };
+  return { installUpdate: harness.installUpdate, getState: harness.updateState, discardDownload: harness.discardDownload };
 }, shouldEnableAutoUpdate: vi.fn() }));
 vi.mock("../alertManager", () => ({ cleanupUrgentAlert: harness.cleanupAlert,
   registerAlertIpcHandlers: vi.fn(), showUrgentAlert: vi.fn(), stopUrgentAlertLoop: vi.fn(),
@@ -102,6 +149,21 @@ beforeEach(async () => {
   harness.installUpdate.mockResolvedValue(true);
   harness.openAudio.mockResolvedValue({ canceled: true, filePaths: [] });
   harness.previewSound.mockResolvedValue({ duration_ms: 220 });
+  harness.clearStorageData.mockResolvedValue(undefined);
+  harness.clearCache.mockResolvedValue(undefined);
+  harness.userDataDir = "";
+  harness.homeDir = "";
+  harness.setPath = undefined;
+  harness.trayInstances = [];
+  harness.nativeTheme.themeSource = "system";
+  harness.nativeTheme.shouldUseDarkColors = true;
+  harness.nativeThemeListeners.clear();
+  harness.primaryWorkArea = { x: 0, y: 0, width: 1440, height: 900 };
+  harness.allWorkAreas = [{ x: 0, y: 0, width: 1440, height: 900 }];
+  harness.bounds = { x: 100, y: 80, width: 1200, height: 800 };
+  harness.normalBounds = { x: 100, y: 80, width: 1200, height: 800 };
+  harness.maximized = false;
+  harness.maximize.mockImplementation(() => { harness.maximized = true; });
   await import("../main");
 });
 
@@ -462,4 +524,193 @@ test("Windows keeps no application menu, the ICO icon and NSIS auto-download", a
   expect(harness.setAppUserModelId).toHaveBeenCalledWith("org.railwatch.railwatch12306");
   expect(harness.windowOptions.icon).toMatch(/icon\.ico$/);
   expect(harness.updaterOptions.installMode).toBe("auto");
+});
+
+test("nativeTheme sync, light startup background, workArea scaling and window state persistence work end-to-end", async () => {
+  const tempUserData = mkdtempSync(path.join(os.tmpdir(), "railwatch-main-winstate-"));
+  try {
+    harness.userDataDir = tempUserData;
+    harness.nativeTheme.shouldUseDarkColors = false;
+    harness.primaryWorkArea = { x: 0, y: 0, width: 1280, height: 760 };
+    harness.allWorkAreas = [harness.primaryWorkArea];
+    writeFileSync(
+      path.join(tempUserData, "window-state.json"),
+      JSON.stringify({ x: 2400, y: 50, width: 1600, height: 1000, maximized: true, theme: "light" }),
+      "utf8",
+    );
+
+    harness.ready!();
+    expect(harness.nativeTheme.themeSource).toBe("dark");
+    expect(harness.windowOptions.backgroundColor).toBe("#101113");
+    expect(harness.windowOptions.minWidth).toBe(840);
+    expect(harness.windowOptions.minHeight).toBe(580);
+    expect(harness.windowOptions.width).toBe(1280);
+    expect(harness.windowOptions.height).toBe(760);
+    expect(harness.windowOptions.x).toBe(0);
+    expect(harness.windowOptions.y).toBe(0);
+
+    harness.windowListeners.get("ready-to-show")?.();
+    expect(harness.maximize).toHaveBeenCalledTimes(1);
+    expect(harness.show).toHaveBeenCalledTimes(1);
+
+    const event = { senderFrame: { url: harness.rendererUrl } };
+    harness.request.mockResolvedValueOnce({ theme: "light", notification_settings: { desktop_urgent: true } });
+    await harness.ipcHandlers.get("railwatch:command")!(event, "loadPreferences");
+    expect(harness.nativeTheme.themeSource).toBe("dark");
+    expect(harness.setBackgroundColor).not.toHaveBeenCalled();
+
+    harness.ipcListeners.get("railwatch:splash-finished")!({ senderFrame: { url: "https://evil.example/" } });
+    expect(harness.nativeTheme.themeSource).toBe("dark");
+
+    harness.ipcListeners.get("railwatch:splash-finished")!(event);
+    expect(harness.nativeTheme.themeSource).toBe("light");
+    expect(harness.setBackgroundColor).toHaveBeenCalledWith("#f4f3ef");
+
+    harness.request.mockResolvedValueOnce({ theme: "dark", notification_settings: { desktop_urgent: true } });
+    await harness.ipcHandlers.get("railwatch:command")!(event, "savePreferences", { theme: "dark" });
+    expect(harness.nativeTheme.themeSource).toBe("dark");
+    expect(harness.setBackgroundColor).toHaveBeenCalledWith("#101113");
+
+    harness.confirmDialog.mockResolvedValueOnce(true);
+    harness.request.mockResolvedValueOnce({ cleared: true });
+    harness.request.mockResolvedValueOnce({ theme: "system", notification_settings: { desktop_urgent: true } });
+    await harness.ipcHandlers.get("railwatch:command")!(event, "clearLocalData");
+    expect(harness.nativeTheme.themeSource).toBe("system");
+    expect(harness.setBackgroundColor).toHaveBeenCalledWith("#f4f3ef");
+
+    harness.nativeTheme.shouldUseDarkColors = true;
+    harness.nativeThemeListeners.get("updated")?.();
+    expect(harness.setBackgroundColor).toHaveBeenLastCalledWith("#101113");
+
+    harness.maximized = false;
+    harness.bounds = { x: 120, y: 90, width: 1024, height: 640 };
+    harness.windowListeners.get("close")?.({ preventDefault: vi.fn() });
+    const saved = JSON.parse(readFileSync(path.join(tempUserData, "window-state.json"), "utf8"));
+    expect(saved).toEqual({
+      x: 120,
+      y: 90,
+      width: 1024,
+      height: 640,
+      maximized: false,
+      theme: "system",
+    });
+  } finally {
+    rmSync(tempUserData, { recursive: true, force: true });
+  }
+});
+
+test("railwatch:export-locations returns available drives alongside shortcuts", async () => {
+  harness.ready!();
+  const payload = await harness.ipcHandlers.get("railwatch:export-locations")!(
+    { senderFrame: { url: harness.rendererUrl } },
+    undefined,
+  );
+  expect(Array.isArray(payload.drives)).toBe(true);
+  expect(payload.drives.length).toBeGreaterThan(0);
+  expect(payload.shortcuts.map((item: { name: string }) => item.name)).toContain("下载");
+});
+
+test("macOS tray uses template icon, menu-only behavior and menu bar wording", async () => {
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "darwin" } }));
+  harness.request.mockResolvedValue({ close_to_tray: true });
+  harness.confirmDialog.mockResolvedValue(true);
+  harness.ready!();
+  harness.windowListeners.get("close")!({ preventDefault: vi.fn() });
+  await new Promise(resolve => setImmediate(resolve));
+
+  expect(harness.trayInstances).toHaveLength(1);
+  expect(String(harness.trayInstances[0].icon)).toMatch(/trayTemplate\.png$/);
+  expect(harness.trayInstances[0].on).not.toHaveBeenCalled();
+  expect(harness.trayInstances[0].setContextMenu).toHaveBeenCalledTimes(1);
+  expect(harness.confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+    title: "已启用关闭到菜单栏",
+    message: expect.stringContaining("显示窗口"),
+  }));
+});
+
+test("Windows tray keeps ico asset, click listeners and tray wording", async () => {
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "win32" } }));
+  harness.request.mockResolvedValue({ close_to_tray: true });
+  harness.confirmDialog.mockResolvedValue(true);
+  harness.ready!();
+  harness.windowListeners.get("close")!({ preventDefault: vi.fn() });
+  await new Promise(resolve => setImmediate(resolve));
+
+  expect(harness.trayInstances).toHaveLength(1);
+  expect(String(harness.trayInstances[0].icon)).toMatch(/icon\.ico$/);
+  expect(harness.trayInstances[0].on).toHaveBeenCalledWith("double-click", expect.any(Function));
+  expect(harness.trayInstances[0].on).toHaveBeenCalledWith("click", expect.any(Function));
+  expect(harness.confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+    title: "已启用关闭到托盘",
+    message: expect.stringContaining("双击托盘图标"),
+  }));
+});
+
+test("clearLocalData clears window-state.json and Electron session storage/cache", async () => {
+  const { mkdtempSync, existsSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const tempUserData = mkdtempSync(path.join(os.tmpdir(), "railwatch-main-clear-"));
+  try {
+    harness.userDataDir = tempUserData;
+    harness.confirmDialog.mockResolvedValue(true);
+    writeFileSync(path.join(tempUserData, "window-state.json"), '{"theme":"dark","width":1200}', "utf8");
+    harness.request.mockImplementation(async (cmd: string) => {
+      if (cmd === "clearLocalData") return { cleared: true };
+      if (cmd === "loadPreferences") return { theme: "system" };
+      return {};
+    });
+    harness.ready!();
+    const invoke = harness.ipcHandlers.get("railwatch:command")!;
+    const result = await invoke({ senderFrame: { url: harness.rendererUrl } }, "clearLocalData", {});
+
+    expect(result).toEqual({ cleared: true });
+    expect(existsSync(path.join(tempUserData, "window-state.json"))).toBe(false);
+    expect(harness.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(harness.clearCache).toHaveBeenCalledTimes(1);
+    // Without a configured userData directory the updater cache is left alone, and so is its state.
+    expect(harness.discardDownload).not.toHaveBeenCalled();
+  } finally {
+    rmSync(tempUserData, { recursive: true, force: true });
+  }
+});
+
+test("clearLocalData deletes the downloaded installer and tells the updater it is gone", async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "railwatch-main-updater-"));
+  try {
+    // Every per-user location resolves inside the temporary home on each platform.
+    vi.stubEnv("LOCALAPPDATA", path.join(home, "AppData", "Local"));
+    vi.stubEnv("XDG_DATA_HOME", path.join(home, ".local", "share"));
+    vi.stubEnv("XDG_CACHE_HOME", path.join(home, ".cache"));
+    harness.homeDir = home;
+    harness.setPath = (_name, value) => { harness.userDataDir = value; };
+    vi.resetModules();
+    await import("../main");  // The unified userData directory is configured on import.
+    const { resolveUpdaterCacheDir } = await import("../appDataPaths");
+    const cache = resolveUpdaterCacheDir({ homeDir: home });
+    expect(cache.startsWith(home + path.sep)).toBe(true);
+    const installer = path.join(cache, "pending", "RailWatch-12306-Setup-0.4.3.exe");
+    mkdirSync(path.dirname(installer), { recursive: true });
+    writeFileSync(installer, "installer");
+    harness.request.mockImplementation(async (cmd: string) => {
+      if (cmd === "clearLocalData") return { cleared: true };
+      if (cmd === "loadPreferences") return { theme: "system" };
+      return {};
+    });
+    harness.ready!();
+    const invoke = harness.ipcHandlers.get("railwatch:command")!;
+    const event = { senderFrame: { url: harness.rendererUrl } };
+
+    harness.confirmDialog.mockResolvedValue(false);
+    expect(await invoke(event, "clearLocalData", {})).toEqual({ cancelled: true });
+    expect(existsSync(installer)).toBe(true);
+    expect(harness.discardDownload).not.toHaveBeenCalled();
+
+    harness.confirmDialog.mockResolvedValue(true);
+    expect(await invoke(event, "clearLocalData", {})).toEqual({ cleared: true });
+    expect(existsSync(cache)).toBe(false);
+    expect(harness.discardDownload).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  }
 });

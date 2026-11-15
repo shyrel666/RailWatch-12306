@@ -1,8 +1,25 @@
-import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, powerMonitor, powerSaveBlocker, shell } from "electron";
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeTheme, powerMonitor, powerSaveBlocker, screen, session, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { RailWatchNsisUpdater } from "./nsisUpdater";
+import {
+  clearElectronLocalData,
+  configureUnifiedUserData,
+  resolveUpdaterCacheDir,
+  trayCloseNotice,
+  trayIconFilename,
+  usesTrayMenuOnly,
+} from "./appDataPaths";
 import path from "node:path";
-import { listExportDirectory, validateLogExport } from "./exportDialog";
+import { listExportDirectory, listExportRoots, validateLogExport } from "./exportDialog";
+import {
+  loadWindowState,
+  normalizeThemePreference,
+  resolveWindowLayout,
+  saveWindowStateSync,
+  themeBackgroundColor,
+  type PersistedWindowState,
+  type Rect,
+} from "./windowState";
 import { pathToFileURL } from "node:url";
 import {
   consumeExportPathGrant,
@@ -25,7 +42,7 @@ import {
   type UpdateInstallMode,
   type UpdateManager,
 } from "./updateManager";
-import { releaseTagUrl } from "./updateChecker";
+import { releaseTagUrl, resolveMacDmgDownload, resolveMacTargetArch } from "./updateChecker";
 
 let mainWindow: BrowserWindow | null = null;
 let updateManager: UpdateManager | null = null;
@@ -66,6 +83,123 @@ function applyAlertPreferences(value: unknown): void {
   if (!alertPreferences.sound_loop) stopUrgentAlertLoop();
   else updateUrgentAlertSound(alertPreferences);
 }
+let persistedWindowState: PersistedWindowState = {};
+let windowStateSaveTimer: NodeJS.Timeout | null = null;
+let splashBackgroundTimer: NodeJS.Timeout | null = null;
+let splashActive = true;
+let nativeThemeListenerBound = false;
+
+function clearSplashBackgroundTimer(): void {
+  if (splashBackgroundTimer) {
+    clearTimeout(splashBackgroundTimer);
+    splashBackgroundTimer = null;
+  }
+}
+
+function completeSplashTransition(): void {
+  clearSplashBackgroundTimer();
+  if (!splashActive) return;
+  splashActive = false;
+  syncNativeTheme(persistedWindowState.theme, true);
+}
+
+function getWindowStateFilePath(): string | null {
+  try {
+    const userData = typeof app.getPath === "function" ? app.getPath("userData") : "";
+    return userData ? path.join(userData, "window-state.json") : null;
+  } catch {
+    return null;
+  }
+}
+
+function currentThemeBackground(): "#101113" | "#f4f3ef" {
+  const theme = normalizeThemePreference(persistedWindowState.theme);
+  const systemDark = typeof nativeTheme?.shouldUseDarkColors === "boolean" ? nativeTheme.shouldUseDarkColors : true;
+  return themeBackgroundColor(theme, systemDark);
+}
+
+function syncWindowThemeBackground(): void {
+  if (!splashActive && mainWindow && !mainWindow.isDestroyed() && typeof mainWindow.setBackgroundColor === "function") {
+    mainWindow.setBackgroundColor(currentThemeBackground());
+  }
+}
+
+function syncNativeTheme(rawTheme: unknown, immediateTheme = true): void {
+  const theme = normalizeThemePreference(rawTheme);
+  if (immediateTheme) {
+    splashActive = false;
+    clearSplashBackgroundTimer();
+  }
+  if (nativeTheme && "themeSource" in nativeTheme) {
+    nativeTheme.themeSource = splashActive ? "dark" : theme;
+  }
+  const changed = persistedWindowState.theme !== theme;
+  persistedWindowState = { ...persistedWindowState, theme };
+  syncWindowThemeBackground();
+  if (changed) scheduleWindowStateSave();
+}
+
+function applyRuntimePreferences(payload: unknown, immediateTheme = true): void {
+  applyAlertPreferences(payload);
+  if (isRecord(payload) && "theme" in payload) {
+    syncNativeTheme(payload.theme, immediateTheme);
+  }
+}
+
+function getWorkAreaDisplays(): { displays: Rect[]; primaryWorkArea: Rect } {
+  const fallback: Rect = { x: 0, y: 0, width: 1440, height: 900 };
+  if (!screen || typeof screen.getPrimaryDisplay !== "function") {
+    return { displays: [fallback], primaryWorkArea: fallback };
+  }
+  const primaryWorkArea = screen.getPrimaryDisplay()?.workArea ?? fallback;
+  const allDisplays = typeof screen.getAllDisplays === "function" ? screen.getAllDisplays() : [];
+  const displays = allDisplays.map((item) => item.workArea).filter(Boolean);
+  return {
+    displays: displays.length ? displays : [primaryWorkArea],
+    primaryWorkArea,
+  };
+}
+
+function captureWindowBounds(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const maximized = typeof mainWindow.isMaximized === "function" ? mainWindow.isMaximized() : false;
+  const bounds =
+    maximized && typeof mainWindow.getNormalBounds === "function"
+      ? mainWindow.getNormalBounds()
+      : typeof mainWindow.getBounds === "function"
+        ? mainWindow.getBounds()
+        : null;
+  if (bounds && bounds.width > 0 && bounds.height > 0) {
+    persistedWindowState = {
+      ...persistedWindowState,
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.round(bounds.width),
+      height: Math.round(bounds.height),
+      maximized,
+    };
+  } else {
+    persistedWindowState = { ...persistedWindowState, maximized };
+  }
+}
+
+function flushWindowStateSave(): void {
+  if (windowStateSaveTimer) {
+    clearTimeout(windowStateSaveTimer);
+    windowStateSaveTimer = null;
+  }
+  saveWindowStateSync(getWindowStateFilePath(), persistedWindowState);
+}
+
+function scheduleWindowStateSave(): void {
+  if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer);
+  windowStateSaveTimer = setTimeout(() => {
+    windowStateSaveTimer = null;
+    saveWindowStateSync(getWindowStateFilePath(), persistedWindowState);
+  }, 250);
+  windowStateSaveTimer.unref?.();
+}
+
 const pythonRuntime = new RailWatchPythonRuntimeClient();
 const grantedExportPaths = new Set<string>();
 let allowedRendererUrl = "";
@@ -81,6 +215,13 @@ async function flushStagedDraft(): Promise<void> {
   } catch (error) {
     if (!(error instanceof Error && error.message.includes("草稿修订号已过期"))) throw error;
   }
+}
+let userDataConfigured = false;
+if (typeof app.getPath === "function" && typeof app.setPath === "function") {
+  configureUnifiedUserData(app as Parameters<typeof configureUnifiedUserData>[0], {
+    homeDir: app.getPath("home"),
+  });
+  userDataConfigured = true;
 }
 const ownsInstance = app.requestSingleInstanceLock();
 if (!ownsInstance) { quitAllowed = true; app.quit(); }
@@ -156,14 +297,18 @@ function appIconPath(): string {
   return path.join(__dirname, "..", "assets", "images", process.platform === "win32" ? "icon.ico" : "icon.png");
 }
 
+function trayIconPath(): string {
+  return path.join(__dirname, "..", "assets", "images", trayIconFilename(process.platform));
+}
+
 function ensureTray(): boolean {
   if (tray) return true;
   try {
-    tray = new Tray(process.platform === "darwin"
-      ? nativeImage.createFromPath(appIconPath()).resize({ width: 18, height: 18 })
-      : appIconPath());
-    tray.on("double-click", showWindow);
-    tray.on("click", showWindow);
+    tray = new Tray(trayIconPath());
+    if (!usesTrayMenuOnly(process.platform)) {
+      tray.on("double-click", showWindow);
+      tray.on("click", showWindow);
+    }
     updateTray();
     return true;
   } catch {
@@ -174,6 +319,9 @@ function ensureTray(): boolean {
 
 async function finishExit(force = false): Promise<void> {
   quitAllowed = true;
+  clearSplashBackgroundTimer();
+  captureWindowBounds();
+  flushWindowStateSave();
   try {
     keepAwake(false);
     cleanupUrgentAlert();
@@ -232,9 +380,10 @@ async function handleWindowClose(event: Electron.Event): Promise<void> {
       const preferences = await pythonRuntime.request<{ close_to_tray?: boolean }>("loadPreferences", {}, { timeoutMs: 5000 });
       if (preferences.close_to_tray && ensureTray()) {
         if (!trayExplained) {
+          const notice = trayCloseNotice(process.platform);
           const acknowledged = await confirmationBridge.request({
-            title: "已启用关闭到托盘",
-            message: "关闭窗口后 RailWatch 会在托盘继续运行。\n双击托盘图标可重新打开；通过托盘菜单可停止监控或退出。",
+            title: notice.title,
+            message: notice.message,
             kind: "info", okText: "知道了",
           });
           if (!acknowledged) return;
@@ -248,6 +397,10 @@ async function handleWindowClose(event: Electron.Event): Promise<void> {
   } finally { closePending = false; }
 }
 
+function isRunningUnderRosetta(): boolean {
+  return process.platform === "darwin" && Boolean(app.runningUnderARM64Translation);
+}
+
 function initializeAutoUpdater(): void {
   const enabled = shouldEnableAutoUpdate({
     isPackaged: app.isPackaged,
@@ -255,12 +408,15 @@ function initializeAutoUpdater(): void {
   });
 
   // Squirrel.Mac rejects updates for unsigned builds, so macOS only checks and
-  // sends users to the release page. Signed auto-install (railwatchMacUpdateMode
-  // = auto) needs its own staging-aware updater and is not enabled yet.
-  const installMode: UpdateInstallMode = process.platform === "darwin" ? "manual" : "auto";
+  // sends users directly to the architecture-matching DMG (with release notes as fallback).
+  // Signed auto-install (railwatchMacUpdateMode = auto) needs its own staging-aware
+  // updater and is not enabled yet.
+  const isDarwin = process.platform === "darwin";
+  const installMode: UpdateInstallMode = isDarwin ? "manual" : "auto";
   const updater = process.platform === "win32" ? new RailWatchNsisUpdater() : autoUpdater;
   updater.autoDownload = installMode === "auto";
   updater.autoInstallOnAppQuit = false;
+  const macTargetArch = isDarwin ? resolveMacTargetArch(process.arch, isRunningUnderRosetta()) : undefined;
 
   updateManager = createUpdateManager({
     currentVersion: app.getVersion(),
@@ -268,6 +424,15 @@ function initializeAutoUpdater(): void {
     enabled,
     installMode,
     releaseUrlFor: releaseTagUrl,
+    resolveManualDownload: macTargetArch
+      ? (info) =>
+          resolveMacDmgDownload({
+            version: info.version,
+            tag: info.tag,
+            arch: macTargetArch,
+            files: info.files,
+          })
+      : undefined,
     onStateChange: () => broadcastUpdateState(),
   });
 
@@ -286,14 +451,31 @@ function createWindow(): void {
   } else {
     Menu.setApplicationMenu(null);
   }
+  clearSplashBackgroundTimer();
+  splashActive = true;
+  persistedWindowState = loadWindowState(getWindowStateFilePath());
+  const initialTheme = normalizeThemePreference(persistedWindowState.theme);
+  persistedWindowState = { ...persistedWindowState, theme: initialTheme };
+  if (nativeTheme && "themeSource" in nativeTheme) {
+    // Keep the native title bar dark alongside the #101113 startup animation until splash dismisses.
+    nativeTheme.themeSource = "dark";
+  }
+  if (!nativeThemeListenerBound && nativeTheme && typeof nativeTheme.on === "function") {
+    nativeThemeListenerBound = true;
+    nativeTheme.on("updated", syncWindowThemeBackground);
+  }
+  const { displays, primaryWorkArea } = getWorkAreaDisplays();
+  const layout = resolveWindowLayout(persistedWindowState, displays, primaryWorkArea);
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1180,
-    minHeight: 720,
+    width: layout.width,
+    height: layout.height,
+    minWidth: layout.minWidth,
+    minHeight: layout.minHeight,
+    ...(typeof layout.x === "number" && typeof layout.y === "number" ? { x: layout.x, y: layout.y } : {}),
     title: "RailWatch 12306",
     icon: appIconPath(),
     show: false,
+    // Startup splash stays uniformly #101113 dark across themes before switching to active theme backdrop.
     backgroundColor: "#101113",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -302,8 +484,21 @@ function createWindow(): void {
       sandbox: false,
     },
   });
-  mainWindow.on("close", (event) => { void handleWindowClose(event); });
+  mainWindow.on("close", (event) => {
+    captureWindowBounds();
+    flushWindowStateSave();
+    void handleWindowClose(event);
+  });
+  const handleWindowMoveOrResize = () => {
+    captureWindowBounds();
+    scheduleWindowStateSave();
+  };
+  mainWindow.on("resize", handleWindowMoveOrResize);
+  mainWindow.on("move", handleWindowMoveOrResize);
+  mainWindow.on("maximize", handleWindowMoveOrResize);
+  mainWindow.on("unmaximize", handleWindowMoveOrResize);
   mainWindow.on("closed", () => {
+    clearSplashBackgroundTimer();
     mainWindow = null;
     confirmationReady = false;
     pendingDialogPresentation.length = 0;
@@ -331,17 +526,29 @@ function createWindow(): void {
       window.webContents.send("railwatch:window-shown");
     }
   };
-  window.on("show", notifyWindowShown);
+  window.on("show", () => {
+    notifyWindowShown();
+    if (splashActive && !splashBackgroundTimer) {
+      // Safety fallback if the renderer splash signal is missed; normal handoff happens on railwatch:splash-finished.
+      splashBackgroundTimer = setTimeout(completeSplashTransition, 10500);
+      splashBackgroundTimer.unref?.();
+    }
+  });
   // Reloading an already visible window creates a fresh preload listener.
   window.webContents.on("dom-ready", notifyWindowShown);
   window.on("ready-to-show", () => {
-    if (!window.isDestroyed()) window.show();
+    if (window.isDestroyed()) return;
+    if (persistedWindowState.maximized && typeof window.maximize === "function") {
+      window.maximize();
+    }
+    window.show();
   });
   const rendererUrl = allowedRendererUrl;
   let loadErrorShown = false;
   const showLoadError = (error: unknown) => {
     if (window.isDestroyed() || loadErrorShown || (error as { errno?: number })?.errno === -3) return;
     loadErrorShown = true;
+    completeSplashTransition();
     window.show();
     void dialog.showMessageBox({ type: "error", title: "页面加载失败", message: "RailWatch 页面未能加载。",
       detail: devServerUrl ? "开发服务可能尚未就绪，请启动服务后重试。" : "应用页面可能缺失，请重试或重新安装。",
@@ -427,7 +634,7 @@ app.whenReady().then(() => {
   powerMonitor.on("resume", () => { void pythonRuntime.request("systemResumed").catch(() => undefined); });
   registerAlertIpcHandlers(isTrustedSender);
   createWindow();
-  void pythonRuntime.request("loadPreferences").then(applyAlertPreferences).catch(() => undefined);
+  void pythonRuntime.request("loadPreferences").then((prefs) => applyRuntimePreferences(prefs, false)).catch(() => undefined);
   initializeAutoUpdater();
 
   app.on("activate", () => {
@@ -453,6 +660,11 @@ ipcMain.on("railwatch:stage-draft", (event, draft: unknown) => {
 app.on("before-quit", (event) => {
   if (!quitAllowed) { event.preventDefault(); void requestExit(); }
   else cleanupUrgentAlert();
+});
+
+ipcMain.on("railwatch:splash-finished", (event) => {
+  if (!isTrustedSender(event.senderFrame?.url)) return;
+  completeSplashTransition();
 });
 
 ipcMain.on("railwatch:confirm-ready", (event) => {
@@ -509,9 +721,35 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
     stagedDraft = null;
     draftGeneration++;
     cleanupUrgentAlert();
-    try { applyAlertPreferences(await pythonRuntime.request("loadPreferences")); } catch { /* Reload retries preferences. */ }
+    if (windowStateSaveTimer) {
+      clearTimeout(windowStateSaveTimer);
+      windowStateSaveTimer = null;
+    }
+    persistedWindowState = { theme: "system" };
+    if (nativeTheme && "themeSource" in nativeTheme) {
+      nativeTheme.themeSource = splashActive ? "dark" : "system";
+    }
+    syncWindowThemeBackground();
+    const userDataDir = typeof app.getPath === "function" ? app.getPath("userData") : "";
+    const homeDir = typeof app.getPath === "function" ? app.getPath("home") : undefined;
+    const activeSession =
+      mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && "session" in mainWindow.webContents
+        ? mainWindow.webContents.session
+        : session?.defaultSession;
+    const updaterCacheDir = userDataConfigured ? resolveUpdaterCacheDir({ homeDir }) : undefined;
+    await clearElectronLocalData({
+      userDataDir,
+      updaterCacheDir,
+      clearUpdaterCache: Boolean(updaterCacheDir),
+      session: activeSession,
+    });
+    // A downloaded installer lived in that cache.
+    if (updaterCacheDir) updateManager?.discardDownload();
+    try { applyRuntimePreferences(await pythonRuntime.request("loadPreferences")); } catch { /* Reload retries preferences. */ }
   }
-  if (command === "savePreferences" || command === "loadPreferences") applyAlertPreferences(result);
+  if (command === "savePreferences" || command === "loadPreferences") {
+    applyRuntimePreferences(result, command === "savePreferences");
+  }
   return result;
 });
 
@@ -600,6 +838,7 @@ ipcMain.handle("railwatch:export-locations", async (event, defaultPath?: unknown
   assertTrustedSender(event.senderFrame?.url);
   const directory = typeof defaultPath === "string" && path.isAbsolute(defaultPath)
     ? path.dirname(defaultPath) : app.getPath("downloads");
+  const drives = await listExportRoots();
   return {
     directory,
     fileName: typeof defaultPath === "string" && defaultPath ? path.basename(defaultPath) : "railwatch-events.txt",
@@ -609,6 +848,7 @@ ipcMain.handle("railwatch:export-locations", async (event, defaultPath?: unknown
       { name: "文档", path: app.getPath("documents") },
       { name: "日志目录", path: directory },
     ],
+    drives,
   };
 });
 
@@ -648,6 +888,7 @@ ipcMain.handle("railwatch:app-info", async (event) => {
     nodeVersion: process.versions.node,
     platform: process.platform,
     arch: process.arch,
+    runningUnderARM64Translation: isRunningUnderRosetta(),
   };
 });
 

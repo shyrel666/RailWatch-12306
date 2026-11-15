@@ -1,9 +1,11 @@
+import type { BrowserWindow } from "electron";
 import { afterEach, expect, test, vi } from "vitest";
 
 const constructed = vi.hoisted(() => ({
   notifications: 0, soundWindows: 0, calls: [] as string[],
   finishLoad: null as (() => void) | null,
   scripts: [] as string[], duration: 220,
+  notificationOptions: [] as Record<string, unknown>[], closedNotifications: 0, dockBadges: [] as string[],
 }));
 vi.mock("electron", () => ({
   BrowserWindow: class {
@@ -21,16 +23,22 @@ vi.mock("electron", () => ({
   },
   Notification: class {
     static isSupported() { return true; }
-    constructor() { constructed.notifications += 1; }
+    constructor(options: Record<string, unknown>) {
+      constructed.notifications += 1;
+      constructed.notificationOptions.push(options);
+    }
     on() { return undefined; }
     show() { return undefined; }
+    close() { constructed.closedNotifications += 1; }
   },
+  app: { dock: { bounce: vi.fn(), setBadge: (text: string) => { constructed.dockBadges.push(text); } } },
+  nativeImage: { createFromBitmap: (buffer: Buffer, options: object) => ({ buffer, options }) },
   ipcMain: { on: vi.fn() },
   shell: { openExternal: vi.fn() },
 }));
 
-import { cleanupUrgentAlert, previewAlertSound, showNoticeAlert, showUrgentAlert, stopAlertSoundPreview,
-  stopUrgentAlertLoop, updateUrgentAlertSound } from "../alertManager";
+import { alertOverlayBitmap, cleanupUrgentAlert, previewAlertSound, showNoticeAlert, showUrgentAlert, stopAlertSoundPreview,
+  stopUrgentAlert, stopUrgentAlertLoop, updateUrgentAlertSound } from "../alertManager";
 import * as soundFiles from "../alertSoundFiles";
 
 afterEach(() => {
@@ -41,9 +49,25 @@ afterEach(() => {
   constructed.finishLoad = null;
   constructed.scripts = [];
   constructed.duration = 220;
+  constructed.notificationOptions = [];
+  constructed.closedNotifications = 0;
+  constructed.dockBadges = [];
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+/** A main window that records what the alert does to it; `focus()` plays the user returning to it. */
+function fakeWindow() {
+  const listeners = new Map<string, () => void>();
+  const raw = {
+    isDestroyed: () => false, isMinimized: () => false, restore: vi.fn(), show: vi.fn(), focus: vi.fn(),
+    flashFrame: vi.fn(), setAlwaysOnTop: vi.fn(), setOverlayIcon: vi.fn(),
+    on: (name: string, listener: () => void) => { listeners.set(name, listener); },
+  };
+  return { window: raw as unknown as BrowserWindow, raw, focus: () => listeners.get("focus")?.() };
+}
+const payment = { title: "待支付", message: "请在官方页面完成支付" };
+const notificationOnly = { desktop_urgent: true, sound_loop: false, window_attention: false };
 
 test("the sound window loads a page before any tone script runs", async () => {
   showUrgentAlert(null, { title: "测试", message: "测试" }, {
@@ -70,6 +94,82 @@ test("a notice shows only a system notification, and none when desktop notificat
   expect(constructed.soundWindows).toBe(0);
   showNoticeAlert(null, { title: "起售提醒", message: "15:00 起售" }, { ...preferences, desktop_urgent: false });
   expect(constructed.notifications).toBe(1);
+});
+
+test("an urgent notification stays on screen on Windows while a notice keeps the default timeout", () => {
+  showUrgentAlert(null, payment, notificationOnly, "win32");
+  showNoticeAlert(null, { title: "起售提醒", message: "15:00 起售" }, notificationOnly);
+  expect(constructed.notificationOptions).toEqual([
+    expect.objectContaining({ title: "待支付", timeoutType: "never", urgency: "critical", silent: false }),
+    expect.objectContaining({ title: "起售提醒", timeoutType: "default", urgency: "normal", silent: false }),
+  ]);
+});
+
+test("Windows marks the taskbar icon until the alert is stopped, then withdraws the mark and the toast", () => {
+  const { window, raw } = fakeWindow();
+  showUrgentAlert(window, payment, notificationOnly, "win32");
+  expect(raw.setOverlayIcon).toHaveBeenCalledTimes(1);
+  const [icon, description] = raw.setOverlayIcon.mock.calls[0] as [{ options: object }, string];
+  expect(icon.options).toEqual({ width: 32, height: 32 });
+  expect(description).toBe("有待处理的紧急提醒");
+  expect(constructed.dockBadges).toEqual([]);
+  stopUrgentAlert();
+  expect(raw.setOverlayIcon).toHaveBeenLastCalledWith(null, "");
+  expect(constructed.closedNotifications).toBe(1);
+});
+
+test("macOS badges the Dock icon instead and clears it when the alert is stopped", () => {
+  const { window, raw } = fakeWindow();
+  showUrgentAlert(window, payment, notificationOnly, "darwin");
+  expect(constructed.dockBadges).toEqual(["!"]);
+  expect(raw.setOverlayIcon).not.toHaveBeenCalled();
+  stopUrgentAlert();
+  expect(constructed.dockBadges).toEqual(["!", ""]);
+});
+
+test("returning to the window acknowledges the alert, but the focus the alert itself causes does not", () => {
+  vi.useFakeTimers();
+  const { window, raw, focus } = fakeWindow();
+  showUrgentAlert(window, payment, { ...notificationOnly, window_attention: true }, "win32");
+  focus();
+  expect(raw.setOverlayIcon).toHaveBeenCalledTimes(1);
+  expect(constructed.closedNotifications).toBe(0);
+  vi.advanceTimersByTime(1600);
+  focus();
+  expect(raw.setOverlayIcon).toHaveBeenLastCalledWith(null, "");
+  expect(constructed.closedNotifications).toBe(1);
+  // Nothing is left to acknowledge, so a later focus does nothing more.
+  focus();
+  expect(raw.setOverlayIcon).toHaveBeenCalledTimes(2);
+});
+
+test("a newer urgent alert replaces the previous toast instead of stacking another", () => {
+  showUrgentAlert(null, payment, notificationOnly, "win32");
+  showUrgentAlert(null, { title: "需要核验", message: "请在受控浏览器中完成核验" }, notificationOnly, "win32");
+  expect(constructed.notifications).toBe(2);
+  expect(constructed.closedNotifications).toBe(1);
+});
+
+test("with desktop notifications off there is no toast, taskbar mark or Dock badge", () => {
+  const { window, raw } = fakeWindow();
+  const off = { desktop_urgent: false, sound_loop: false, window_attention: false };
+  showUrgentAlert(window, payment, off, "win32");
+  showUrgentAlert(window, payment, off, "darwin");
+  expect(constructed.notifications).toBe(0);
+  expect(raw.setOverlayIcon).not.toHaveBeenCalled();
+  expect(constructed.dockBadges).toEqual([]);
+});
+
+test("the taskbar overlay is a red disc with a white exclamation mark on a transparent corner", () => {
+  const pixels = alertOverlayBitmap();
+  const at = (x: number, y: number) => [...pixels.subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)];
+  expect(pixels).toHaveLength(32 * 32 * 4);
+  expect(at(0, 0)).toEqual([0, 0, 0, 0]);
+  // Windows bitmaps are BGRA.
+  expect(at(6, 16)).toEqual([53, 57, 229, 255]);
+  expect(at(15, 12)).toEqual([255, 255, 255, 255]);
+  expect(at(15, 21)).toEqual([53, 57, 229, 255]);
+  expect(at(15, 23)).toEqual([255, 255, 255, 255]);
 });
 
 test("disabling sound stops the existing loop without creating another sound window", () => {

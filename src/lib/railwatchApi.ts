@@ -86,7 +86,7 @@ export const railwatchApi = {
     return window.railwatch.openExternal(url);
   },
   getAppInfo() {
-    if (!window.railwatch) {
+    if (!window.railwatch || typeof window.railwatch.getAppInfo !== "function") {
       return Promise.reject(new Error(missingElectronMessage));
     }
     return window.railwatch.getAppInfo() as Promise<AppInfo>;

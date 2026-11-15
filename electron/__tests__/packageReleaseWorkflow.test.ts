@@ -79,12 +79,31 @@ describe("package-release workflow", () => {
     expect(stepIndex(windows, "Verify packaged runtime starts and restores orders")).toBeLessThan(stepIndex(windows, "Upload release assets"));
   });
 
+  test("Windows smokes the runtime and the final app, each again under a non-ASCII profile, before uploading", () => {
+    const smokes = [
+      ["Verify packaged runtime starts and restores orders", "python -X utf8 tests/runtime_order_smoke.py"],
+      ["Verify packaged runtime under a non-ASCII profile path", "python -X utf8 tests/runtime_order_smoke.py --non-ascii-profile"],
+      ["Smoke the final app", "python -X utf8 tests/packaged_smoke.py"],
+      ["Smoke the final app under a non-ASCII profile path", "python -X utf8 tests/packaged_smoke.py --non-ascii-profile"],
+    ];
+    const positions = smokes.map(([name]) => stepIndex(windows, name));
+    expect(positions[0]).toBeGreaterThan(stepIndex(windows, "Build Electron installer"));
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    expect(positions[3]).toBeLessThan(stepIndex(windows, "Upload release assets"));
+    smokes.forEach(([, run], index) => expect(windows.steps[positions[index]].run).toBe(run));
+    // The log and screenshot are needed most when a smoke fails.
+    const evidence = windows.steps.find((step) => step.with?.name === "qa-windows-smoke");
+    expect(evidence?.if).toBe("${{ always() }}");
+    expect(evidence?.with?.path).toBe("build/qa");
+  });
+
   test("uploads only release assets under release-* names and keeps QA output apart", () => {
     const uploads = [...windows.steps, ...macos.steps].filter((step) => step.uses?.startsWith("actions/upload-artifact"));
     const names = uploads.map((step) => step.with?.name);
-    expect(names).toEqual(["release-windows", "qa-windows-unpacked", "release-macos-${{ matrix.arch }}", "qa-macos-${{ matrix.arch }}"]);
+    expect(names).toEqual(["release-windows", "qa-windows-unpacked", "qa-windows-smoke",
+      "release-macos-${{ matrix.arch }}", "qa-macos-${{ matrix.arch }}"]);
     expect(String(uploads[0].with?.path)).not.toContain("win-unpacked");
-    expect(String(uploads[2].with?.path)).toContain("latest-mac-${{ matrix.arch }}.yml");
+    expect(String(uploads[3].with?.path)).toContain("latest-mac-${{ matrix.arch }}.yml");
     const download = publish.steps.find((step) => step.uses?.startsWith("actions/download-artifact"));
     expect(download?.with).toMatchObject({ pattern: "release-*", "merge-multiple": true });
     expect(runs(publish)).toContain("node scripts/merge-latest-mac.mjs release/latest-mac-arm64.yml release/latest-mac-x64.yml");
@@ -98,5 +117,12 @@ describe("package-release workflow", () => {
     expect(script).toContain("releases/latest");
     expect(script).toContain("--prerelease --latest=false");
     expect(script).toContain("docs/releases/$tag.md");
+  });
+
+  test("a leading heading in the notes file names the release and stays out of the body", () => {
+    const script = runs(publish);
+    expect(script).toContain('title="RailWatch 12306 $tag"');
+    expect(script).toContain('tail -n +2 "$notes_file" > release-notes.md');
+    expect(script).toContain('--title "$title" "${notes[@]}"');
   });
 });

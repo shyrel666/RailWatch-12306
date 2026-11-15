@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { UpdateCheckFailure, UpdateCheckResult, UpdateCheckSuccess } from "./updateChecker";
+import type { MacArch, UpdateCheckFailure, UpdateCheckResult, UpdateCheckSuccess, UpdateFileMetadata } from "./updateChecker";
 
 export type UpdatePhase =
   | "idle"
@@ -32,10 +32,17 @@ export type UpdateRuntimeState = {
 
 export type UpdaterInfo = {
   version: string;
+  tag?: string;
   releaseName?: string | null;
   releaseNotes?: string | null;
   releaseDate?: string;
-  files?: { size?: number }[];
+  files?: UpdateFileMetadata[];
+};
+
+export type ManualDownloadResolution = {
+  downloadUrl: string;
+  targetArch?: MacArch;
+  packageSize?: number;
 };
 
 type DownloadProgress = { percent?: number; transferred?: number; total?: number; bytesPerSecond?: number };
@@ -53,6 +60,7 @@ type UpdateManagerOptions = {
   enabled: boolean;
   installMode?: UpdateInstallMode;
   releaseUrlFor?: (version: string) => string;
+  resolveManualDownload?: (info: UpdaterInfo) => ManualDownloadResolution;
   onStateChange?: (state: UpdateRuntimeState) => void;
   onUpdateDownloaded?: (info: UpdaterInfo) => void;
 };
@@ -72,7 +80,13 @@ export function shouldEnableAutoUpdate(env: AutoUpdateEnvironment): boolean {
   return true;
 }
 
-export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: UpdaterInfo, hasUpdate: boolean, releaseUrl = ""): UpdateCheckSuccess {
+export function mapUpdateInfoToCheckSuccess(
+  currentVersion: string,
+  info: UpdaterInfo,
+  hasUpdate: boolean,
+  releaseUrl = "",
+  manualDownload?: ManualDownloadResolution,
+): UpdateCheckSuccess {
   const latestVersion = info.version;
   return {
     ok: true,
@@ -83,6 +97,8 @@ export function mapUpdateInfoToCheckSuccess(currentVersion: string, info: Update
     releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
     publishedAt: info.releaseDate || "",
     releaseUrl,
+    ...(manualDownload?.downloadUrl ? { downloadUrl: manualDownload.downloadUrl } : {}),
+    ...(manualDownload?.targetArch ? { targetArch: manualDownload.targetArch } : {}),
     assets: [],
     source: "updater",
   };
@@ -138,10 +154,32 @@ function formatUpdateError(error: unknown): string {
 }
 
 export function createUpdateManager(options: UpdateManagerOptions) {
-  const { currentVersion, updater, enabled, onStateChange, onUpdateDownloaded, installMode = "auto", releaseUrlFor } = options;
+  const {
+    currentVersion,
+    updater,
+    enabled,
+    onStateChange,
+    onUpdateDownloaded,
+    installMode = "auto",
+    releaseUrlFor,
+    resolveManualDownload,
+  } = options;
   let state: UpdateRuntimeState = { phase: "idle", currentVersion, installMode };
   let installation: Promise<boolean> | null = null;
   const releaseUrl = (version: string) => releaseUrlFor?.(version) ?? "";
+  const buildResult = (info: UpdaterInfo, hasUpdate: boolean) => {
+    const manual = resolveManualDownload?.(info);
+    return {
+      manual,
+      result: mapUpdateInfoToCheckSuccess(
+        currentVersion,
+        info,
+        hasUpdate,
+        hasUpdate ? releaseUrl(info.version) : "",
+        manual,
+      ),
+    };
+  };
 
   const publish = (next: Omit<UpdateRuntimeState, "installMode">) => {
     state = { ...next, installMode };
@@ -153,33 +191,24 @@ export function createUpdateManager(options: UpdateManagerOptions) {
   });
 
   updater.on("update-available", (info: UpdaterInfo) => {
+    const { manual, result } = buildResult(info, true);
     publish({
       phase: "available",
       currentVersion,
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
-      packageSize: packageSize(info),
-      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true, releaseUrl(info.version)),
+      packageSize: manual?.packageSize ?? packageSize(info),
+      result,
     });
   });
 
   updater.on("update-not-available", (info: UpdaterInfo) => {
+    const { result } = buildResult(info, false);
     publish({
       phase: "not-available",
       currentVersion,
       latestVersion: info.version,
-      result: {
-        ok: true,
-        currentVersion,
-        latestVersion: info.version,
-        hasUpdate: false,
-        releaseName: info.releaseName || info.version,
-        releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
-        publishedAt: info.releaseDate || "",
-        releaseUrl: "",
-        assets: [],
-        source: "updater",
-      },
+      result,
     });
   });
 
@@ -195,14 +224,15 @@ export function createUpdateManager(options: UpdateManagerOptions) {
   });
 
   updater.on("update-downloaded", (info: UpdaterInfo) => {
+    const { manual, result } = buildResult(info, true);
     publish({
       phase: "downloaded",
       currentVersion,
       latestVersion: info.version,
       releaseNotes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
       downloadPercent: 100,
-      packageSize: packageSize(info) ?? state.packageSize,
-      result: mapUpdateInfoToCheckSuccess(currentVersion, info, true, releaseUrl(info.version)),
+      packageSize: manual?.packageSize ?? packageSize(info) ?? state.packageSize,
+      result,
     });
     onUpdateDownloaded?.(info);
   });
@@ -249,39 +279,21 @@ export function createUpdateManager(options: UpdateManagerOptions) {
       }
 
       if (state.phase === "available" && state.latestVersion) {
-        return mapUpdateInfoToCheckSuccess(currentVersion, {
-          version: state.latestVersion,
-          releaseNotes: state.releaseNotes,
-        }, true, releaseUrl(state.latestVersion));
+        return buildResult({ version: state.latestVersion, releaseNotes: state.releaseNotes }, true).result;
       }
 
       if (state.phase === "not-available" && state.latestVersion) {
-        return {
-          ok: true,
-          currentVersion,
-          latestVersion: state.latestVersion,
-          hasUpdate: false,
-          releaseName: state.latestVersion,
-          releaseNotes: state.releaseNotes || "",
-          publishedAt: "",
-          releaseUrl: "",
-          assets: [],
-          source: "updater",
-        };
+        return buildResult({ version: state.latestVersion, releaseNotes: state.releaseNotes }, false).result;
       }
 
-      return {
-        ok: true,
-        currentVersion,
-        latestVersion: currentVersion,
-        hasUpdate: false,
-        releaseName: currentVersion,
-        releaseNotes: "",
-        publishedAt: "",
-        releaseUrl: "",
-        assets: [],
-        source: "updater",
-      };
+      return buildResult({ version: currentVersion }, false).result;
+    },
+    /**
+     * The downloaded installer was deleted along with the updater cache. Left as
+     * "downloaded", the update could neither be installed nor checked for again.
+     */
+    discardDownload(): void {
+      if (state.phase === "downloaded") publish({ phase: "idle", currentVersion });
     },
     installUpdate(): Promise<boolean> {
       if (installation) return installation;

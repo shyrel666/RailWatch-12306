@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, type CSSProperties } from "react
 import { Button, Popover } from "antd";
 import { ArrowDownCircle, Download } from "lucide-react";
 import { useAppUpdate, type AppUpdateController } from "../lib/useAppUpdate";
+import { hasDirectManualDownload } from "../lib/updateDisplay";
 import { useUpdateReadyPrompt } from "../lib/useThemedDialogs";
 import type { UpdateRuntimeState } from "../types";
 import { UpdatePanel } from "./UpdatePanel";
@@ -67,7 +68,8 @@ export function UpdateStatusControl({ appVersion, variant = "icon", update }: {
   const label = hasDownloadedUpdate ? "查看已下载更新" : updateState.phase === "available" ? "查看可用更新" :
     updateState.phase === "downloading" ? "查看更新进度" :
     updateState.phase === "checking" ? "查看更新检查状态" : "检查更新";
-  const buttonLabel = hasDownloadedUpdate ? "查看更新" : hasManualDownload ? "前往下载" : updateState.phase === "available" ? "查看更新" :
+  const directManual = hasManualDownload && hasDirectManualDownload(updateState);
+  const buttonLabel = hasDownloadedUpdate ? "查看更新" : directManual ? "下载安装包" : hasManualDownload ? "前往下载" : updateState.phase === "available" ? "查看更新" :
     updateState.phase === "downloading" ? "查看下载进度" : isUpdating ? "正在检查更新" : "检查更新";
   const releaseUrl = updateState.result?.ok ? updateState.result.releaseUrl : "";
   const ring = downloadRing(updateState);
@@ -83,9 +85,15 @@ export function UpdateStatusControl({ appVersion, variant = "icon", update }: {
             isUpdating={isUpdating}
             isInstalling={isInstalling}
             hasManualDownload={hasManualDownload}
+            isRosettaMac={controller.isRosettaMac}
             onClose={close}
             onPrimaryAction={() => void controller.handlePrimaryAction()}
             onOpenReleaseNotes={releaseUrl ? () => void controller.handleOpenReleaseNotes() : undefined}
+            onDownloadNativeArm64={
+              controller.isRosettaMac && controller.handleDownloadNativeArm64
+                ? () => void controller.handleDownloadNativeArm64!()
+                : undefined
+            }
           />
         </div>
       }

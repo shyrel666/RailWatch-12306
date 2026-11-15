@@ -4,10 +4,12 @@ Thanks for helping improve RailWatch 12306. The project is an Electron desktop a
 
 ## Development Setup
 
+Use the Python version in `.python-version` and the Node.js major in `.nvmrc`; CI and release builds read the same two files. Create the virtual environment with that Python (for example `py -3.14 -m venv .venv` on Windows):
+
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 npm install
 ```
 
@@ -16,6 +18,18 @@ Run the app:
 ```bash
 npm run dev
 ```
+
+## Toolchain Versions And Dependencies
+
+- `.python-version` is the only place the Python version is written. CI, release builds and `RailWatch_runtime.spec` read it, and the spec refuses to build with any other version. Move it once a year, in November, to the version released the previous October, so installers always ship a Python that still gets binary releases.
+- `.nvmrc` holds the Node.js major bundled with the pinned Electron release. Change it and `@types/node` together with an Electron upgrade.
+- `requirements.txt` (runtime) and `requirements-build.txt` (packaging tools) list direct dependencies only. Every environment installs `requirements.lock`, which pins all packages with hashes. After editing either file or `.python-version`, regenerate it and commit the result:
+
+  ```bash
+  uv pip compile requirements-build.txt --universal --generate-hashes --python-version 3.14 --output-file requirements.lock
+  ```
+
+- `npm run build:runtime` freezes the runtime from `build/python-venv`, which it creates from `requirements.lock`. Do not run PyInstaller from a shared Python environment: it bundles whatever that environment can import.
 
 ## Project Boundaries
 
@@ -35,6 +49,7 @@ npm run dev
 - Do not bypass 12306 login, captcha, order confirmation, payment, website rules or service rate limits.
 - Keep UI changes accessible and predictable for long-running monitoring workflows.
 - Add focused tests when changing state transitions, config validation, runtime protocol behavior, monitor matching, parsing or safety behavior.
+- A test module whose `RailWatchBridge` saves notification settings or clears local data sets `setUpModule = isolate_system_keychain` (from `scripts/keychain_isolation.py`). On macOS a bridge without a secret store would otherwise use your own login keychain; the test suite refuses that and fails instead.
 
 ## Verification
 
@@ -42,15 +57,17 @@ Run the relevant checks before opening a pull request:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
-python -m py_compile railwatch_state.py gui_12306_0.py anti_detect.py chromedriver_manager.py railwatch_preferences.py railwatch_bridge.py railwatch_runtime.py
+python -m compileall -q -l . railwatch_policies
 npm run test
 npm run build
 ```
 
-If packaging changed, also run:
+If packaging changed, also run the build and both smoke tests. `--non-ascii-profile` repeats a smoke with the data, and on Windows a copy of the app, under a Chinese-named folder with a space, the way a per-user install sits under `C:\Users\<account>`:
 
 ```bash
 npm run package
+python -X utf8 tests/runtime_order_smoke.py --non-ascii-profile
+python -X utf8 tests/packaged_smoke.py --non-ascii-profile
 ```
 
 ## Pull Request Checklist

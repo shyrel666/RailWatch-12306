@@ -260,6 +260,55 @@ describe("updateManager", () => {
     expect(updater.launchInstaller).toHaveBeenCalledOnce();
   });
 
+  test("a download deleted with the updater cache returns to idle and can be checked for again", async () => {
+    const updater = createMockUpdater();
+    const phases: string[] = [];
+    const manager = createUpdateManager({
+      currentVersion: "0.7.0", updater, enabled: true, onStateChange: (state) => phases.push(state.phase),
+    });
+    updater.emit("update-downloaded", { version: "0.7.1", releaseNotes: "notes", files: [{ size: 98_100_000 }] });
+    expect(manager.getState().phase).toBe("downloaded");
+
+    manager.discardDownload();
+    // Nothing of the deleted download is left to show: no version, size, notes or result.
+    expect(manager.getState()).toEqual({ phase: "idle", currentVersion: "0.7.0", installMode: "auto" });
+    expect(phases).toEqual(["downloaded", "idle"]);
+    expect(await manager.installUpdate()).toBe(false);
+    expect(updater.launchInstaller).not.toHaveBeenCalled();
+
+    // electron-updater finds the file gone and downloads it again.
+    updater.checkForUpdates = vi.fn(async () => {
+      updater.emit("update-available", { version: "0.7.1" });
+      updater.emit("update-downloaded", { version: "0.7.1" });
+      return null;
+    });
+    expect(await manager.checkForUpdates()).toMatchObject({ ok: true, hasUpdate: true, latestVersion: "0.7.1" });
+    expect(manager.getState().phase).toBe("downloaded");
+    expect(await manager.installUpdate()).toBe(true);
+  });
+
+  test("discarding a download leaves every other phase alone", () => {
+    const updater = createMockUpdater();
+    const onStateChange = vi.fn();
+    const manager = createUpdateManager({ currentVersion: "0.7.0", updater, enabled: true, onStateChange });
+    const untouched = () => {
+      const before = manager.getState();
+      onStateChange.mockClear();
+      manager.discardDownload();
+      expect(manager.getState()).toBe(before);
+      expect(onStateChange).not.toHaveBeenCalled();
+    };
+    untouched();  // idle
+    updater.emit("update-available", { version: "0.7.1" });
+    untouched();
+    updater.emit("download-progress", { percent: 40 });
+    untouched();
+    updater.emit("update-not-available", { version: "0.7.0" });
+    untouched();
+    updater.emit("error", new Error("offline"));
+    untouched();
+  });
+
   test("connection failures read as a network problem instead of a raw Chromium code", async () => {
     const updater = createMockUpdater();
     updater.checkForUpdates = vi.fn(async () => { throw new Error("net::ERR_CONNECTION_TIMED_OUT"); });

@@ -87,6 +87,29 @@ def detect_proxy() -> Tuple[bool, str]:
     return False, ""
 
 
+def proxy_status_snapshot() -> Dict[str, object]:
+    """Return current proxy configuration status without performing network I/O."""
+    proxy_configured, proxy_value = detect_proxy()
+    return {
+        "proxy_configured": proxy_configured,
+        "proxy_label": "已配置" if proxy_configured else "未配置",
+        "proxy_value": redact_proxy_url(proxy_value),
+    }
+
+
+def pending_connectivity_snapshot() -> Dict[str, object]:
+    """Return non-blocking placeholder connectivity labels plus live proxy state."""
+    return {
+        "network_ok": False,
+        "network_label": "检测中",
+        "railway_ok": False,
+        "railway_label": "检测中",
+        # Clients test this flag, never the label text, to tell a placeholder from a result.
+        "connectivity_pending": True,
+        **proxy_status_snapshot(),
+    }
+
+
 def probe_connectivity() -> Dict[str, object]:
     with ThreadPoolExecutor(max_workers=2) as pool:
         network_future = pool.submit(
@@ -98,13 +121,10 @@ def probe_connectivity() -> Dict[str, object]:
         network_ok = bool(network_future.result())
         railway_ok = bool(railway_future.result())
 
-    proxy_configured, proxy_value = detect_proxy()
     return {
         "network_ok": network_ok,
         "network_label": "正常" if network_ok else "异常",
         "railway_ok": railway_ok,
         "railway_label": "正常" if railway_ok else "异常",
-        "proxy_configured": proxy_configured,
-        "proxy_label": "已配置" if proxy_configured else "未配置",
-        "proxy_value": redact_proxy_url(proxy_value),
+        **proxy_status_snapshot(),
     }

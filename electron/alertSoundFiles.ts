@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, realpath, rename, unlink, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { resolveRuntimeDataDir } from "./appDataPaths";
 
 export const ALERT_SOUND_TONES = ["beep", "chime", "double", "alarm", "custom"] as const;
 export type AlertSoundTone = (typeof ALERT_SOUND_TONES)[number];
@@ -17,14 +17,8 @@ export function isImportedSoundFile(value: unknown): value is string {
   return typeof value === "string" && importedFilePattern.test(value);
 }
 
-// Match Python's get_data_path, including Windows LOCALAPPDATA rather than Roaming.
 export function notificationSoundDirectory(): string {
-  const base = process.platform === "win32"
-    ? process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local")
-    : process.platform === "darwin"
-      ? path.join(os.homedir(), "Library", "Application Support")
-      : process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
-  return path.join(base, "railwatch-12306", "notification-sounds");
+  return path.join(resolveRuntimeDataDir(), "notification-sounds");
 }
 
 async function readBoundedFile(filePath: string): Promise<Buffer> {
