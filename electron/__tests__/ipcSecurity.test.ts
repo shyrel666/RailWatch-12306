@@ -2,6 +2,7 @@ import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   consumeExportPathGrant,
+  developmentRendererUrl,
   getCommandConfirmation,
   isAllowedExternalUrl,
   isExportPathAllowed,
@@ -17,6 +18,16 @@ describe("ipcSecurity", () => {
     expect(isRailWatchCommand("stationSaleTimes")).toBe(true);
     expect(isRailWatchCommand("clearLocalData")).toBe(true);
     expect(isRailWatchCommand("shell")).toBe(false);
+  });
+
+  test("only unpackaged loopback servers can supply the renderer", () => {
+    for (const url of ["https://example.org", "file:///tmp/page", "http://localhost.example", "http://user@localhost"]) {
+      expect(developmentRendererUrl(false, url)).toBeUndefined();
+    }
+    for (const url of ["http://127.0.0.1:5173/", "http://[::1]:5173/", "http://localhost:5173/"]) {
+      expect(developmentRendererUrl(true, url)).toBeUndefined();
+      expect(developmentRendererUrl(false, url)).toBe(url);
+    }
   });
 
   test("trusts only the configured renderer URL", () => {

@@ -109,11 +109,15 @@ def official_sale_at(station, travel_date, now, window_days=15, *, info=None):
     travel = validate_travel_date(travel_date)
     days = window_days if type(window_days) is int and 0 < window_days <= 366 else 15
     release = (travel - dt.timedelta(days=days - 1)).isoformat()
-    timestamp = now.timestamp() if isinstance(now, dt.datetime) else float(now)
-    info = sale_time_service.query(station) if info is None else info
-    if (info.get("status") != "available" or info.get("checked_at") is None
-            or info.get("expires_at") is None
-            or not info["checked_at"] <= timestamp < info["expires_at"]):
+    if info is None:
+        # query() evaluates freshness after the network response arrives.
+        info = sale_time_service.query(station)
+    else:
+        timestamp = now.timestamp() if isinstance(now, dt.datetime) else float(now)
+        if (info.get("checked_at") is None or info.get("expires_at") is None
+                or not info["checked_at"] <= timestamp < info["expires_at"]):
+            return None
+    if info.get("status") != "available":
         return None
     choices = {(item["station_code"], item["sale_time"]) for item in info.get("schedules", [])
                if item["station_name"] == station and item["start_date"] < release < item["stop_date"]

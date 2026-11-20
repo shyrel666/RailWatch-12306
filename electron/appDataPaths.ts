@@ -114,33 +114,30 @@ export async function clearElectronLocalData(options: {
   updaterCacheDir?: string;
   clearUpdaterCache?: boolean;
   session?: SessionClearTarget | null;
-}): Promise<void> {
+}): Promise<string[]> {
+  const failed: string[] = [];
   try {
     rmSync(path.join(options.userDataDir, WINDOW_STATE_FILE), { force: true });
   } catch {
-    // Best-effort cleanup of persisted window state.
+    failed.push("窗口设置");
   }
 
   if (options.session) {
-    const tasks: Array<Promise<void>> = [];
-    if (typeof options.session.clearStorageData === "function") {
-      tasks.push(options.session.clearStorageData());
-    }
-    if (typeof options.session.clearCache === "function") {
-      tasks.push(options.session.clearCache());
-    }
-    if (tasks.length > 0) {
-      await Promise.allSettled(tasks);
-    }
+    const methods = [["clearStorageData", "会话数据"], ["clearCache", "会话缓存"]] as const;
+    const results = await Promise.allSettled(methods.map(async ([method]) => options.session?.[method]?.()));
+    results.forEach((result, index) => {
+      if (result.status === "rejected") failed.push(methods[index][1]);
+    });
   }
 
   if (options.clearUpdaterCache && options.updaterCacheDir) {
     try {
       await rm(options.updaterCacheDir, { recursive: true, force: true });
     } catch {
-      // Ignore locked temporary updater artifacts; user can still continue using the app.
+      failed.push("更新缓存");
     }
   }
+  return failed;
 }
 
 export function trayIconFilename(platform: NodeJS.Platform = process.platform): string {

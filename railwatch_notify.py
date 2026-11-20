@@ -34,7 +34,12 @@ _PUSH_OPENER = urllib.request.build_opener(_RefuseRedirect)
 def _post_json(url: str, payload: dict, headers: Optional[Mapping[str, str]] = None) -> dict:
   request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                    headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
-  with _PUSH_OPENER.open(request, timeout=8) as response:
+  try:
+    opened = _PUSH_OPENER.open(request, timeout=8)
+  except urllib.error.HTTPError as exc:
+    exc.close()
+    raise
+  with opened as response:
     body = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
   return body if isinstance(body, dict) else {}
 

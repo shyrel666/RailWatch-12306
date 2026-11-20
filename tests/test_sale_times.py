@@ -1,7 +1,7 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from railwatch_sale_times import SaleTimeService, parse_schedules
+from railwatch_sale_times import SaleTimeService, official_sale_at, parse_schedules
 
 
 def record(name="北京", code="BJP", sale="1000", **extra):
@@ -27,6 +27,14 @@ class SaleTimeTests(unittest.TestCase):
         self.assertEqual(service.query("北京南")["schedules"][0]["sale_time"], "12:45")
         self.assertEqual(service.query("京")["status"], "not_found")
         fetch.assert_called_once()
+
+    def test_newly_fetched_schedule_is_usable_on_the_first_call(self):
+        fetch = Mock(return_value=parse_schedules({"status": True, "data": [record()]}))
+        service = SaleTimeService(fetch, Mock(side_effect=[1000, 1002, 1002, 1003, 1003]))
+        with patch("railwatch_sale_times.sale_time_service", service):
+            first = official_sale_at("北京", "2026-11-24", 1000)
+            self.assertEqual(first.isoformat(), "2026-11-10T10:00:00+08:00")
+            self.assertEqual(official_sale_at("北京", "2026-11-24", 1003), first)
 
     def test_expired_cache_is_marked_stale_on_failure_and_retry_is_throttled(self):
         clock = Mock(return_value=1000)

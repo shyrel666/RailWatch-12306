@@ -25,7 +25,7 @@ node -e "const v=process.argv[1]; if(!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0
 
 echo.
 echo [1/5] Setting package version to %PACKAGE_VERSION%
-call npm version "%PACKAGE_VERSION%" --no-git-tag-version || goto failed
+call npm version "%PACKAGE_VERSION%" --no-git-tag-version --allow-same-version || goto failed
 
 echo.
 echo [2/5] Checking Node dependencies

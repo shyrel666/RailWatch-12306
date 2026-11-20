@@ -1,5 +1,6 @@
 import { mkdtempSync, readFileSync, rmdirSync, symlinkSync } from "node:fs";
 import os from "node:os";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import yaml from "js-yaml";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -106,12 +107,13 @@ describe("build-runtime probe output", () => {
   // Only Windows encodes piped output in a legacy code page. PYTHONIOENCODING stands in for
   // a Chinese (GBK) and a Western (CP1252) system on whichever machine runs the test.
   test.runIf(process.platform === "win32")("finds a real interpreter under a Chinese path in every code page", (context) => {
-    let base;
-    try {
-      base = findInterpreter(pinnedPythonVersion(read(".python-version")));
-    } catch {
-      return context.skip();  // No pinned interpreter here; the build cannot run on this machine either.
-    }
+    const version = pinnedPythonVersion(read(".python-version"));
+    const checkVersion = "import sys; sys.exit('.'.join(map(str, sys.version_info[:2])) != " + JSON.stringify(version) + ")";
+    if (!process.env.CI && !interpreterCandidates(version).some(candidate => {
+      const args = candidate.locator ? candidate.args : [...candidate.args, "-c", checkVersion];
+      return spawnSync(candidate.command, args, { windowsHide: true }).status === 0;
+    })) return context.skip();
+    const base = findInterpreter(version);
     const directory = mkdtempSync(path.join(os.tmpdir(), "railwatch-probe-"));
     const links: string[] = [];
     try {
@@ -122,7 +124,11 @@ describe("build-runtime probe output", () => {
         return path.join(link, path.basename(base.executable));
       };
       // An interpreter that cannot start through a junction at all says nothing about encodings.
-      if (!probeInterpreter(through("interpreter dir"))) return context.skip();
+      const baseline = through("interpreter dir");
+      const started = spawnSync(baseline, ["-c", "pass"], { windowsHide: true });
+      if (started.status !== 0 && !process.env.CI) return context.skip();
+      expect(started.status).toBe(0);
+      expect(probeInterpreter(baseline)?.version).toBe(base.version);
       const python = through("解释器 目录");
       for (const encoding of [undefined, "gbk", "cp1252"]) {
         vi.stubEnv("PYTHONIOENCODING", encoding);

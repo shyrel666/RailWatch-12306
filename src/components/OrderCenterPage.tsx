@@ -254,33 +254,46 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
   // Background refreshes keep the current list; only a new page or filter shows the placeholder.
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const [failedKey, setFailedKey] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [replacementDeadline, setReplacementDeadline] = useState<string | undefined>();
   const activity = useRailWatchStore(state => state.status.activity);
   const monitoring = useRailWatchStore(state => state.status.monitoring);
   const orderUpdated = useRailWatchStore(state => state.status.order?.updated_at);
   const today = useBeijingToday();
-  const loading = loadedKey !== pageKey(cursor, statusFilter);
+  const key = pageKey(cursor, statusFilter);
+  const failed = failedKey === key;
+  const hasCurrentPage = loadedKey === key;
+  const loading = !hasCurrentPage && !failed;
 
   useEffect(() => {
     let current = true;
     let inFlight = false;
-    const key = pageKey(cursor, statusFilter);
     const read = async () => {
       if (inFlight) return;
       inFlight = true;
       try {
         const result = await runCommand<OrderHistoryPage>("orderHistory", { limit: 20, cursor, status: statusFilter });
-        if (current && result) setPage(result);
+        if (!current) return;
+        if (result) {
+          setPage(result);
+          setLoadedKey(key);
+          setFailedKey(null);
+        } else {
+          setFailedKey(key);
+        }
+      } catch {
+        if (current) setFailedKey(key);
       } finally {
         inFlight = false;
-        if (current) setLoadedKey(key);
+        if (current) setRefreshing(false);
       }
     };
     void read();
     const timer = monitoring ? window.setInterval(() => void read(), 5000) : null;
     return () => { current = false; if (timer !== null) window.clearInterval(timer); };
-  }, [runCommand, cursor, statusFilter, orderUpdated, monitoring]);
+  }, [runCommand, cursor, statusFilter, key, orderUpdated, monitoring, refreshRevision]);
 
   const showDetail = async (intentId: string) => {
     const result = await runCommand<OrderHistoryDetail>("orderDetail", { intent_id: intentId });
@@ -288,9 +301,8 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
   };
   const refresh = () => {
     setCursor(null); setDetail(null); setRefreshing(true);
-    void runCommand<OrderHistoryPage>("orderHistory", { limit: 20, cursor: null, status: statusFilter })
-      .then(result => { if (result) { setPage(result); setLoadedKey(pageKey(null, statusFilter)); } })
-      .finally(() => setRefreshing(false));
+    setFailedKey(null);
+    setRefreshRevision(value => value + 1);
   };
   const perform = (key: string, command: string, payload?: Record<string, unknown>) => {
     setPending(key);
@@ -317,7 +329,7 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
   return <div className="order-center">
     <header className="order-toolbar">
       <p className="order-summary" aria-live="polite">
-        {loading ? "正在读取…" : page.items.length ? <><span><strong>{page.items.length}</strong> 条订单</span>
+        {loading ? "正在读取…" : hasCurrentPage && page.items.length ? <><span><strong>{page.items.length}</strong> 条订单</span>
           {attention ? <span className="order-summary-attention"><strong>{attention}</strong> 条需要你处理</span> : null}</> : null}
       </p>
       <div className="order-toolbar-actions">
@@ -327,7 +339,8 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
       </div>
     </header>
 
-    {loading ? <><p className="sr-only" role="status">正在读取订单记录…</p><Skeleton /></> : page.items.length === 0 ?
+    {failed ? <p role="alert">订单记录读取失败，请点击刷新重试。</p> : null}
+    {loading ? <><p className="sr-only" role="status">正在读取订单记录…</p><Skeleton /></> : !hasCurrentPage ? null : page.items.length === 0 ?
       <div className="order-empty">
         <span className="order-empty-icon">{statusFilter ? <SearchX size={20} aria-hidden="true" /> : <ReceiptText size={20} aria-hidden="true" />}</span>
         {statusFilter ? <><strong>没有「{statusLabels[statusFilter] ?? statusFilter}」的订单</strong>
@@ -346,7 +359,7 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
             <OrderTicket key={item.intent_id} item={item} group={group.id} actions={cardActions(item)} today={today} />)}</div>}
       </section>)}
 
-    {!loading && (cursor || page.next_cursor) ? <nav className="order-pager" aria-label="订单分页">
+    {!loading && !failed && (cursor || page.next_cursor) ? <nav className="order-pager" aria-label="订单分页">
       {cursor ? <Button onClick={() => { setCursor(null); setDetail(null); }}>回到最新</Button> : null}
       {page.next_cursor ? <Button onClick={() => { setCursor(page.next_cursor); setDetail(null); }}>
         下一页<ChevronRight size={14} aria-hidden="true" /></Button> : null}

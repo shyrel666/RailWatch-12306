@@ -193,6 +193,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                     "date": "2026-06-10",
                     "date_range": "±2天",
                     "interval": 1.5,
+                    "prefill_enabled": False,
                     "query_timeout": 25,
                     "smart_rate": False,
                     "timer_enabled": True,
@@ -203,6 +204,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
             self.assertEqual(saved["date_range"], "±2天")
             self.assertEqual(saved["interval"], 1.5)
+            self.assertFalse(bridge.load_config()["prefill_enabled"])
             self.assertEqual(saved["query_timeout"], 25)
             self.assertFalse(saved["smart_rate"])
             self.assertTrue(saved["timer_enabled"])
@@ -241,6 +243,23 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertEqual(loaded["date"], "2026-06-19")
         self.assertEqual(loaded["train_code"], "G1015")
         self.assertEqual(loaded["seat_keyword"], "二等座")
+
+    def test_invalid_saved_trip_keeps_the_draft_accessible(self):
+        from railwatch_bridge import RailWatchBridge, default_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = RailWatchBridge(directory)
+            path = bridge.config_manager.config_path
+            invalid = {"date_strategy": "unknown-strategy"}
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(invalid, handle)
+            draft = bridge.save_trip_draft({"from_station_cn": "天津西"}, 1)
+            loaded = bridge.load_trip_state()
+            self.assertEqual(loaded["draft"]["status"], "available")
+            self.assertEqual(loaded["draft"]["draft"], draft)
+            self.assertEqual(loaded["saved_config"]["date_strategy"], default_config()["date_strategy"])
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), invalid)
 
     def test_start_monitor_requires_confirmation_when_dangerous_automation_enabled(self):
         from railwatch_bridge import RailWatchBridge
@@ -1384,10 +1403,12 @@ class StaleBrowserSessionTests(unittest.TestCase):
         bridge = self._bridge()
         closed = ClosedBrowserDriver()
         bridge.driver = closed
+        bridge.state = bridge.state.__class__(login_ready=True, query_ready=True)
 
         result = bridge.close_browser(confirmed=True)
 
         self.assertEqual(result, {"closed": True})
+        self.assertFalse(bridge.state.login_ready or bridge.state.query_ready)
         self.assertIsNone(bridge.driver)
         self.assertEqual(closed.quit_calls, 1)
         self.assertTrue(closed.service.stop.called)

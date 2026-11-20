@@ -34,6 +34,19 @@ def snapshot(state="待支付", **changes):
 
 
 class OrderEvidenceTests(unittest.TestCase):
+    def test_readback_diagnostic_never_exports_observed_identity_or_page_text(self):
+        from scripts.diagnose_live_readback import readback_report
+
+        private = "未配置的乘车人"
+        census = {"regular_text": private, "checked_labels": 1, "sel_inputs": private,
+                  "selected_area_text": private, "dialogs": [private]}
+        snap = {"passengers": [private], "seats": [private], "url": "https://example.invalid/" + private}
+        report = readback_report(census, snap, ["目标乘客"])
+        self.assertNotIn(private, str(report))
+        self.assertNotIn("目标乘客", str(report))
+        self.assertFalse(report["checks"]["乘车人回读一致"])
+        self.assertEqual(report["selector_counts"]["checked_labels"], 1)
+
     def test_priced_seat_labels_preserve_exact_class(self):
         for value in ('二等座（927.0元）', '二等座 (￥927.00元)', '二等座（¥927元）', '二等座'):
             self.assertEqual(seat_label(value), '二等座')

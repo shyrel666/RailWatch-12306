@@ -18,8 +18,6 @@ import railwatch_order_page as op
 
 from railwatch_bridge import get_data_path
 
-DATA_DIR = get_data_path()
-
 EXPECTED = {
     "train_code": "G1307",
     "date": "2026-09-12",
@@ -32,24 +30,17 @@ QUERY_URL = ("https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc"
     fs=quote(EXPECTED["from_station"]), ts=quote(EXPECTED["to_station"]), date=EXPECTED["date"])
 
 
-def mask(text):
-    for name in NAMES:
-        if name:
-            text = str(text).replace(name, "＜乘客＞")
-    return text
-
-
-def load_names():
+def load_names(data_dir):
     import sqlite3
     try:
-        db = sqlite3.connect("file:" + os.path.join(DATA_DIR, "orders.sqlite3") + "?mode=ro", uri=True)
+        db = sqlite3.connect("file:" + os.path.join(data_dir, "orders.sqlite3") + "?mode=ro", uri=True)
         row = db.execute("SELECT intent FROM orders WHERE unresolved=1 ORDER BY updated_at DESC LIMIT 1").fetchone()
         names = json.loads(row[0]).get("passengers", []) if row else []
         if names:
             return names
     except Exception:
         pass
-    config_path = os.path.join(DATA_DIR, "user_config.json")
+    config_path = os.path.join(data_dir, "user_config.json")
     if os.path.exists(config_path):
         with open(config_path, encoding="utf-8") as handle:
             passengers = json.load(handle).get("passengers", "")
@@ -57,31 +48,19 @@ def load_names():
     return []
 
 
-NAMES = load_names()
-
 CENSUS_JS = r"""
 const visible = e => !!(e && e.getClientRects().length);
 const txt = e => (e?.innerText || '').replace(/\s+/g,' ').trim();
 const all = (s,r=document) => [...r.querySelectorAll(s)].filter(visible);
-const labelName = e => {const l=e.closest('label')||document.querySelector('label[for="'+e.id+'"]');
-  return (l?.getAttribute('title') || (l?.innerText||'').replace(/（(?:学生|儿童|成人)）/g,'')).trim();};
 return {
-  url: location.href,
   ticket_info_exists: !!document.querySelector('#ticket_info'),
   regular_text: txt(document.querySelector('#ticket_info')),
-  sel_strong: all('.passenger-name strong[title]').map(e=>e.getAttribute('title')),
-  sel_yichu: all('.name-yichu[title]').map(e=>e.getAttribute('title')),
-  sel_passenger_info: all('.passenger-info .name[title]').map(e=>e.getAttribute('title')),
-  sel_inputs: all('input[id^="passenger_name_"],input.name-input').map(e=>e.value.trim()).filter(Boolean),
+  sel_strong: all('.passenger-name strong[title]').length,
+  sel_yichu: all('.name-yichu[title]').length,
+  sel_passenger_info: all('.passenger-info .name[title]').length,
+  sel_inputs: all('input[id^="passenger_name_"],input.name-input').filter(e=>e.value.trim()).length,
   checked_labels: all('#normal_passenger_id input[type="checkbox"],#passenge_list input.chose-pass-dom')
-    .filter(e=>e.checked).map(labelName),
-  seat_selects_visible: all('select[id^="seatType_"]').length,
-  seat_values: all('select[id^="seatType_"]').map(e=>e.selectedOptions[0]?.textContent.trim()||''),
-  formReady: visible(document.querySelector('#normal_passenger_id')) || visible(document.querySelector('#passenge_list')),
-  confirmation_visible: visible(document.querySelector('#qr_submit_id')),
-  passenger_panel_html_len: (document.querySelector('#normal_passenger_id')?.outerHTML || document.querySelector('#passenge_list')?.outerHTML || '').length,
-  selected_area_text: txt(document.querySelector('#passenge_table') || document.querySelector('#passenger-list') || ''),
-  dialogs: all('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"]').map(txt).filter(Boolean),
+    .filter(e=>e.checked).length,
 };
 """
 
@@ -139,11 +118,33 @@ def find_page_target(port):
     raise SystemExit("浏览器里没有可用的页面标签")
 
 
+def readback_report(census, snapshot, names):
+    text = census.get("regular_text", "")
+    actual = snapshot.get("passengers", [])
+    seats = [op.seat_label(value) for value in snapshot.get("seats", [])]
+    checks = {
+        "页面存在 #ticket_info": bool(census.get("ticket_info_exists")),
+        "乘车人回读一致": sorted(actual) == sorted(names),
+        "车次一致": op.train_token(text, EXPECTED["train_code"]),
+        "日期一致": op.normalized_date(text) == EXPECTED["date"],
+        "出发站一致": op.form_token(text, EXPECTED["from_station"], "站"),
+        "到达站一致": op.form_token(text, EXPECTED["to_station"], "站"),
+        "站序一致": op.stations_in_order(text, EXPECTED["from_station"], EXPECTED["to_station"]),
+        "席别一致": seats == [EXPECTED["seat"]] * max(len(names), 1),
+    }
+    return {"checks": checks, "expected_passengers": len(names), "actual_passengers": len(actual),
+            "selector_counts": {key: value if type(value) is int else 0 for key, value in census.items() if key in
+                                ("sel_strong", "sel_yichu", "sel_passenger_info", "sel_inputs", "checked_labels")},
+            "failed": [label for label, matches in checks.items() if not matches]}
+
+
 def main():
+    data_dir = get_data_path()
+    names = load_names(data_dir)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 58804
     target = find_page_target(port)
     cdp = CDP(port, target["id"])
-    print(mask(f"预期值：{EXPECTED}，乘客 {len(NAMES)} 人（已脱敏）"), flush=True)
+    print(f"预期值：{EXPECTED}，乘客 {len(names)} 人", flush=True)
 
     logged = cdp.js("""
 return new Promise(resolve => {
@@ -178,7 +179,7 @@ if(els.length) els[0].click();
         print("结果：查询结果中没有 G1307，无法复现确认页。")
         return
     seat_value = (row.get("seats") or {}).get("二等座")
-    print(f"G1307 二等座 当前显示：{seat_value!r}", flush=True)
+    print(f"G1307 二等座可预订：{RowParser.is_seat_available(seat_value)}", flush=True)
     if not RowParser.is_seat_available(seat_value):
         print("结果：二等座当前无票，无法进入确认页复现。")
         return
@@ -204,59 +205,23 @@ return 'button-not-found';
     while time.time() < deadline:
         state = cdp.js("""
 const visible = e => !!(e && e.getClientRects().length);
-return {url: location.href,
-  ready: (visible(document.querySelector('#normal_passenger_id'))||visible(document.querySelector('#passenge_list')))
+return {ready: (visible(document.querySelector('#normal_passenger_id'))||visible(document.querySelector('#passenge_list')))
          && !!document.querySelector('#ticket_info')};""")
         if state.get("ready"):
             break
         time.sleep(1)
     else:
-        print(f"结果：未等到确认页（当前 {mask(cdp.js('return location.href'))}）。")
+        print("结果：未等到确认页。")
         return
     time.sleep(2)
 
     census = cdp.js(CENSUS_JS)
     snapshot = cdp.js("const fn=new Function('return (' + " + json.dumps(op.SNAPSHOT_JS) + " + ')'); return fn();")
-    text = census.get("regular_text", "")
-
-    checks = [
-        ("页面存在 #ticket_info", "存在", str(census.get("ticket_info_exists")), bool(census.get("ticket_info_exists"))),
-        ("乘车人回读 == 所选乘客", str(sorted(NAMES)), str(sorted(snapshot.get("passengers", []))) + "｜勾选框：" + str(census.get("checked_labels")),
-         sorted(snapshot.get("passengers", [])) == sorted(NAMES)),
-        ("车次独立词(可带'次')", EXPECTED["train_code"] + "(次)", "命中" if op.form_token(text, EXPECTED["train_code"], "次") else "未命中",
-         op.form_token(text, EXPECTED["train_code"], "次")),
-        ("日期归一化", EXPECTED["date"], op.normalized_date(text) or "（摘要中未解析到日期）", op.normalized_date(text) == EXPECTED["date"]),
-        ("出发站独立词(可带'站')", EXPECTED["from_station"] + "(站)", "命中" if op.form_token(text, EXPECTED["from_station"], "站") else "未命中",
-         op.form_token(text, EXPECTED["from_station"], "站")),
-        ("到达站独立词(可带'站')", EXPECTED["to_station"] + "(站)", "命中" if op.form_token(text, EXPECTED["to_station"], "站") else "未命中",
-         op.form_token(text, EXPECTED["to_station"], "站")),
-    ]
-    try:
-        order_ok = text.index(EXPECTED["from_station"]) < text.index(EXPECTED["to_station"])
-    except ValueError:
-        order_ok = False
-    checks.append(("出发站在到达站之前", "是", "是" if order_ok else "否/缺失", order_ok))
-    expected_seats = [EXPECTED["seat"]] * max(len(NAMES), 1)
-    actual_seats = [op.seat_label(v) for v in snapshot.get("seats", [])]
-    checks.append(("席别下拉回读", str(expected_seats),
-                   str(actual_seats) + f"（可见下拉 {census.get('seat_selects_visible')} 个）", actual_seats == expected_seats))
-
-    print("\n===== 摘要文本 #ticket_info =====")
-    print(mask(text or "（空）"))
-    print("\n===== 逐项核对 =====")
-    failed = []
-    for name, expected, actual, ok in checks:
-        print(mask(("[PASS] " if ok else "[FAIL] ") + name + " | 期望: " + expected + " | 实际: " + actual))
-        if not ok:
-            failed.append(name)
-    print("\n===== 乘客选择器命中情况 =====")
-    for key in ("sel_strong", "sel_yichu", "sel_passenger_info", "sel_inputs", "checked_labels", "selected_area_text"):
-        print(f"{key}: {mask(census.get(key))}")
-    print("\n结论：" + ("全部通过" if not failed else "失败项 → " + "；".join(failed)))
-    report = {"census": census, "snapshot": {k: snapshot.get(k) for k in ("regular", "passengers", "seats", "url")}, "failed": failed}
-    with open(os.path.join(DATA_DIR, "diag_live_readback.json"), "w", encoding="utf-8") as handle:
-        handle.write(mask(json.dumps(report, ensure_ascii=False, indent=1, default=str)))
-    print("完整报告已写入 diag_live_readback.json（乘客名已脱敏）")
+    report = readback_report(census, snapshot, names)
+    print(json.dumps(report, ensure_ascii=False, indent=1))
+    with open(os.path.join(data_dir, "diag_live_readback.json"), "w", encoding="utf-8") as handle:
+        json.dump(report, handle, ensure_ascii=False, indent=1)
+    print("核对结果已写入 diag_live_readback.json")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,13 @@
+import base64
+import hashlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import json
 import os
 import plistlib
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError, URLError
@@ -16,15 +20,31 @@ def _make_zip_bytes(entries: dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, content in entries.items():
-            zf.writestr(name, content)
+            zf.writestr(zipfile.ZipInfo(name), content)
     return buf.getvalue()
 
 
-def _http_404(url: str) -> HTTPError:
-    return HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+def _pin(version, platform, archive):
+    return patch.dict(cm._ARCHIVE_SHA256, {(version, platform): hashlib.sha256(archive).hexdigest()})
+
+
+def _object_hash(data):
+    return "md5=" + base64.b64encode(hashlib.md5(data, usedforsecurity=False).digest()).decode("ascii")
+
+
+def _stream_fixture(fetch):
+    def get(url, timeout=30, progress_callback=None, *, write=None, publisher=False):
+        data = fetch(url, timeout)
+        if write is None:
+            return data
+        write(data)
+    return get
 
 
 class ChromeDriverManagerTests(unittest.TestCase):
+    def _http_404(self, url: str) -> HTTPError:
+        return self.enterContext(HTTPError(url, 404, "Not Found", hdrs=None, fp=None))
+
     def test_requests_download_reports_real_bytes_speed_and_remaining_time(self):
         response = Mock()
         response.headers = {"Content-Length": "6"}
@@ -67,6 +87,17 @@ class ChromeDriverManagerTests(unittest.TestCase):
         self.assertTrue(all(event["eta_seconds"] is None for event in progress))
         response.__exit__.assert_called_once()
 
+    def test_urllib_download_closes_http_error_before_propagating_it(self):
+        url = "https://example.test/driver.zip"
+        error = self._http_404(url)
+        with patch.object(cm, "REQUESTS_AVAILABLE", False), \
+            patch.object(cm, "urlopen", side_effect=error), \
+            self.assertRaises(HTTPError) as caught:
+            cm._http_get(url)
+
+        self.assertIs(caught.exception, error)
+        self.assertTrue(error.closed)
+
     def test_streamed_download_rejects_truncated_response_and_closes_it(self):
         response = Mock()
         response.headers = {"Content-Length": "20"}
@@ -79,7 +110,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
 
     def test_progress_clears_old_transfer_metrics_when_falling_back_and_installing(self):
         mirror = cm._DownloadCandidate("https://mirror.test/driver.zip", "137.0.1.2", "npmmirror 镜像")
-        official = cm._DownloadCandidate("https://official.test/driver.zip", "137.0.1.2", "官方源")
+        official = cm._DownloadCandidate(cm._cft_official_zip_url("137.0.1.2", "win32"), "137.0.1.2", "官方源")
         mirror_response = Mock()
         mirror_response.headers = {"Content-Length": "100"}
 
@@ -90,7 +121,8 @@ class ChromeDriverManagerTests(unittest.TestCase):
         mirror_response.iter_content.return_value = failing_chunks()
         archive = _make_zip_bytes({"chromedriver.exe": b"working-binary"})
         official_response = Mock()
-        official_response.headers = {"Content-Length": str(len(archive))}
+        self.enterContext(_pin("137.0.1.2", "win32", archive))
+        official_response.headers = {"Content-Length": str(len(archive)), "x-goog-hash": _object_hash(archive)}
         official_response.iter_content.return_value = iter([archive])
         progress = []
         with tempfile.TemporaryDirectory() as target_dir, \
@@ -145,7 +177,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
             else:
                 raise AssertionError(url)
             response = Mock()
-            response.headers = {"Content-Length": str(len(body))}
+            response.headers = {"Content-Length": str(len(body)), "x-goog-hash": _object_hash(body)}
             response.iter_content.return_value = iter([body[:20], body[20:]])
             responses.append(response)
             return response
@@ -178,13 +210,15 @@ class ChromeDriverManagerTests(unittest.TestCase):
             }]},
         }]}).encode()
         archive = _make_zip_bytes({"chromedriver.exe": b"working-binary"})
+        self.enterContext(_pin("137.0.1.2", "win32", archive))
 
         def fake_request(url, **kwargs):
             self.assertTrue(kwargs["stream"])
             response = Mock()
             response.headers = {}
             if url == cm.NPMMIRROR_PATCH_VERSIONS_URL:
-                response.raise_for_status.side_effect = _http_404(url)
+                response.status_code = 404
+                response.raise_for_status.side_effect = cm.requests.HTTPError("404 Not Found", response=response)
                 return response
             if url == cm.NPMMIRROR_CFT_URL:
                 body = metadata
@@ -210,7 +244,8 @@ class ChromeDriverManagerTests(unittest.TestCase):
         self.assertIsNone(metadata_done["eta_seconds"])
         self.assertEqual(progress[-1]["stage"], "complete")
 
-    def test_cft_prefers_npmmirror_patch_index_and_skips_google_urls(self):
+    def test_cft_prefers_npmmirror_patch_index_and_verifies_archive_with_publisher(self):
+        self.enterContext(_pin("137.0.7151.119", "win32", _make_zip_bytes({"chromedriver-win32/chromedriver.exe": b"mirror-driver-binary"})))
         patch_payload = {
             "builds": {
                 "137.0.7151.9": {"version": "137.0.7151.9"},
@@ -236,7 +271,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         logs: list[str] = []
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Windows"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.detect_chromedriver_version", return_value="137.0.7151.119"):
             dest = cm.download_and_install_chromedriver(temp_dir, major_version="137", log_callback=logs.append)
             with open(dest, "rb") as handle:
@@ -246,6 +281,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         self.assertTrue(any("已安装到" in msg for msg in logs))
 
     def test_cft_rewrites_google_urls_inside_npmmirror_known_good_json(self):
+        self.enterContext(_pin("137.0.7151.119", "mac-arm64", _make_zip_bytes({"chromedriver-mac-arm64/chromedriver": b"mac-mirror-bin"})))
         # Even though npmmirror's known-good JSON embeds storage.googleapis.com URLs,
         # the downloader must try cdn.npmmirror.com first before touching Google storage.
         known_good_payload = {
@@ -271,7 +307,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         def fake_http_get(url: str, timeout: int = 30) -> bytes:
             requested.append(url)
             if url == cm.NPMMIRROR_PATCH_VERSIONS_URL:
-                raise _http_404(url)
+                raise self._http_404(url)
             if url == cm.NPMMIRROR_CFT_URL:
                 return json.dumps(known_good_payload).encode("utf-8")
             if url == expected_cdn_url:
@@ -281,7 +317,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Darwin"), \
             patch("chromedriver_manager.platform.machine", return_value="arm64"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.detect_chromedriver_version", return_value="137.0.7151.119"):
             dest = cm.download_and_install_chromedriver(temp_dir, major_version="137")
             with open(dest, "rb") as handle:
@@ -315,7 +351,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Windows"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.detect_chromedriver_version", return_value="139.0.7258.5"):
             dest = cm.download_and_install_chromedriver(temp_dir, major_version="139")
             with open(dest, "rb") as handle:
@@ -350,7 +386,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Windows"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.detect_chromedriver_version", return_value="161.0.8200.1"):
             dest = cm.download_and_install_chromedriver(temp_dir, major_version="161")
             with open(dest, "rb") as handle:
@@ -359,6 +395,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         self.assertEqual(requested[-1], official_zip_url)
 
     def test_cdn_zip_failure_falls_back_to_official_binary_url(self):
+        self.enterContext(_pin("137.0.7151.119", "win32", _make_zip_bytes({"chromedriver.exe": b"official-fallback-bin"})))
         patch_payload = {"builds": {"137.0.7151": {"version": "137.0.7151.119"}}}
         dir_url = f"{cm.NPMMIRROR_CFT_API_PREFIX}/137.0.7151.119/win32/"
         cdn_url = f"{cm.NPMMIRROR_CFT_CDN_PREFIX}/137.0.7151.119/win32/chromedriver-win32.zip"
@@ -370,20 +407,21 @@ class ChromeDriverManagerTests(unittest.TestCase):
             if url == dir_url:
                 return json.dumps([{"name": "chromedriver-win32.zip", "type": "file"}]).encode("utf-8")
             if url == cdn_url:
-                raise _http_404(url)
+                raise self._http_404(url)
             if url == official_url:
                 return _make_zip_bytes({"chromedriver.exe": b"official-fallback-bin"})
             raise AssertionError(f"Unexpected URL: {url}")
 
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Windows"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.detect_chromedriver_version", return_value="137.0.7151.119"):
             dest = cm.download_and_install_chromedriver(temp_dir, major_version="137")
             with open(dest, "rb") as handle:
                 self.assertEqual(handle.read(), b"official-fallback-bin")
 
     def test_corrupt_or_mismatched_binary_rejected_before_replace(self):
+        self.enterContext(_pin("137.0.7151.119", "win32", _make_zip_bytes({"chromedriver.exe": b"good-official-binary"})))
         patch_payload = {"builds": {"137.0.7151": {"version": "137.0.7151.119"}}}
         dir_url = f"{cm.NPMMIRROR_CFT_API_PREFIX}/137.0.7151.119/win32/"
         cdn_url = f"{cm.NPMMIRROR_CFT_CDN_PREFIX}/137.0.7151.119/win32/chromedriver-win32.zip"
@@ -400,11 +438,11 @@ class ChromeDriverManagerTests(unittest.TestCase):
                 return _make_zip_bytes({"chromedriver.exe": b"good-official-binary"})
             raise AssertionError(f"Unexpected URL: {url}")
 
+        probed = []
         def fake_detect(path: str):
             with open(path, "rb") as handle:
                 data = handle.read()
-            if data == b"bad-version-binary":
-                return "136.0.0.1"
+            probed.append(data)
             return "137.0.7151.119"
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -413,11 +451,94 @@ class ChromeDriverManagerTests(unittest.TestCase):
                 handle.write(b"working-old-driver")
 
             with patch("chromedriver_manager.platform.system", return_value="Windows"), \
-                patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+                patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
                 patch("chromedriver_manager.detect_chromedriver_version", side_effect=fake_detect):
                 dest = cm.download_and_install_chromedriver(temp_dir, major_version="137")
                 with open(dest, "rb") as handle:
                     self.assertEqual(handle.read(), b"good-official-binary")
+            self.assertEqual(probed, [b"good-official-binary"])
+
+    def test_unpinned_version_uses_only_the_canonical_publisher_and_rejects_redirects(self):
+        version = "137.0.1.2"
+        mirror, official = cm._build_cft_candidates(version, "win32")
+        response = Mock()
+        response.is_redirect = True
+        with tempfile.TemporaryDirectory() as directory, patch.object(cm.platform, "system", return_value="Windows"), \
+                patch.object(cm, "_candidate_resolvers", return_value=[lambda: [mirror, official]]), \
+                patch.object(cm, "REQUESTS_AVAILABLE", True), patch.object(cm.requests, "get", return_value=response) as get, \
+                patch.object(cm, "detect_chromedriver_version") as detect:
+            with self.assertRaisesRegex(RuntimeError, "重定向"):
+                cm.download_and_install_chromedriver(directory, "137")
+            self.assertEqual([call.args[0] for call in get.call_args_list], [official.url])
+            self.assertFalse(get.call_args.kwargs["allow_redirects"])
+            detect.assert_not_called()
+            self.assertEqual(os.listdir(directory), [])
+
+    def test_urllib_publisher_refuses_redirects_before_following_them(self):
+        hits = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", "/elsewhere")
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        with patch.object(cm, "REQUESTS_AVAILABLE", False), \
+                self.assertRaisesRegex(ValueError, "重定向") as caught:
+            cm._http_get(f"http://127.0.0.1:{server.server_port}/driver.zip", publisher=True)
+        self.assertEqual(hits, ["/driver.zip"])
+        self.assertIsInstance(caught.exception.__cause__, HTTPError)
+        self.assertTrue(caught.exception.__cause__.closed)
+
+        response = Mock()
+        response.is_redirect = False
+        response.status_code = 300
+        with patch.object(cm, "REQUESTS_AVAILABLE", True), \
+                patch.object(cm.requests, "get", return_value=response):
+            with self.assertRaisesRegex(ValueError, "重定向"):
+                cm._http_get("https://example.test/driver.zip", publisher=True)
+        response.close.assert_called_once()
+
+    def test_install_rejects_mismatched_full_version_and_preserves_existing_binary(self):
+        for detected in ("137.0.7151.118", "136.0.0.1"):
+            with self.subTest(detected=detected), tempfile.TemporaryDirectory() as directory:
+                existing = os.path.join(directory, "chromedriver.exe")
+                with open(existing, "wb") as handle:
+                    handle.write(b"working-old-driver")
+                archive = io.BytesIO(_make_zip_bytes({"chromedriver.exe": b"mismatched-binary"}))
+                with patch.object(cm.platform, "system", return_value="Windows"), \
+                        patch.object(cm, "detect_chromedriver_version", return_value=detected):
+                    with self.assertRaisesRegex(cm._CandidateDownloadError, "版本校验不匹配"):
+                        cm._install_verified_binary(archive, directory, "chromedriver.exe", "137.0.7151.119")
+                with open(existing, "rb") as handle:
+                    self.assertEqual(handle.read(), b"working-old-driver")
+                self.assertEqual(os.listdir(directory), ["chromedriver.exe"])
+
+    def test_publisher_transfer_requires_its_object_checksum(self):
+        for headers in ({}, {"x-goog-hash": _object_hash(b"other")}):
+            with self.subTest(headers=headers), self.assertRaises(cm._CandidateDownloadError):
+                cm._read_download_chunks([b"archive"], headers, None, 0, publisher=True)
+
+    def test_rejects_oversized_download_and_driver_before_version_probe(self):
+        with self.assertRaisesRegex(ValueError, "大小限制"):
+            cm._read_download_chunks([b"123", b"456"], {}, None, 0, limit=5)
+        archive = io.BytesIO(_make_zip_bytes({"chromedriver.exe": b"123456"}))
+        with tempfile.TemporaryDirectory() as directory, patch.object(cm, "_MAX_DRIVER_BYTES", 5), \
+                patch.object(cm, "detect_chromedriver_version") as detect:
+            with self.assertRaisesRegex(cm._CandidateDownloadError, "大小异常"):
+                cm._install_verified_binary(archive, directory, "chromedriver.exe", "137")
+            detect.assert_not_called()
+            self.assertEqual(os.listdir(directory), [])
 
     def test_all_failed_preserves_existing_binary_and_leaves_no_temp_files(self):
         patch_payload = {"builds": {"137.0.7151": {"version": "137.0.7151.119"}}}
@@ -440,7 +561,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
                 handle.write(b"working-old-driver")
 
             with patch("chromedriver_manager.platform.system", return_value="Windows"), \
-                patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+                patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
                 patch("chromedriver_manager.detect_chromedriver_version", return_value=None):
                 with self.assertRaises(RuntimeError) as ctx:
                     cm.download_and_install_chromedriver(temp_dir, major_version="137")
@@ -451,6 +572,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
             self.assertEqual(os.listdir(temp_dir), ["chromedriver.exe"])
 
     def test_pre115_prefers_npmmirror_and_falls_back_to_official(self):
+        self.enterContext(_pin("114.0.5735.16", "win32", _make_zip_bytes({"chromedriver.exe": b"legacy"})))
         mirror_release_url = f"{cm.NPMMIRROR_LEGACY_API_PREFIX}/LATEST_RELEASE_114"
         mirror_zip_url = f"{cm.NPMMIRROR_LEGACY_CDN_PREFIX}/114.0.5735.16/chromedriver_win32.zip"
         official_release_url = f"{cm.LEGACY_URL_PREFIX}/LATEST_RELEASE_114"
@@ -483,6 +605,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
             )
 
     def test_posix_chmods_temp_binary_before_version_verification(self):
+        self.enterContext(_pin("137.0.7151.119", "mac-arm64", _make_zip_bytes({"chromedriver": b"posix-binary"})))
         patch_payload = {"builds": {"137.0.7151": {"version": "137.0.7151.119"}}}
         dir_url = f"{cm.NPMMIRROR_CFT_API_PREFIX}/137.0.7151.119/mac-arm64/"
         cdn_url = f"{cm.NPMMIRROR_CFT_CDN_PREFIX}/137.0.7151.119/mac-arm64/chromedriver-mac-arm64.zip"
@@ -507,7 +630,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Darwin"), \
             patch("chromedriver_manager.platform.machine", return_value="arm64"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.os.chmod", side_effect=fake_chmod), \
             patch("chromedriver_manager.detect_chromedriver_version", side_effect=fake_detect):
             cm.download_and_install_chromedriver(temp_dir, major_version="137")
@@ -570,7 +693,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
             raise AssertionError(f"Unexpected fallback network call: {url}")
 
         with patch("chromedriver_manager.platform.system", return_value="Windows"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.os.makedirs", side_effect=PermissionError("read-only directory")):
             with self.assertRaises(RuntimeError) as ctx:
                 cm.download_and_install_chromedriver("Z:/locked-dir", major_version="137")
@@ -579,6 +702,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         self.assertEqual(requested, [cm.NPMMIRROR_PATCH_VERSIONS_URL, dir_url])
 
     def test_local_mkstemp_failure_raises_without_retrying_official_source(self):
+        self.enterContext(_pin("137.0.7151.119", "win32", _make_zip_bytes({"chromedriver.exe": b"mirror-driver-binary"})))
         patch_payload = {"builds": {"137.0.7151": {"version": "137.0.7151.119"}}}
         dir_url = f"{cm.NPMMIRROR_CFT_API_PREFIX}/137.0.7151.119/win32/"
         cdn_url = f"{cm.NPMMIRROR_CFT_CDN_PREFIX}/137.0.7151.119/win32/chromedriver-win32.zip"
@@ -596,7 +720,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Windows"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.tempfile.mkstemp", side_effect=OSError("No space left on device")):
             with self.assertRaises(RuntimeError) as ctx:
                 cm.download_and_install_chromedriver(temp_dir, major_version="137")
@@ -605,6 +729,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
         self.assertEqual(requested, [cm.NPMMIRROR_PATCH_VERSIONS_URL, dir_url, cdn_url])
 
     def test_local_temp_write_failure_cleans_up_and_skips_fallback(self):
+        self.enterContext(_pin("137.0.7151.119", "win32", _make_zip_bytes({"chromedriver.exe": b"mirror-driver-binary"})))
         patch_payload = {"builds": {"137.0.7151": {"version": "137.0.7151.119"}}}
         dir_url = f"{cm.NPMMIRROR_CFT_API_PREFIX}/137.0.7151.119/win32/"
         cdn_url = f"{cm.NPMMIRROR_CFT_CDN_PREFIX}/137.0.7151.119/win32/chromedriver-win32.zip"
@@ -636,7 +761,7 @@ class ChromeDriverManagerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir, \
             patch("chromedriver_manager.platform.system", return_value="Windows"), \
-            patch("chromedriver_manager._http_get", side_effect=fake_http_get), \
+            patch("chromedriver_manager._http_get", side_effect=_stream_fixture(fake_http_get)), \
             patch("chromedriver_manager.os.fdopen", side_effect=fake_fdopen):
             with self.assertRaises(RuntimeError) as ctx:
                 cm.download_and_install_chromedriver(temp_dir, major_version="137")

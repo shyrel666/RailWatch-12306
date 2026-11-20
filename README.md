@@ -20,7 +20,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/dashboard-v0.9.0.png" alt="RailWatch v0.9.0 仪表盘：当前行程、下一步与购票日历（演示数据）" width="100%">
+  <img src="docs/images/dashboard-v1.0.1.png" alt="RailWatch v1.0.1 仪表盘：当前行程、下一步与购票日历（演示数据）" width="100%">
 </p>
 
 把行程填好，剩下的交给 RailWatch：它在起售时刻准点查询，有票自动提交，无票自动候补，拿到订单号后持续跟踪状态，需要你付款时第一时间提醒。登录和支付始终在 12306 官方页面完成，所有数据只保存在你的电脑上。
@@ -80,15 +80,15 @@
 <table>
   <tr>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/trip-setup-v0.9.0.png"><img src="docs/images/trip-setup-v0.9.0.png" alt="行程设置" width="100%"></a>
+      <a href="docs/images/trip-setup-v1.0.1.png"><img src="docs/images/trip-setup-v1.0.1.png" alt="行程设置" width="100%"></a>
       <br><sub><b>行程设置</b> · 路线、席别、乘客与策略</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/monitor-v0.9.0.png"><img src="docs/images/monitor-v0.9.0.png" alt="购票监控（深色主题）" width="100%"></a>
+      <a href="docs/images/monitor-v1.0.1.png"><img src="docs/images/monitor-v1.0.1.png" alt="购票监控（深色主题）" width="100%"></a>
       <br><sub><b>购票监控</b> · 实时查询结果（深色主题）</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/order-center-v0.9.0.png"><img src="docs/images/order-center-v0.9.0.png" alt="订单中心" width="100%"></a>
+      <a href="docs/images/order-center-v1.0.1.png"><img src="docs/images/order-center-v1.0.1.png" alt="订单中心" width="100%"></a>
       <br><sub><b>订单中心</b> · 订单状态与候补详情</sub>
     </td>
   </tr>
@@ -175,7 +175,7 @@
 <details>
 <summary><b>ChromeDriver 从哪里下载？</b></summary>
 
-点击「检查环境」或「下载 ChromeDriver」时，RailWatch 会根据本机 Chrome 主版本优先从国内第三方镜像 `npmmirror`（`registry.npmmirror.com` / `cdn.npmmirror.com`）下载匹配驱动，失败时自动回退 Chrome for Testing 官方源，并在临时文件中校验压缩包与 `--version` 主版本一致后安装。如需离线或使用自备驱动，也可将对应版本的 `chromedriver.exe`（Windows）或 `chromedriver`（macOS）直接放入应用数据目录。
+点击「检查环境」或「下载 ChromeDriver」时，RailWatch 会按本机 Chrome 主版本选择驱动。已内置该版本和平台 SHA-256 摘要时，可从国内镜像下载并校验。其他版本直接从 Google 官方 HTTPS 地址下载并校验对象完整性。安装前还会核对驱动报告的完整版本号。如需离线或使用自备驱动，也可将对应版本的 `chromedriver.exe`（Windows）或 `chromedriver`（macOS）直接放入应用数据目录。
 </details>
 
 ## 参与贡献

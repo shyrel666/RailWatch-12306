@@ -430,11 +430,21 @@ def seat_label(value):
     return re.sub(r"\s*[（(]\s*[¥￥]?\s*\d+(?:\.\d+)?\s*元\s*[）)]\s*$", "", str(value)).strip()
 
 
-def form_token(text, token, suffix):
+def _form_match(text, token, suffix):
     # The optional suffix (次/站) absorbs the official page's glued layout; the
     # CJK end boundary keeps 北京 from matching inside 北京南.
-    return bool(token and re.search(_TOKEN_START + re.escape(token)
-                                   + r"(?:\s*" + suffix + r")?(?![0-9A-Za-z\u4e00-\u9fff])", str(text)))
+    return token and re.search(_TOKEN_START + re.escape(token)
+                               + r"(?:\s*" + suffix + r")?(?![0-9A-Za-z\u4e00-\u9fff])", str(text))
+
+
+def form_token(text, token, suffix):
+    return bool(_form_match(text, token, suffix))
+
+
+def stations_in_order(text, origin, destination):
+    first = _form_match(text, origin, "站")
+    last = _form_match(text, destination, "站")
+    return bool(first and last and first.end() <= last.start())
 
 
 def record_matches(record, intent, *, known_id=""):
@@ -483,15 +493,13 @@ def record_matches(record, intent, *, known_id=""):
     if record.get("checkout"):
         return (record.get("kind") == intent.kind == "regular" and train_token(text, intent.train_code)
                 and trains == {intent.train_code} and dates == {intent.date}
-                and all(form_token(text, station, "站") for station in (intent.from_station, intent.to_station))
-                and text.index(intent.from_station) < text.index(intent.to_station)
+                and stations_in_order(text, intent.from_station, intent.to_station)
                 and sorted(record.get("passengers", [])) == sorted(intent.passengers)
                 and [seat_label(value) for value in record.get("seat_names", [])] == [intent.seat] * len(intent.passengers))
     seats = {value for value in ("二等座", "一等座", "商务座", "特等座", "无座", "硬座", "软座", "硬卧", "软卧", "高级软卧", "动卧") if contains_token(text, value)}
     return (record.get("kind") == intent.kind and train_token(text, intent.train_code)
             and trains == {intent.train_code} and dates == {intent.date} and seats == {intent.seat}
-            and all(contains_token(text, item) for item in (intent.from_station, intent.to_station, intent.seat))
-            and text.index(intent.from_station) < text.index(intent.to_station)
+            and contains_token(text, intent.seat) and stations_in_order(text, intent.from_station, intent.to_station)
             and sorted(record.get("passengers", [])) == sorted(intent.passengers))
 
 
@@ -688,7 +696,7 @@ class OrderPage:
         ]
         failed = "；".join(f"{name}：期望 {want}，实际 {got}" for name, want, got, matches in fields if not matches)
         if (form_token(text, intent.from_station, "站") and form_token(text, intent.to_station, "站")
-                and text.index(intent.from_station) >= text.index(intent.to_station)):
+                and not stations_in_order(text, intent.from_station, intent.to_station)):
             failed += "；区间：出发站与到达站顺序不一致"
         summary = f"；页面摘要：{masked[:120]}" if masked else "；页面摘要为空"
         return (failed or "各字段均已读到") + summary
@@ -738,8 +746,7 @@ class OrderPage:
                     and snap.get("standing", "").replace(" ", "") == "已关闭")
         text = snap.get("regular", "")
         return (train_token(text, intent.train_code) and normalized_date(text) == intent.date
-                and form_token(text, intent.from_station, "站") and form_token(text, intent.to_station, "站")
-                and text.index(intent.from_station) < text.index(intent.to_station)
+                and stations_in_order(text, intent.from_station, intent.to_station)
                 and len(snap.get("ticketTypes", [])) == len(intent.passengers)
                 and all("成人" in value and "学生" not in value and "儿童" not in value
                         for value in snap.get("ticketTypes", []))

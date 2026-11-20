@@ -1015,7 +1015,8 @@ class PrefillTransitionRegressionTests(unittest.TestCase):
     def test_confirmation_precedes_form_and_confirms_matching_dialog_once(self):
         adapter, page = self.page({"confirmation": True, "formReady": True})
         adapter.driver.execute_script.return_value = {
-            "text": "2026-11-21 G1次 北京南站 — 上海虹桥站 二等座 张三", "names": ["张三"]}
+            "text": "2026-11-21 G1次 北京南站 — 上海虹桥站 二等座 张三", "names": ["张三"],
+            "seats": ["二等座"], "ticket_types": ["成人票"]}
         confirm = page.button.return_value
         def click(button, intent):
             button.click()
@@ -1030,11 +1031,14 @@ class PrefillTransitionRegressionTests(unittest.TestCase):
         self.assertNotIn("prefill_form_opened", stages)
 
     def test_mismatched_or_unreadable_confirmation_never_submits(self):
-        base = {"text": "2026-11-21 G1次 北京南站 — 上海虹桥站 二等座 张三", "names": ["张三"]}
+        base = {"text": "2026-11-21 G1次 北京南站 — 上海虹桥站 二等座 张三", "names": ["张三"],
+                "seats": ["二等座"], "ticket_types": ["成人票"]}
         cases = [
+            {**base, "text": base["text"] + " 成人票 李四 儿童票", "names": [], "seats": [], "ticket_types": []},
+            {**base, "seats": []}, {**base, "ticket_types": []},
             {**base, "names": ["李四"]}, {**base, "names": ["张三", "李四"]},
             {**base, "seats": ["一等座"]},
-            {**base, "ticket_types": ["学生票"]},
+            {**base, "ticket_types": ["学生票"]}, {**base, "ticket_types": ["非成人票"]},
             {**base, "text": base["text"].replace("G1次", "G101次")},
             {**base, "text": base["text"].replace("2026-11-21", "2026-11-22")},
             {**base, "text": base["text"].replace("北京南站 — 上海虹桥站", "上海虹桥站 — 北京南站")},
@@ -1117,7 +1121,7 @@ class BridgePrefillWorkerIntegrationTests(unittest.TestCase):
             bridge._start_monitor_heartbeat = Mock()
             bridge._make_param_filler = Mock(return_value=Mock(return_value=True))
             bridge._prepare_query_page = Mock(return_value=True)
-            bridge._send_keep_alive = Mock()
+            bridge._send_keep_alive = Mock(return_value="ok")
             bridge._valid_dates = Mock(return_value=["2026-11-21"])
             bridge._wait_for_target_time = Mock(return_value=True)
 
@@ -1165,7 +1169,7 @@ class BridgePrefillWorkerIntegrationTests(unittest.TestCase):
             bridge._start_monitor_heartbeat = Mock()
             bridge._make_param_filler = Mock(return_value=Mock(return_value=True))
             bridge._prepare_query_page = Mock(return_value=True)
-            bridge._send_keep_alive = Mock()
+            bridge._send_keep_alive = Mock(return_value="ok")
             bridge._valid_dates = Mock(return_value=["2026-11-21"])
             bridge._wait_for_target_time = Mock(return_value=True)
 
@@ -1206,7 +1210,7 @@ class BridgePrefillWorkerIntegrationTests(unittest.TestCase):
             bridge._start_monitor_heartbeat = Mock()
             bridge._make_param_filler = Mock(return_value=Mock(return_value=True))
             bridge._prepare_query_page = Mock(return_value=True)
-            bridge._send_keep_alive = Mock()
+            bridge._send_keep_alive = Mock(return_value="ok")
             bridge._valid_dates = Mock(return_value=["2026-11-21"])
             bridge._wait_for_target_time = Mock(return_value=True)
             record = bridge.order_journal.mark
@@ -1261,11 +1265,25 @@ class BridgePrefillSafetyRegressionTests(unittest.TestCase):
         bridge._start_monitor_heartbeat = Mock()
         bridge._make_param_filler = Mock(return_value=Mock(return_value=True))
         bridge._prepare_query_page = Mock(return_value=True)
-        bridge._send_keep_alive = Mock()
+        bridge._send_keep_alive = Mock(return_value="ok")
         bridge._valid_dates = Mock(return_value=["2026-11-21"])
         bridge._wait_for_target_time = Mock(return_value=True)
         bridge._notify_async = Mock()
         return bridge, task
+
+    def test_immediate_automation_requires_a_current_login_probe(self):
+        bridge, task = self.bridge()
+        task.config = {**BASE_CONFIG, "timer_enabled": False}
+        task.target_timestamp = None
+        bridge._send_keep_alive = RailWatchBridge._send_keep_alive.__get__(bridge)
+        bridge.driver.execute_async_script.return_value = "unknown"
+        bridge._task_wait = Mock()
+        bridge._existing_trip_blocks = Mock()
+        bridge._monitor_worker(task.config, task)
+        self.assertFalse(bridge.state.login_ready)
+        self.assertEqual(bridge.driver.execute_async_script.call_count, 2)
+        bridge._existing_trip_blocks.assert_not_called()
+        self.assertTrue(task.cancel.is_set())
 
     def run_prefill_failure(self, result):
         bridge, task = self.bridge()

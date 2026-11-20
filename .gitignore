@@ -50,11 +50,10 @@ assets/images/icon-imagegen.*
 /docs/*
 !/docs/images/
 /docs/images/*
-!/docs/images/dashboard-v0.9.0.png
-!/docs/images/trip-setup-v0.9.0.png
-!/docs/images/monitor-v0.9.0.png
-!/docs/images/order-center-v0.9.0.png
+!/docs/images/dashboard-v1.0.1.png
+!/docs/images/trip-setup-v1.0.1.png
+!/docs/images/monitor-v1.0.1.png
+!/docs/images/order-center-v1.0.1.png
 !/docs/releases/
 /docs/releases/*
-!/docs/releases/v0.9.0.md
-!/docs/releases/v1.0.0.md
+!/docs/releases/v1.0.1.md

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
+import hashlib
 import io
 import json
 import os
@@ -23,9 +25,14 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 try:
-    from urllib.request import urlopen, Request
-    from urllib.error import URLError
+    from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+    from urllib.error import HTTPError, URLError
 
+    class _RefuseRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+
+    _PUBLISHER_OPENER = build_opener(_RefuseRedirect)
     URLLIB_AVAILABLE = True
 except ImportError:
     URLLIB_AVAILABLE = False
@@ -53,6 +60,17 @@ _METADATA_TIMEOUT = 15
 _MAX_MIRROR_PATCH_CANDIDATES = 3
 _DOWNLOAD_CHUNK_SIZE = 16 * 1024
 _PROGRESS_INTERVAL = 0.25
+_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+_MAX_DRIVER_BYTES = 128 * 1024 * 1024
+
+# SHA-256 of the versioned Google Chrome for Testing ZIPs. New versions can
+# still be installed directly from the publisher before a mirror pin is added.
+_ARCHIVE_SHA256 = {
+    ("158.0.8127.36", "win32"): "504d090ec0cac53a12c5cd038bccae982cee77be1e7de34f08ed8acb57fcb563",
+    ("158.0.8127.36", "mac-x64"): "707e35dcfc37c73305ceea27b8a3dba357b3f663562790975962293ad37efe1d",
+    ("158.0.8127.36", "mac-arm64"): "e44347354ea6a7b666e4ef03803974e1344f78ce9c4466acd896ea6af53136e8",
+    ("158.0.8127.36", "linux64"): "d20e70d69d68c5c983e2526452ed0779fd65dc4ade5d6741f1bb3d0d82754d3a",
+}
 
 
 def _report_progress(callback: Optional[Callable[[dict], None]], payload: dict) -> None:
@@ -69,7 +87,10 @@ def _read_download_chunks(
     headers,
     progress_callback: Callable[[dict], None],
     started_at: float,
-) -> bytes:
+    write=None,
+    limit: int = _MAX_ARCHIVE_BYTES,
+    publisher: bool = False,
+) -> Optional[bytes]:
     """Collect a response while reporting measured transfer progress, at most 4 Hz."""
     try:
         total = int(headers.get("Content-Length", ""))
@@ -82,7 +103,19 @@ def _read_download_chunks(
 
     downloaded = 0
     last_reported_at = started_at
-    content = io.BytesIO()
+    if total is not None and total > limit:
+        raise ValueError("下载超过大小限制")
+    checksum = None
+    if publisher:
+        # TLS authenticates the Google object. Its published MD5 also detects transfer corruption.
+        hashes = (",".join(headers.get_all("x-goog-hash", [])) if hasattr(headers, "get_all")
+                  else headers.get("x-goog-hash", ""))
+        expected = next((part.strip()[4:] for part in hashes.split(",") if part.strip().startswith("md5=")), "")
+        if not expected:
+            raise _CandidateDownloadError("官方响应缺少对象校验值")
+        checksum = hashlib.md5(usedforsecurity=False)
+    content = io.BytesIO() if write is None else None
+    write_chunk = content.write if content is not None else write
 
     def report(now: float) -> None:
         elapsed = max(0.0, now - started_at)
@@ -99,8 +132,12 @@ def _read_download_chunks(
     for chunk in chunks:
         if not chunk:
             continue
-        content.write(chunk)
         downloaded += len(chunk)
+        if downloaded > limit:
+            raise ValueError("下载超过大小限制")
+        if checksum is not None:
+            checksum.update(chunk)
+        write_chunk(chunk)
         if total is not None and downloaded > total:
             # A stale/misreported length cannot be used for progress estimates.
             total = None
@@ -110,43 +147,46 @@ def _read_download_chunks(
             last_reported_at = now
     if total is not None and downloaded < total:
         raise IOError(f"下载不完整：收到 {downloaded} / {total} 字节")
+    if checksum is not None and base64.b64encode(checksum.digest()).decode("ascii") != expected:
+        raise _CandidateDownloadError("官方驱动文件校验失败")
     report(time.monotonic())
-    return content.getvalue()
+    return content.getvalue() if content is not None else None
 
 
 def _http_get(
     url: str,
     timeout: int = 30,
     progress_callback: Optional[Callable[[dict], None]] = None,
-) -> bytes:
-    """Fetch URL content, preferring requests (with redirects) over urllib."""
-    headers = {"User-Agent": "RailWatch/1.0"}
-    if progress_callback is not None:
-        headers["Accept-Encoding"] = "identity"
+    *, write=None, publisher=False,
+) -> Optional[bytes]:
+    """Stream archives to disk and keep metadata responses bounded."""
+    headers = {"User-Agent": "RailWatch/1.0", "Accept-Encoding": "identity"}
     started_at = time.monotonic()
     if REQUESTS_AVAILABLE:
-        if progress_callback is not None:
-            resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
-            try:
-                resp.raise_for_status()
-                return _read_download_chunks(
-                    resp.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE), resp.headers,
-                    progress_callback, started_at,
-                )
-            finally:
-                resp.close()
-        resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-        resp.raise_for_status()
-        return resp.content
+        resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=not publisher, stream=True)
+        try:
+            resp.raise_for_status()
+            if publisher and (resp.is_redirect is True or (type(resp.status_code) is int and 300 <= resp.status_code < 400)):
+                raise ValueError("官方驱动地址发生重定向")
+            return _read_download_chunks(resp.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE), resp.headers,
+                                         progress_callback, started_at, write, _MAX_ARCHIVE_BYTES, publisher)
+        finally:
+            resp.close()
     if URLLIB_AVAILABLE:
         req = Request(url, headers=headers)
-        with urlopen(req, timeout=timeout) as resp:
-            if progress_callback is not None:
-                return _read_download_chunks(
-                    iter(lambda: resp.read(_DOWNLOAD_CHUNK_SIZE), b""), resp.headers,
-                    progress_callback, started_at,
-                )
-            return resp.read()
+        try:
+            response = _PUBLISHER_OPENER.open(req, timeout=timeout) if publisher else urlopen(req, timeout=timeout)
+        except HTTPError as exc:
+            code = exc.code
+            exc.close()
+            if publisher and 300 <= code < 400:
+                raise ValueError("官方驱动地址发生重定向") from exc
+            raise
+        with response as resp:
+            if publisher and resp.geturl() != url:
+                raise ValueError("官方驱动地址发生重定向")
+            return _read_download_chunks(iter(lambda: resp.read(_DOWNLOAD_CHUNK_SIZE), b""), resp.headers,
+                                         progress_callback, started_at, write, _MAX_ARCHIVE_BYTES, publisher)
     raise RuntimeError("No HTTP library available (need requests or urllib).")
 
 
@@ -368,20 +408,19 @@ def _cft_mirror_zip_url(version: str, platform_name: str) -> str:
     return f"{NPMMIRROR_CFT_CDN_PREFIX}/{version}/{platform_name}/chromedriver-{platform_name}.zip"
 
 
-def _cft_official_zip_url(version: str, platform_name: str, official_url: Optional[str] = None) -> str:
-    return official_url or f"{CFT_BINARY_PREFIX}/{version}/{platform_name}/chromedriver-{platform_name}.zip"
+def _cft_official_zip_url(version: str, platform_name: str) -> str:
+    return f"{CFT_BINARY_PREFIX}/{version}/{platform_name}/chromedriver-{platform_name}.zip"
 
 
 def _build_cft_candidates(
     version: str,
     platform_name: str,
     *,
-    official_url: Optional[str] = None,
     mirror_first: bool = True,
 ) -> list[_DownloadCandidate]:
     mirror = _DownloadCandidate(_cft_mirror_zip_url(version, platform_name), version, "npmmirror 镜像")
     official = _DownloadCandidate(
-        _cft_official_zip_url(version, platform_name, official_url),
+        _cft_official_zip_url(version, platform_name),
         version,
         "官方源",
     )
@@ -494,8 +533,8 @@ def _resolve_cft_from_known_good(
     match = _extract_cft_match_from_versions(full_data, major_version, platform_name)
     if not match:
         return []
-    official_url, ver = match
-    return _build_cft_candidates(ver, platform_name, official_url=official_url, mirror_first=mirror_first)
+    _, ver = match
+    return _build_cft_candidates(ver, platform_name, mirror_first=mirror_first)
 
 
 def _ranked_patch_versions(patch_data: Optional[dict], major_version: str) -> list[str]:
@@ -556,7 +595,7 @@ def _resolve_cft_official_candidates(
             ver = str(entry.get("version", ""))
             official_url = _find_platform_chromedriver_url(entry, platform_name)
             if ver and official_url:
-                return _build_cft_candidates(ver, platform_name, official_url=official_url, mirror_first=False)
+                return _build_cft_candidates(ver, platform_name, mirror_first=False)
 
     return _resolve_cft_from_known_good(
         CFT_URL, major_version, platform_name, mirror_first=False, progress_callback=progress_callback,
@@ -614,16 +653,11 @@ def _candidate_resolvers(
 
 
 def get_chromedriver_download_url(major_version: str) -> Optional[Tuple[str, str]]:
-    """Return (download_url, version_string) for the given Chrome major version.
-
-    Prefers the npmmirror China mirror for faster domestic downloads and falls
-    back to the official Chrome for Testing / storage endpoints when needed.
-    """
+    """Return a pinned mirror or canonical publisher URL for the requested major."""
     major_str = str(int(major_version))
     for resolve in _candidate_resolvers(major_str):
-        candidates = resolve()
-        if candidates:
-            return candidates[0].url, candidates[0].version
+        for candidate, _, _ in _trusted_downloads(resolve(), major_str):
+            return candidate.url, candidate.version
     return None
 
 
@@ -659,32 +693,49 @@ def _pre115_platform_tag() -> str:
     return "linux64"
 
 
-def _extract_chromedriver_from_zip(zip_data: bytes, exe_name: str) -> bytes:
-    """Extract chromedriver binary bytes from a downloaded zip archive."""
+def _trusted_downloads(candidates, major):
+    cft = int(major) >= 115
+    platform_tag = _cft_platform_name() if cft else _pre115_platform_tag()
+    for candidate in candidates:
+        version = candidate.version
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", version) or version.split(".")[0] != major:
+            continue
+        official = (_cft_official_zip_url(version, platform_tag) if cft
+                    else f"{LEGACY_URL_PREFIX}/{version}/chromedriver_{platform_tag}.zip")
+        publisher = candidate.url == official
+        pin = _ARCHIVE_SHA256.get((version, platform_tag))
+        if publisher or pin:
+            yield candidate, publisher, pin
+
+
+def _copy_driver(archive, exe_name, output):
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-            members = [name for name in zf.namelist() if not name.endswith("/")]
-            target_name = next((name for name in members if os.path.basename(name) == exe_name), None)
-            if not target_name:
-                target_name = next(
-                    (name for name in members if os.path.basename(name).lower() == exe_name.lower()),
-                    None,
-                )
-            if not target_name:
-                raise _CandidateDownloadError(f"压缩包中未找到 {exe_name}")
-            with zf.open(target_name) as src:
-                return src.read()
+        with zipfile.ZipFile(archive) as zf:
+            members = [entry for entry in zf.infolist()
+                       if not entry.is_dir() and os.path.basename(entry.filename).lower() == exe_name.lower()]
+            if len(members) != 1:
+                raise _CandidateDownloadError(f"压缩包中缺少唯一的 {exe_name}")
+            entry = members[0]
+            if not 0 < entry.file_size <= _MAX_DRIVER_BYTES:
+                raise _CandidateDownloadError("驱动文件大小异常")
+            with zf.open(entry) as src:
+                size = 0
+                while chunk := src.read(_DOWNLOAD_CHUNK_SIZE):
+                    size += len(chunk)
+                    if size > _MAX_DRIVER_BYTES:
+                        raise _CandidateDownloadError("驱动文件超过大小限制")
+                    output.write(chunk)
     except zipfile.BadZipFile as exc:
         raise _CandidateDownloadError(f"下载的文件不是有效的 ZIP: {exc}") from exc
 
 
 def _install_verified_binary(
-    content: bytes,
+    archive,
     target_dir: str,
     exe_name: str,
-    expected_major: str,
+    expected_version: str,
 ) -> Tuple[str, str]:
-    """Write, verify executable version against expected_major, and atomically install."""
+    """Stage the authenticated archive and check its full version before atomic installation."""
     _prepare_target_dir(target_dir)
     dest_path = os.path.join(target_dir, exe_name)
     tmp_suffix = ".tmp.exe" if platform.system() == "Windows" else ".tmp"
@@ -698,7 +749,7 @@ def _install_verified_binary(
         try:
             with os.fdopen(fd, "wb") as f:
                 fd_closed = True
-                f.write(content)
+                _copy_driver(archive, exe_name, f)
             if platform.system() != "Windows":
                 os.chmod(tmp_path, 0o755)
         except OSError as exc:
@@ -713,9 +764,9 @@ def _install_verified_binary(
             detected_version = detect_chromedriver_version(tmp_path)
             if not detected_version:
                 raise _CandidateDownloadError("下载的 ChromeDriver 无法执行或版本校验失败")
-            if detected_version.split(".")[0] != expected_major:
+            if detected_version != expected_version:
                 raise _CandidateDownloadError(
-                    f"ChromeDriver 版本校验不匹配：期望 Chrome {expected_major}，实际为 {detected_version}"
+                    f"ChromeDriver 版本校验不匹配：期望 {expected_version}，实际为 {detected_version}"
                 )
         except _CandidateDownloadError:
             raise
@@ -747,9 +798,9 @@ def download_and_install_chromedriver(
 ) -> str:
     """Download ChromeDriver and install to target_dir.
 
-    Tries the npmmirror China mirror first and automatically falls back to
-    official Chrome for Testing / storage URLs if resolution, download,
-    archive integrity, or binary version verification fails.
+    Releases with a pinned SHA-256 can use npmmirror. Other versions use the
+    canonical Google Storage asset for the platform, with TLS and its object
+    checksum. Both paths verify the full driver version before installation.
 
     progress_callback receives complete snapshots with stage/message/source,
     byte counts, measured bytes_per_second and eta_seconds (None if unknown).
@@ -803,7 +854,7 @@ def download_and_install_chromedriver(
     for resolver_index, resolve in enumerate(resolvers):
         source = "npmmirror 镜像" if resolver_index == 0 else "官方源"
         progress("resolving", f"正在从{source}查找匹配 Chrome {major_version} 的驱动…", source=source)
-        for candidate in resolve():
+        for candidate, publisher, pin in _trusted_downloads(resolve(), major_version):
             if candidate.url in seen_urls:
                 continue
             seen_urls.add(candidate.url)
@@ -814,28 +865,29 @@ def download_and_install_chromedriver(
             )
             try:
                 _prepare_target_dir(target_dir)
-                if progress_callback is not None:
-                    zip_data = _http_get(candidate.url, progress_callback=lambda metrics: progress(
-                        "downloading", f"正在从{candidate.source_label}下载 ChromeDriver {candidate.version}…",
-                        source=candidate.source_label, version=candidate.version, **metrics,
-                    ))
-                else:
-                    zip_data = _http_get(candidate.url)
-                progress(
-                    "extracting", "下载完成，正在解压 ChromeDriver…",
-                    source=candidate.source_label, version=candidate.version,
-                )
-                content = _extract_chromedriver_from_zip(zip_data, exe_name)
-                progress(
-                    "installing", "正在校验版本并安装 ChromeDriver…",
-                    source=candidate.source_label, version=candidate.version,
-                )
-                dest_path, verified_version = _install_verified_binary(
-                    content,
-                    target_dir,
-                    exe_name,
-                    major_version,
-                )
+                transfer = (lambda metrics: progress(
+                    "downloading", f"正在从{candidate.source_label}下载 ChromeDriver {candidate.version}…",
+                    source=candidate.source_label, version=candidate.version, **metrics,
+                )) if progress_callback is not None else None
+                try:
+                    temporary = tempfile.TemporaryFile(dir=target_dir)
+                except OSError as exc:
+                    raise _LocalInstallError(f"无法创建驱动下载临时文件: {exc}") from exc
+                with temporary as archive:
+                    def store_archive(chunk):
+                        try:
+                            archive.write(chunk)
+                        except OSError as exc:
+                            raise _LocalInstallError(f"写入驱动压缩包失败: {exc}") from exc
+                    _http_get(candidate.url, progress_callback=transfer, write=store_archive, publisher=publisher)
+                    if pin:
+                        archive.seek(0)
+                        if hashlib.file_digest(archive, "sha256").hexdigest() != pin:
+                            raise _CandidateDownloadError("ChromeDriver SHA-256 与官方固定摘要不一致")
+                    archive.seek(0)
+                    progress("extracting", "下载完成，正在解压 ChromeDriver…", source=candidate.source_label, version=candidate.version)
+                    progress("installing", "正在校验版本并安装 ChromeDriver…", source=candidate.source_label, version=candidate.version)
+                    dest_path, verified_version = _install_verified_binary(archive, target_dir, exe_name, candidate.version)
                 log(f"ChromeDriver {verified_version} 已安装到: {dest_path}")
                 progress(
                     "complete", f"ChromeDriver {verified_version} 安装完成",

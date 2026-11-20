@@ -187,6 +187,7 @@ class QueryConfig:
     sale_time_checked_at: str = ""
     burst_window_seconds: float = 45.0
     prewarm_lead_seconds: float = 120.0  # 兼容字段；桌面端在启动任务时立即准备页面
+    prefill_enabled: bool = True
     
     # 新增：多目标支持
     targets: List[MonitorTarget] = field(default_factory=list)
@@ -223,6 +224,7 @@ class QueryConfig:
             "date_scan_budget_seconds": self.date_scan_budget_seconds,
             "smart_rate": self.smart_rate,
             "timer_enabled": self.timer_enabled,
+            "prefill_enabled": self.prefill_enabled,
             "target_time": self.target_time,
             "sale_at": self.sale_at,
             "sale_time_source": self.sale_time_source,
@@ -264,6 +266,7 @@ class QueryConfig:
             date_scan_budget_seconds=data.get("date_scan_budget_seconds", 30.0),
             smart_rate=data.get("smart_rate", True),
             timer_enabled=data.get("timer_enabled", False),
+            prefill_enabled=data.get("prefill_enabled", True),
             target_time=data.get("target_time", "00:00:00"),
             sale_at=data.get("sale_at", ""),
             sale_time_source=data.get("sale_time_source", "manual"),

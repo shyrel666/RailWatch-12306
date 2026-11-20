@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from railwatch_bridge import RailWatchBridge
-from railwatch_order_page import OrderPage
+from railwatch_order_page import OrderPage, stations_in_order
 from railwatch_orders import OrderIntent
 from railwatch_policies import ORDER_POLICIES, validate_order_policies
 from railwatch_task import MonitorTask, TaskCancelled
@@ -88,6 +88,12 @@ class TripConflictTests(unittest.TestCase):
         unpaid = card(order_id="EDEMOORDER2", state="", payment=True)
         self.assertEqual(len(trip_conflicts([card(), unpaid], CONFIG, DATES)), 1)
         self.assertEqual(len(trip_conflicts([card(state="待支付")], CONFIG, DATES)), 1)
+
+    def test_overlapping_station_names_preserve_direction(self):
+        text = "G1次天津西站（08:00开）—天津站（08:10到）"
+        self.assertTrue(stations_in_order(text, "天津西", "天津"))
+        self.assertFalse(stations_in_order(text, "天津", "天津西"))
+        self.assertFalse(stations_in_order("天津西站—天津南站", "天津西", "天津"))
 
     def test_train_schedules_supply_the_actual_station_pairs_of_target_trains(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -185,7 +191,15 @@ class ReadExistingOrdersTests(unittest.TestCase):
         timing = {}
         self.assertEqual(tabs.read(budget=10.0, timing=timing), [card()])
         self.assertAlmostEqual(tabs.elapsed, 7.6, places=6)
-        self.assertEqual(timing, {"navigation_ms": 7500, "tabs_ms": 0, "untraveled_ms": 100})
+        self.assertEqual(timing, {"navigation_ms": 7500, "tabs_ms": 0, "untraveled_ms": 100,
+                                  "reason": "unfinished_unreadable"})
+        tabs.assert_restored(self)
+
+    def test_preserves_unfinished_order_when_the_next_tab_times_out(self):
+        tabs = FakeTabs([card()], [], loading=1)
+        timing = {}
+        self.assertEqual(tabs.read(settle=0.1, timing=timing), [card()])
+        self.assertEqual(timing["reason"], "loading")
         tabs.assert_restored(self)
 
     def test_empty_untraveled_tab_is_concluded_only_after_the_full_settle(self):
@@ -317,6 +331,12 @@ class BridgeTripCheckTests(unittest.TestCase):
                 self.assertEqual(self.results(bridge, task), [{"result": "clear", "orders": len(orders), **self.TIMING}])
                 self.assertFalse(bridge.state.human_action)
 
+    def test_confirmed_conflict_blocks_even_when_the_other_tab_is_unreadable(self):
+        bridge, task, _ = self.bridge()
+        blocked, _ = self.check(bridge, task, [card()], reason="loading")
+        self.assertTrue(blocked)
+        self.assertEqual(self.results(bridge, task)[0]["result"], "conflict")
+
     def test_unreadable_orders_only_warn_and_record_where_the_time_went(self):
         bridge, task, _ = self.bridge()
         logs = []
@@ -396,7 +416,7 @@ class BridgeTripCheckTests(unittest.TestCase):
         bridge._start_monitor_heartbeat = Mock()
         bridge._make_param_filler = Mock(return_value=Mock(return_value=True))
         bridge._prepare_query_page = Mock(return_value=True)
-        bridge._send_keep_alive = Mock()
+        bridge._send_keep_alive = Mock(return_value="ok")
         with patch("railwatch_bridge.guard_browser", return_value=nullcontext()), \
                 patch("railwatch_bridge.read_existing_orders", return_value=[card()]), \
                 patch("railwatch_bridge.TicketMonitor") as monitor, patch("railwatch_bridge.PrefillAdapter") as adapter:

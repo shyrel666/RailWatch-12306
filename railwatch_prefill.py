@@ -23,7 +23,7 @@ from railwatch_order_page import (
     ConfirmationOutcome,
     OrderPage,
     contains_token,
-    form_token,
+    stations_in_order,
     needs_person,
     normalized_date,
     seat_label,
@@ -450,9 +450,10 @@ for (const table of root.querySelectorAll('table')) {
   const typeIdx = headers.findIndex(text => text === '票种');
   for (const row of [...table.querySelectorAll('tr')].filter(rwVisible)) {
     const cells = row.querySelectorAll('td');
-    if (cells.length <= nameIdx) continue;
+    if (!cells.length) continue;
+    if (cells.length <= nameIdx) return null;
     const name = (cells[nameIdx].querySelector('input')?.value || rwTxt(cells[nameIdx])).trim();
-    if (!name) continue;
+    if (!name) return null;
     names.push(name);
     if (seatIdx >= 0 && cells.length > seatIdx) seats.push(rwTxt(cells[seatIdx]));
     if (typeIdx >= 0 && cells.length > typeIdx) ticketTypes.push(rwTxt(cells[typeIdx]));
@@ -1211,20 +1212,15 @@ class PrefillAdapter:
             seats = value.get("seats") or []
             ticket_types = value.get("ticket_types") or []
             if (not train_token(text, intent.train_code) or normalized_date(text) != intent.date
-                    or not form_token(text, intent.from_station, "站")
-                    or not form_token(text, intent.to_station, "站")
-                    or text.find(intent.from_station) >= text.find(intent.to_station)
+                    or not stations_in_order(text, intent.from_station, intent.to_station)
                     or not contains_token(text, intent.seat)):
                 return False
-            if seats and [seat_label(s) for s in seats] != [intent.seat] * len(intent.passengers):
+            if not names or sorted(names) != sorted(intent.passengers):
                 return False
-            if ticket_types and (
-                len(ticket_types) != len(intent.passengers)
-                or any("成人" not in t or "学生" in t or "儿童" in t for t in ticket_types)
-            ):
+            if [seat_label(s) for s in seats] != [intent.seat] * len(names):
                 return False
-            return (sorted(names) == sorted(intent.passengers) if names
-                    else all(contains_token(text, name) for name in intent.passengers))
+            return len(ticket_types) == len(names) and all(
+                str(t).strip() in ("成人", "成人票") for t in ticket_types)
         except Exception:
             return False
 

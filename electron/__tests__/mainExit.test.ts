@@ -10,7 +10,7 @@ const harness = vi.hoisted(() => ({
   ready: undefined as undefined | (() => void),
   windowListeners: new Map<string, (...args: any[]) => void>(),
   hide: vi.fn(), show: vi.fn(),
-  visible: false,
+  visible: false, packaged: false,
   ipcListeners: new Map<string, (...args: any[]) => void>(),
   ipcHandlers: new Map<string, (...args: any[]) => any>(),
   webListeners: new Map<string, (...args: any[]) => void>(),
@@ -40,6 +40,7 @@ const harness = vi.hoisted(() => ({
 }));
 vi.mock("electron", () => ({
   app: { requestSingleInstanceLock: () => true, quit: harness.quit,
+    get isPackaged() { return harness.packaged; },
     on: (name: string, listener: (...args: any[]) => void) => harness.listeners.set(name, listener),
     setAppUserModelId: harness.setAppUserModelId, getVersion: () => "0.4.2",
     getPath: (name: string) => (name === "userData" ? harness.userDataDir
@@ -132,6 +133,7 @@ beforeEach(async () => {
   harness.windowListeners.clear();
   harness.webListeners.clear();
   harness.visible = false;
+  harness.packaged = false;
   harness.show.mockImplementation(() => {
     harness.visible = true;
     harness.windowListeners.get("show")?.();
@@ -360,6 +362,20 @@ test("draft edits during main-process confirmation prevent startup", async () =>
   accept(true);
   await expect(pending).rejects.toThrow("配置发生变化");
   expect(harness.request).not.toHaveBeenCalledWith("startMonitor", expect.anything());
+});
+
+test("a packaged window ignores the inherited development URL for loading and IPC", async () => {
+  harness.packaged = true;
+  vi.stubEnv("VITE_DEV_SERVER_URL", "http://127.0.0.1:5173");
+  try {
+    harness.ready!();
+    expect(harness.rendererUrl).toMatch(/^file:.*\/dist\/index\.html$/);
+    const invoke = harness.ipcHandlers.get("railwatch:command")!;
+    await expect(invoke({ senderFrame: { url: "http://127.0.0.1:5173/" } }, "loadTripState", {}))
+      .rejects.toThrow("untrusted");
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 
 test("untrusted fire-and-forget IPC is ignored without throwing", () => {
@@ -667,6 +683,10 @@ test("clearLocalData clears window-state.json and Electron session storage/cache
     expect(existsSync(path.join(tempUserData, "window-state.json"))).toBe(false);
     expect(harness.clearStorageData).toHaveBeenCalledTimes(1);
     expect(harness.clearCache).toHaveBeenCalledTimes(1);
+    harness.clearStorageData.mockRejectedValueOnce(new Error("locked"));
+    const partial = await invoke({ senderFrame: { url: harness.rendererUrl } }, "clearLocalData", {});
+    expect(partial).toMatchObject({ cleared: true, cleanup_pending: true, warning: expect.stringContaining("会话数据") });
+    expect(harness.clearCache).toHaveBeenCalledTimes(2);
     // Without a configured userData directory the updater cache is left alone, and so is its state.
     expect(harness.discardDownload).not.toHaveBeenCalled();
   } finally {

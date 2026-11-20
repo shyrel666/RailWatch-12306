@@ -269,6 +269,7 @@ class RedirectTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             railwatch_notify._post_json(f"http://127.0.0.1:{server.server_port}/push", {"a": 1})
         self.assertEqual(caught.exception.code, 307)
+        self.assertTrue(caught.exception.closed)
         self.assertEqual(hits, ["/push"])
 
 

@@ -103,6 +103,35 @@ test("an empty filter result offers the way back to every order", async () => {
   expect(await screen.findByRole("article", { name: /^D21 / })).toBeTruthy();
 });
 
+test("a delayed refresh cannot overwrite a newer filter result", async () => {
+  let finish!: (page: OrderHistoryPage) => void;
+  const runCommand = vi.fn(async (_command: string, payload?: Record<string, unknown>) =>
+    ({ items: payload?.status ? [] : [summary], next_cursor: null })) as CommandRunner;
+  render(<OrderCenterPage runCommand={runCommand} busy={null} />);
+  await screen.findByRole("article", { name: /^D21 / });
+  vi.mocked(runCommand).mockImplementationOnce((() => new Promise<OrderHistoryPage>(resolve => { finish = resolve; })) as CommandRunner);
+  await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+  await userEvent.click(screen.getByRole("combobox", { name: "按状态筛选" }));
+  await userEvent.click(await screen.findByText("需要核验", { selector: ".ant-select-item-option-content" }));
+  await screen.findByText("没有「需要核验」的订单");
+  await act(async () => finish({ items: [summary], next_cursor: null }));
+  expect(screen.getByText("没有「需要核验」的订单")).toBeTruthy();
+  expect(screen.queryByRole("article")).toBeNull();
+});
+
+test("a failed filter read can be retried without showing the previous list", async () => {
+  const runCommand = vi.fn(async () => ({ items: [summary], next_cursor: null })) as CommandRunner;
+  render(<OrderCenterPage runCommand={runCommand} busy={null} />);
+  await screen.findByRole("article", { name: /^D21 / });
+  vi.mocked(runCommand).mockResolvedValueOnce(undefined);
+  await userEvent.click(screen.getByRole("combobox", { name: "按状态筛选" }));
+  await userEvent.click(await screen.findByText("需要核验", { selector: ".ant-select-item-option-content" }));
+  await screen.findByRole("alert");
+  expect(screen.queryByRole("article")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+  await screen.findByRole("article", { name: /^D21 / });
+});
+
 test("background refreshes keep the current list in place", async () => {
   let release: (value: OrderHistoryPage) => void = () => undefined;
   const runCommand = vi.fn(async () => ({ items: [summary], next_cursor: null })) as CommandRunner;

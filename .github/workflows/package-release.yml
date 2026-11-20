@@ -18,7 +18,7 @@ on:
         default: all
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: package-release-${{ github.ref }}
@@ -257,6 +257,8 @@ jobs:
           path: build/qa
 
   publish:
+    permissions:
+      contents: write
     name: Publish GitHub Release
     needs: [windows, macos]
     # Skipped jobs must be handled explicitly: a selected platform has to succeed,

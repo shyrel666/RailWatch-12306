@@ -310,6 +310,7 @@ class RailWatchBridge:
         self._keychain_migration: Dict[str, str] = {}
         self._keychain_written: Optional[Dict[str, str]] = None
         self._keychain_generation = 0
+        self._keychain_read_failed = False
         self.query_results: List[dict] = []
         self._station_resolver = None
         self._station_resolver_lock = threading.Lock()
@@ -641,18 +642,22 @@ class RailWatchBridge:
         }
 
     def load_config(self) -> dict:
-        config = default_config()
+        config = validate_config(default_config())
         if self.config_manager:
             saved = self.config_manager.load()
             if saved:
-                config.update(saved.to_dict())
-                self.log("已加载保存的设置。", "SUCCESS")
+                try:
+                    config = validate_config({**config, **saved.to_dict()})
+                except (TypeError, ValueError, OverflowError):
+                    self.log("保存的设置包含无效值，已使用默认行程。", "WARN")
+                else:
+                    self.log("已加载保存的设置。", "SUCCESS")
             elif self.config_manager.last_error:
                 self.log(f"保存的设置无法读取，已使用安全默认值: {self.config_manager.last_error}", "WARN")
         if not self.is_monitoring:
             self.state = self.state.with_safety(bool(config["auto_submit"]), bool(config["auto_alternate"]))
         self.emit_state()
-        return validate_config(config)
+        return config
 
     def load_trip_state(self) -> dict:
         config = self.load_config()
@@ -733,6 +738,7 @@ class RailWatchBridge:
         sale_at = self._official_sale_at(from_station.strip(), travel_date, now)
         if sale_at is None:
             raise ValueError("未能确定该日期的官方起售时间，请在购票日历中刷新起售时间后重试。")
+        now = time.time()
         self.sale_reminders.add(from_station, to_station, travel_date, sale_at, now, IDLE_POLICIES["max_sale_reminders"])
         return self._sale_reminder_list(now)
 
@@ -780,11 +786,14 @@ class RailWatchBridge:
                 official = self._official_sale_at(entry["from_station"], entry["date"], now)
             except ValueError:
                 official = None
+            now = time.time()
             if official is not None and abs(official - entry["sale_at"]) >= 60:
                 self.sale_reminders.update(entry["id"], now, sale_at=official)
                 if now < official - lead or official <= now:
                     continue
                 entry = {**entry, "sale_at": official}
+            if entry["sale_at"] <= now:
+                continue
             self.sale_reminders.update(entry["id"], now, notified_at=now)
             self._announce_sale(entry, now)
 
@@ -1742,6 +1751,8 @@ class RailWatchBridge:
         try:
             with self._driver_lock:
                 driver, self.driver = self.driver, None
+                self.device_id_protector = None
+                self.emit_state(replace(self.state, login_ready=False, query_ready=False))
                 error = self._dispose_driver(driver)
                 if error is not None and not is_session_lost(error):
                     raise error
@@ -1898,7 +1909,34 @@ class RailWatchBridge:
                             os.path.dirname(os.path.realpath(audio_path)) != os.path.realpath(directory)):
                         raise ValueError("自定义提示音文件不存在，请重新导入。")
                 merged = merge_notification_settings(candidate)
-                self._save_notification_settings(merged)
+                secret_edit = any(field in incoming for field in NOTIFICATION_SECRET_FIELDS)
+                if self._keychain_read_failed:
+                    # The file still holds the original markers and channel choices.
+                    try:
+                        with open(self._notification_settings_path(), encoding="utf-8") as handle:
+                            persisted = json.load(handle)
+                    except FileNotFoundError:
+                        persisted = None
+                    except (OSError, json.JSONDecodeError) as exc:
+                        raise RuntimeError("通知设置文件无法读取，尚未保存修改，请检查配置文件后重试。") from exc
+                    if persisted is None:
+                        self._keychain_read_failed = False
+                        self._save_notification_settings(merged)
+                    elif not isinstance(persisted, dict):
+                        raise RuntimeError("通知设置文件格式无效，尚未保存修改，请检查配置文件后重试。")
+                    elif secret_edit or any(incoming.get(f"{channel}_enabled") for channel in NOTIFICATION_CHANNELS):
+                        reloaded = self._load_keychain_backed_settings(dict(persisted))
+                        if self._keychain_pending or self._keychain_migration:
+                            self.notification_service.update_settings(reloaded)
+                            self._start_keychain_preload()
+                            raise RuntimeError("正在重新读取钥匙串，请完成授权后重新保存。")
+                        self._keychain_read_failed = False
+                        self._save_notification_settings(merged)
+                    else:
+                        persisted.update({key: merged[key] for key in incoming})
+                        atomic_write_json(self._notification_settings_path(), persisted)
+                else:
+                    self._save_notification_settings(merged)
                 self.notification_service.update_settings(merged)
                 if "sound_custom_file" in incoming:
                     self._prune_notification_sounds(merged["sound_custom_file"])
@@ -1969,7 +2007,8 @@ class RailWatchBridge:
         secrets = {field: str(settings.get(field) or "") for field in NOTIFICATION_SECRET_FIELDS}
         with self._settings_lock:
             # Commit the keychain first so a refused write leaves the file untouched.
-            if self._secret_store is not None:
+            if self._secret_store is not None and any(
+                    value != (self.notification_service.settings.get(field) or "") for field, value in secrets.items()):
                 self._write_keychain_secrets(secrets)
             self._persist_notification_file(settings)
 
@@ -2039,6 +2078,7 @@ class RailWatchBridge:
             settings = dict(self.notification_service.settings)
             for field in self._keychain_pending:
                 settings[field] = values.get(field, "")
+            self._keychain_read_failed = status in ("denied", "error")
             migrated = bool(self._keychain_migration) and status == "ready"
             if status == "ready":
                 self._keychain_written = {field: str(settings[field]) for field in NOTIFICATION_SECRET_FIELDS
@@ -2077,6 +2117,7 @@ class RailWatchBridge:
         with self._settings_lock:
             busy = bool(self._keychain_pending or self._keychain_migration)
             self._keychain_generation += 1
+            self._keychain_read_failed = False
             self._keychain_pending = frozenset()
             self._keychain_migration = {}
             self._keychain_written = None
@@ -2143,9 +2184,16 @@ class RailWatchBridge:
                     if not self._prepare_query_page(driver, config, task):
                         return
                     if config.get("auto_submit") or config.get("auto_alternate"):
-                        self._send_keep_alive()
+                        login = self._send_keep_alive()
+                        if login == "unknown" and not task.cancel.is_set():
+                            self._task_wait(task, 0.5)
+                            if not task.cancel.is_set():
+                                login = self._send_keep_alive()
                         task.last_login_check = time.monotonic()
-                        if not self.state.login_ready:
+                        if task.cancel.is_set():
+                            return
+                        if login != "ok":
+                            self.state = replace(self.state, login_ready=False)
                             self._handle_human_action({"message": "自动提交前未能确认登录有效，请在官方页面完成登录并重新检查。"})
                             return
                     if not self._check_session_for_task(task):
@@ -2365,18 +2413,19 @@ class RailWatchBridge:
                 pass
         if task.cancel.is_set():
             return True
-        if orders is None:
-            reason = {"budget": "超出检查时限", "not_official_page": "当前不是官方订单页，可能需要重新登录",
+        trains = parse_codes(config.get("train_code", ""), upper=True)
+        found = trip_conflicts(orders, config, dates, self.train_schedules.routes(trains)) if orders else []
+        if not found and (orders is None or timing.get("reason")):
+            reason = {"unfinished_unreadable": "未完成订单列表尚未核实", "budget": "超出检查时限", "not_official_page": "当前不是官方订单页，可能需要重新登录",
                       "tab_control_missing": "未找到未出行订单标签", "tab_not_active": "未出行订单标签未能切换",
                       "loading": "订单列表仍在加载"}.get(timing.get("reason"), f"读取中断（{timing.get('reason', '原因未知')}）")
             steps = "，".join(f"{label} {timing[key] / 1000:.1f} 秒" for key, label in (
                 ("navigation_ms", "打开订单页"), ("tabs_ms", "等待标签"), ("untraveled_ms", "读取未出行订单")) if key in timing)
-            self.log(f"未能读取官方未出行订单（{reason}{'；' + steps if steps else ''}），已跳过已购行程检查，任务继续；"
+            subject = "未能完整读取官方订单" if orders is not None else "未能读取官方未出行订单"
+            self.log(f"{subject}（{reason}{'；' + steps if steps else ''}），已跳过已购行程检查，任务继续；"
                      "请自行确认未重复购票。", "WARN")
             record("unreadable", **timing)
             return False
-        trains = parse_codes(config.get("train_code", ""), upper=True)
-        found = trip_conflicts(orders, config, dates, self.train_schedules.routes(trains))
         if not found:
             self.log("已检查官方未出行与未完成订单，未发现任务乘车人的同行程车票。")
             record("clear", orders=len(orders), **timing)
@@ -2440,9 +2489,9 @@ class RailWatchBridge:
                 raise
         return True
 
-    def _send_keep_alive(self) -> None:
+    def _send_keep_alive(self) -> str:
         if not self.driver:
-            return
+            return "unknown"
         started = time.monotonic()
         failure = ""
         try:
@@ -2465,6 +2514,8 @@ class RailWatchBridge:
             # Duration and exception type only, so slow links can be told apart from errors.
             self.log(f"暂时无法确认登录状态（耗时 {time.monotonic() - started:.1f} 秒"
                      f"{'，' + failure if failure else ''}），将在下次保活时重试。", "WARN")
+
+        return result
 
     def _wait_for_target_timestamp(self, wait_until: float, config: dict) -> bool:
         wall, mono = time.time(), time.monotonic()
@@ -2600,6 +2651,7 @@ class RailWatchBridge:
         if strict and error is not None:
             raise RuntimeError("浏览器清理失败") from error
         self.driver = None
+        self.emit_state(replace(self.state, login_ready=False, query_ready=False))
 
     def _terminate_profile_chrome(self) -> int:
         """停止仍占用本应用浏览器配置目录的残留 Chrome。
@@ -2840,6 +2892,7 @@ $targets.Count
             date_scan_budget_seconds=config["date_scan_budget_seconds"],
             smart_rate=config["smart_rate"],
             timer_enabled=config["timer_enabled"],
+            prefill_enabled=config.get("prefill_enabled", True),
             target_time=config["target_time"],
             sale_at=config.get("sale_at", ""),
             sale_time_source=config.get("sale_time_source", "manual"),

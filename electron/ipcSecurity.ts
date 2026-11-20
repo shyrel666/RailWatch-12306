@@ -62,6 +62,16 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+export function developmentRendererUrl(isPackaged: boolean, value?: string): string | undefined {
+  if (isPackaged || !value) return undefined;
+  try {
+    const url = new URL(value);
+    if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password
+        && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)) return url.href;
+  } catch { /* Use the bundled renderer for an invalid development URL. */ }
+  return undefined;
+}
+
 export function isTrustedRailWatchUrl(frameUrl: string, allowedRendererUrl: string): boolean {
   try {
     const frame = new URL(frameUrl);

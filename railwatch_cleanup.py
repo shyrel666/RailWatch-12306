@@ -215,35 +215,63 @@ def reset_directory(directory, initialize):
     """Switch to a fresh store before disposal; retain and report undeleted old files."""
     target = checked_data_path(directory)
     pending = []
-    manifest = target / PENDING_FILE
-    if manifest.exists():
-        try:
-            entries = json.loads(manifest.read_text(encoding="utf-8"))
-            if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
-                raise ValueError("invalid cleanup paths")
-            pending = [checked_backup_path(target, entry) for entry in entries]
-        except (OSError, ValueError) as exc:
-            raise RuntimeError("旧数据清理记录无法读取，尚未删除数据。请检查数据目录。") from exc
+    manifest = target.parent / f".{APP_SLUG}{PENDING_FILE}"
+    for record in (manifest, target / PENDING_FILE):  # Also honor the previous on-disk format.
+        if record.exists():
+            try:
+                entries = json.loads(record.read_text(encoding="utf-8"))
+                if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+                    raise ValueError("invalid cleanup paths")
+                pending.extend(checked_backup_path(target, entry) for entry in entries)
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("旧数据清理记录无法读取，尚未删除数据。请检查数据目录。") from exc
+    pending = list(dict.fromkeys(pending))
+    prior_pending = list(pending)
     preserve_electron = _has_electron_subdir(target)
     check_files_released(target)
     backup = checked_backup_path(target, target.parent / f".{APP_SLUG}-clearing-{uuid.uuid4().hex}")
+    pending.append(backup)
+
+    def sync_manifest(paths):
+        try:
+            if paths:
+                atomic_write_json(str(manifest), [str(path) for path in paths])
+            else:
+                manifest.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    try:
+        atomic_write_json(str(manifest), [str(path) for path in pending])
+        if os.name == "posix":
+            parent_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+    except OSError as exc:
+        raise RuntimeError("无法保存清理记录，尚未删除数据。请检查磁盘空间与目录权限。") from exc
     moved_names = []
     moved = False
     if preserve_electron:
-        moved_names = _move_siblings_to_backup(target, backup)
+        try:
+            moved_names = _move_siblings_to_backup(target, backup)
+        except Exception:
+            if not backup.exists():
+                sync_manifest(prior_pending)
+            raise
         if moved_names:
             moved = True
-            pending.append(backup)
     elif target.exists():
         try:
             os.replace(target, backup)
         except OSError as exc:
+            if not backup.exists():
+                sync_manifest(prior_pending)
             raise RuntimeError("数据目录仍被占用或无修改权限，尚未删除数据。请退出其他实例后重试。") from exc
         moved = True
-        pending.append(backup)
     try:
         target.mkdir(exist_ok=True)
-        atomic_write_json(str(target / PENDING_FILE), [str(path) for path in pending])
         initialized = initialize()
     except Exception as exc:
         try:
@@ -256,6 +284,8 @@ def reset_directory(directory, initialize):
                     os.replace(backup, target)
         except Exception as rollback:
             raise RuntimeError(f"初始化失败且无法恢复目录；旧数据保留在 {backup}，请先恢复后再使用。") from rollback
+        if not backup.exists():
+            sync_manifest(prior_pending)
         raise RuntimeError("新数据目录初始化失败，已恢复原数据，请检查磁盘空间与目录权限。") from exc
     remaining = []
     for path in pending:
@@ -270,11 +300,7 @@ def reset_directory(directory, initialize):
                     remaining.append(str(path))
                 else:
                     time.sleep(0.15)
-    # Keep the pre-written recovery manifest until every old directory is gone.
+    # Keep the recovery manifest updated until every old directory is gone.
     # A later clear will retry it, including after a crash during disposal.
-    if not remaining:
-        try:
-            (target / PENDING_FILE).unlink(missing_ok=True)
-        except OSError:
-            pass
+    sync_manifest(remaining)
     return initialized, remaining

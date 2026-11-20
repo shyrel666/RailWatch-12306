@@ -37,6 +37,27 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue((outside / "important.txt").exists())
         self.assertEqual((self.target / "config.json").read_text(), "original")
 
+    def test_interrupted_move_is_discoverable_before_initialization(self):
+        for preserve_electron in (False, True):
+            with self.subTest(preserve_electron=preserve_electron):
+                if preserve_electron:
+                    (self.target / "electron").mkdir()
+                (self.target / "profile").write_text("old session")
+                rename = os.replace
+                def interrupt_after_move(source, destination):
+                    rename(source, destination)
+                    if Path(source) in (self.target, self.target / "profile"):
+                        raise SystemExit()
+                with patch("railwatch_cleanup.os.replace", side_effect=interrupt_after_move), self.assertRaises(SystemExit):
+                    reset_directory(self.target, lambda: self.fail("initialization must not start"))
+                manifest = self.target.parent / f".{APP_SLUG}{PENDING_FILE}"
+                backup = Path(json.loads(manifest.read_text())[0])
+                self.assertEqual((backup / "profile").read_text(), "old session")
+                _, remaining = reset_directory(self.target, lambda: None)
+                self.assertEqual(remaining, [])
+                self.assertFalse(backup.exists())
+                self.assertFalse(manifest.exists())
+
     def test_success_resets_only_the_selected_directory(self):
         outside = Path(self.temp.name, "keep.txt")
         outside.write_text("keep")
@@ -59,23 +80,40 @@ class CleanupTests(unittest.TestCase):
             reset_directory(self.target, fail)
         self.assertEqual((self.target / "config.json").read_text(), "original")
         self.assertFalse((self.target / "partial.db").exists())
+        self.assertFalse((self.target.parent / f".{APP_SLUG}{PENDING_FILE}").exists())
 
     def test_rename_failure_does_not_delete_anything(self):
         with patch("railwatch_cleanup.os.replace", side_effect=PermissionError("locked")):
             with self.assertRaisesRegex(RuntimeError, "尚未删除数据"):
                 reset_directory(self.target, lambda: None)
         self.assertEqual((self.target / "config.json").read_text(), "original")
+        self.assertFalse((self.target.parent / f".{APP_SLUG}{PENDING_FILE}").exists())
 
     def test_incomplete_disposal_is_reported_and_retried(self):
+        manifest = self.target.parent / f".{APP_SLUG}{PENDING_FILE}"
         with patch("railwatch_cleanup._remove_tree", side_effect=PermissionError("locked")), patch("railwatch_cleanup.time.sleep"):
             _, remaining = reset_directory(self.target, lambda: "new")
         self.assertEqual(len(remaining), 1)
         self.assertEqual((Path(remaining[0]) / "config.json").read_text(), "original")
-        self.assertTrue((self.target / PENDING_FILE).exists())
+        self.assertTrue(manifest.exists())
+        # A retry that deletes the first backup while the second stays locked prunes the deleted one.
+        import railwatch_cleanup
+        real_remove = railwatch_cleanup._remove_tree
+        def remove_only_first(path):
+            if str(path) == remaining[0]:
+                real_remove(path)
+            else:
+                raise PermissionError("locked")
+        with patch("railwatch_cleanup._remove_tree", side_effect=remove_only_first), patch("railwatch_cleanup.time.sleep"):
+            _, partial = reset_directory(self.target, lambda: "new")
+        self.assertEqual(len(partial), 1)
+        self.assertNotEqual(partial[0], remaining[0])
+        self.assertFalse(Path(remaining[0]).exists())
+        self.assertEqual(json.loads(manifest.read_text(encoding="utf-8")), partial)
         _, remaining_after_retry = reset_directory(self.target, lambda: "new")
         self.assertEqual(remaining_after_retry, [])
-        self.assertFalse(Path(remaining[0]).exists())
-        self.assertFalse((self.target / PENDING_FILE).exists())
+        self.assertFalse(Path(partial[0]).exists())
+        self.assertFalse(manifest.exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows sharing modes")
     def test_locked_file_prevents_reset_without_partial_deletion(self):

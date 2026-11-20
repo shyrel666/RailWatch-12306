@@ -3,7 +3,7 @@ import yaml from "js-yaml";
 import { describe, expect, test } from "vitest";
 
 type Step = { name?: string; run?: string; uses?: string; with?: Record<string, unknown>; env?: Record<string, string>; if?: string };
-type Job = { if?: string; needs?: string[]; "runs-on": string; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { include: Record<string, string>[] } }; env?: Record<string, string> };
+type Job = { permissions?: Record<string, string>; if?: string; needs?: string[]; "runs-on": string; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { include: Record<string, string>[] } }; env?: Record<string, string> };
 type Workflow = {
   on: { push: { tags: string[] }; workflow_dispatch: { inputs: { platforms: { options: string[]; default: string } } } };
   permissions: Record<string, string>;
@@ -22,7 +22,10 @@ describe("package-release workflow", () => {
     expect(workflow.on.push.tags).toEqual(["v*"]);
     expect(workflow.on.workflow_dispatch.inputs.platforms.options).toEqual(["all", "windows", "macos"]);
     expect(workflow.on.workflow_dispatch.inputs.platforms.default).toBe("all");
-    expect(workflow.permissions.contents).toBe("write");
+    expect(workflow.permissions.contents).toBe("read");
+    expect(windows.permissions?.contents ?? workflow.permissions.contents).toBe("read");
+    expect(macos.permissions?.contents ?? workflow.permissions.contents).toBe("read");
+    expect(publish.permissions?.contents).toBe("write");
     expect(workflow.concurrency).toEqual({ group: "package-release-${{ github.ref }}", "cancel-in-progress": false });
     for (const job of [windows, macos, publish]) expect(runs(job)).toContain("node scripts/check-release-tag.mjs");
   });

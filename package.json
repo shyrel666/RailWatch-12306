@@ -1,6 +1,6 @@
 {
   "name": "railwatch-12306-electron",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "license": "MIT",
   "author": "RailWatch 12306 contributors",
@@ -38,7 +38,6 @@
     "lucide-react": "^0.561.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
-    "zod": "^4.2.0",
     "zustand": "^5.0.9"
   },
   "devDependencies": {

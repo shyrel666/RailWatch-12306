@@ -8,7 +8,7 @@ describe("local Windows packaging script", () => {
     expect(script).toContain("set \"PACKAGE_VERSION=%~1\"");
     expect(script).toContain("set \"INSTALL_DEPS=%~2\"");
     expect(script).toContain("set /p PACKAGE_VERSION=");
-    expect(script).toContain("npm version \"%PACKAGE_VERSION%\" --no-git-tag-version");
+    expect(script).toContain("npm version \"%PACKAGE_VERSION%\" --no-git-tag-version --allow-same-version");
     expect(script).toContain("if /i \"%INSTALL_DEPS%\"==\"--install-deps\"");
     expect(script).toContain("if exist \"node_modules\\.package-lock.json\"");
     expect(script).toContain("Skipping Node dependencies");

@@ -15,8 +15,8 @@ import re
 import time
 
 from railwatch_config_contract import parse_codes, parse_passenger_names
-from railwatch_order_page import form_token, normalized_date, train_token
-from railwatch_task import TaskCancelled, browser_tab_lifecycle
+from railwatch_order_page import normalized_date, stations_in_order, train_token
+from railwatch_task import TaskCancelled, browser_tab_lifecycle, is_session_lost
 
 ORDER_URL = "https://kyfw.12306.cn/otn/view/train_order.html"
 UNFINISHED_TAB, UNTRAVELED_TAB = "未完成订单", "未出行订单"
@@ -29,12 +29,6 @@ const text = e => (e?.innerText || '').replace(/\s+/g, ' ').trim();
 return {active: [...document.querySelectorAll('.panel-tab .tab-hd-list li.active')].map(text),
         loading: [...document.querySelectorAll('.loading,.loading-box,#J-loading')].filter(visible).length};
 """
-
-
-def _route_in(text, route):
-    start, end = route
-    return (form_token(text, start, "站") and form_token(text, end, "站")
-            and text.index(start) < text.index(end))
 
 
 def trip_conflicts(orders, config, dates, known_routes=()):
@@ -65,7 +59,7 @@ def trip_conflicts(orders, config, dates, known_routes=()):
             continue
         codes = {str(code).upper() for code in record.get("train_codes", [])}
         train = next((code for code in trains if code in codes or train_token(text, code)), "")
-        route = next((route for route in routes if _route_in(text, route)), None)
+        route = next((route for route in routes if stations_in_order(text, *route)), None)
         if not train and route is None:
             continue
         trip = {"train": train or (next(iter(codes)) if len(codes) == 1 else ""), "date": next(iter(travel)),
@@ -81,20 +75,11 @@ def describe_trip(trip):
 
 
 def read_existing_orders(page, *, url=ORDER_URL, budget=10.0, settle=3.0, timing=None):
-    """Identified records on the untraveled and unfinished tabs, or None when they cannot be read.
+    """Return all identified records seen, or None if nothing could be read.
 
-    Runs in a temporary tab and restores the original one. The official order
-    page alone took about five to eight seconds to load in the live runs of
-    2026-11-08 and 2026-11-10, so the paid tickets on the untraveled tab are read
-    first and are what the result depends on. The unfinished tab is only sampled
-    as it stands on arrival: after a refused purchase it shows a failure panel
-    with neither an order nor the official "none" statement, and waiting there
-    used up the whole budget of the first live check.
-
-    ``settle`` bounds the wait for the untraveled list. An empty untraveled tab
-    shows no statement at all, so only its being active, idle and still empty
-    after that wait means "none". ``timing`` receives how long each part took
-    and, for None, why; numbers and fixed words only.
+    Sample the unfinished tab on arrival, then spend the remaining budget on
+    the untraveled list. Preserve positive evidence from either tab even when
+    the other is unreadable. timing records an incomplete check and its cause.
     """
     driver = page.driver
     timing = {} if timing is None else timing
@@ -111,23 +96,27 @@ def read_existing_orders(page, *, url=ORDER_URL, budget=10.0, settle=3.0, timing
     def identified(snap):
         return [record for record in snap.get("orders", []) if record.get("order_id")]
 
+    unfinished = {}
+
     def open_untraveled():
         """The untraveled tab control, with the unfinished orders visible while waiting for it."""
         until = min(deadline, time.monotonic() + settle)
-        unfinished = []
         while not page.stop():
             snap = page.snapshot()
             if not snap:
-                return unreadable("not_official_page"), unfinished  # Login redirect or error page.
+                return unreadable("not_official_page")  # Login redirect or error page.
             state = driver.execute_script(TAB_STATE_JS)
-            if isinstance(state, dict) and state.get("active") == [UNFINISHED_TAB]:
-                unfinished = identified(snap)
+            active = isinstance(state, dict) and state.get("active") == [UNFINISHED_TAB]
+            if active:
+                unfinished.update((order["order_id"], order) for order in identified(snap))
             tab = page._recovery_tab(UNTRAVELED_TAB, url)
             if tab is not None:
-                return tab, unfinished
+                if not active or state.get("loading") or not (unfinished or snap.get("pendingEmpty")):
+                    timing["reason"] = "unfinished_unreadable"
+                return tab
             left = until - time.monotonic()
             if left <= 0:
-                return unreadable("budget" if until >= deadline else "tab_control_missing"), unfinished
+                return unreadable("budget" if until >= deadline else "tab_control_missing")
             page.wait(min(page.poll_interval, left))
         raise TaskCancelled()
 
@@ -178,15 +167,25 @@ def read_existing_orders(page, *, url=ORDER_URL, budget=10.0, settle=3.0, timing
         finally:
             timing["navigation_ms"] = spent(started)
         opened = time.monotonic()
-        tab, unfinished = open_untraveled()
-        timing["tabs_ms"] = spent(opened)
-        if tab is None:
-            return None
-        tab.click()
-        clicked = time.monotonic()
-        untraveled = untraveled_records()
-        timing["untraveled_ms"] = spent(clicked)
-        return None if untraveled is None else unfinished + untraveled
+        try:
+            tab = open_untraveled()
+            timing["tabs_ms"] = spent(opened)
+            if tab is None:
+                return list(unfinished.values()) or None
+            tab.click()
+            clicked = time.monotonic()
+            untraveled = untraveled_records()
+            timing["untraveled_ms"] = spent(clicked)
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            if not unfinished or is_session_lost(exc):
+                raise
+            timing["reason"] = type(exc).__name__
+            return list(unfinished.values())
+        if untraveled is None:
+            return list(unfinished.values()) or None
+        return list(unfinished.values()) + untraveled
     finally:
         with browser_tab_lifecycle(driver):
             try:

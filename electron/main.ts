@@ -23,6 +23,7 @@ import {
 import { pathToFileURL } from "node:url";
 import {
   consumeExportPathGrant,
+  developmentRendererUrl,
   getCommandConfirmation,
   isAllowedExternalUrl,
   isExportPathAllowed,
@@ -404,7 +405,7 @@ function isRunningUnderRosetta(): boolean {
 function initializeAutoUpdater(): void {
   const enabled = shouldEnableAutoUpdate({
     isPackaged: app.isPackaged,
-    devServerUrl: process.env.VITE_DEV_SERVER_URL,
+    devServerUrl: developmentRendererUrl(app.isPackaged, process.env.VITE_DEV_SERVER_URL),
   });
 
   // Squirrel.Mac rejects updates for unsigned builds, so macOS only checks and
@@ -518,7 +519,7 @@ function createWindow(): void {
     confirmationReady = false;
   });
 
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  const devServerUrl = developmentRendererUrl(app.isPackaged, process.env.VITE_DEV_SERVER_URL);
   allowedRendererUrl = devServerUrl || pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).toString();
   const window = mainWindow;
   const notifyWindowShown = () => {
@@ -737,12 +738,16 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
         ? mainWindow.webContents.session
         : session?.defaultSession;
     const updaterCacheDir = userDataConfigured ? resolveUpdaterCacheDir({ homeDir }) : undefined;
-    await clearElectronLocalData({
+    const failed = await clearElectronLocalData({
       userDataDir,
       updaterCacheDir,
       clearUpdaterCache: Boolean(updaterCacheDir),
       session: activeSession,
     });
+    if (failed.length) {
+      result.cleanup_pending = true;
+      result.warning = [result.warning, `未能清除${failed.join("、")}，请重试清理。`].filter(Boolean).join("\n");
+    }
     // A downloaded installer lived in that cache.
     if (updaterCacheDir) updateManager?.discardDownload();
     try { applyRuntimePreferences(await pythonRuntime.request("loadPreferences")); } catch { /* Reload retries preferences. */ }

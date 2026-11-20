@@ -270,6 +270,39 @@ class KeychainBridgeTests(unittest.TestCase):
                 self.assertFalse(bridge.load_preferences()["notification_settings"]["email_password_configured"])
                 self.assertEqual(self.read_settings()["email_password"], "keychain:email_password")
 
+    def test_denied_read_preserves_secrets_and_retries_on_an_explicit_edit(self, _):
+        self.write_settings({"email_password": "keychain:email_password", "email_enabled": True})
+        store = FakeStore({"email_password": "original"}, read_error=KeyringLocked("denied"))
+        bridge, finished, _ = self.bridge(store)
+        self.assertTrue(finished.wait(5))
+        bridge.save_preferences(notification_settings={"sound_loop": False})
+        self.assertEqual(store.calls, ["read_all"])
+        self.assertEqual(self.read_settings()["email_password"], "keychain:email_password")
+        self.assertTrue(self.read_settings()["email_enabled"])
+        self.assertFalse(self.read_settings()["sound_loop"])
+        store.read_error = None
+        finished.clear()
+        with self.assertRaisesRegex(RuntimeError, "重新读取"):
+            bridge.save_preferences(notification_settings={"server_chan_key": "new"})
+        self.assertTrue(finished.wait(5))
+        bridge.save_preferences(notification_settings={"server_chan_key": "new"})
+        self.assertEqual(store.values, {"email_password": "original", "server_chan_key": "new"})
+
+    def test_denied_read_handles_corrupt_or_markerless_settings_file(self, _):
+        self.write_settings({"email_password": "keychain:email_password", "email_enabled": True})
+        store = FakeStore({"email_password": "original"}, read_error=KeyringLocked("denied"))
+        bridge, finished, _ = self.bridge(store)
+        self.assertTrue(finished.wait(5))
+        with open(bridge._notification_settings_path(), "w", encoding="utf-8") as handle:
+            handle.write("[]")
+        with self.assertRaisesRegex(RuntimeError, "格式无效"):
+            bridge.save_preferences(notification_settings={"sound_loop": False})
+        self.assertEqual(store.calls, ["read_all"])
+        self.write_settings({"sound_loop": True})
+        bridge.save_preferences(notification_settings={"server_chan_key": "new"})
+        self.assertEqual(store.values, {"server_chan_key": "new"})
+        self.assertEqual(self.read_settings()["server_chan_key"], "keychain:server_chan_key")
+
     def test_legacy_plaintext_is_migrated_in_the_background(self, _):
         self.write_settings({"server_chan_enabled": True, "server_chan_key": "plain-key"})
         store = FakeStore()
