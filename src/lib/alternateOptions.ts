@@ -1,4 +1,5 @@
 import type { RailWatchConfig } from "../types";
+import { expandTripDates } from "./tripDate";
 
 export const DEFAULT_ALTERNATE_DEADLINE = "开车前1小时";
 
@@ -14,11 +15,8 @@ export function canonicalDeadline(value: string): string {
     ? `开车前${minutes / 60}小时` : `开车前${minutes}分钟`;
 }
 
-export function alternateDates(config: Pick<RailWatchConfig, "date" | "date_range">): string[] {
-  const day = Date.parse(`${config.date}T00:00:00Z`);
-  if (!Number.isFinite(day) || new Date(day).toISOString().slice(0, 10) !== config.date) return [];
-  const radius = config.date_range === "±2天" ? 2 : config.date_range === "±1天" ? 1 : 0;
-  return Array.from({ length: 2 * radius + 1 }, (_, i) => new Date(day + (i - radius) * 86400000).toISOString().slice(0, 10));
+export function alternateDates(config: Pick<RailWatchConfig, "date" | "date_range" | "custom_dates">): string[] {
+  return expandTripDates(config.date, config.date_range, config.custom_dates);
 }
 
 export function alternateConfigIssue(config: RailWatchConfig): string | null {

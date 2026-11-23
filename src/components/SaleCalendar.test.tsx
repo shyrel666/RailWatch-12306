@@ -20,6 +20,7 @@ describe("SaleCalendar", () => {
     const { rerender } = render(<SaleCalendar {...props} />);
     await screen.findByText("10:00");
     expect(screen.getByText("00:00:01")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /设为行程/ })).toBeNull();
     rerender(<SaleCalendar {...props} now={now + 1000} />);
     expect(screen.queryByText("00:00:01")).toBeNull();
     expect(screen.getByRole("button", { name: "2026-10-11 已到起售时间 当前行程" })).toBeTruthy();
@@ -28,6 +29,38 @@ describe("SaleCalendar", () => {
     expect(vi.mocked(railwatchApi.command).mock.calls.map(call => call[0])).toEqual(["stationSaleTimes"]);
     fireEvent.click(screen.getByRole("button", { name: "返回行程日期" }));
     expect(screen.getByText("乘车日期 · 2026-10-11 · 当前行程")).toBeTruthy();
+  });
+  test("applies a preview only on explicit action and includes the official future sale time", async () => {
+    const onApplyDate = vi.fn();
+    render(<SaleCalendar {...props} onApplyDate={onApplyDate} />);
+    await screen.findByText("10:00");
+    fireEvent.click(screen.getByRole("button", { name: "2026-10-12 未进入预售期" }));
+    expect(onApplyDate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "设为行程并定时" }));
+    expect(onApplyDate).toHaveBeenCalledExactlyOnceWith({
+      date: "2026-10-12", saleAt: "2026-09-28T10:00:00+08:00", targetTime: "10:00:00", checkedAt: info().checked_at,
+    });
+    expect(vi.mocked(railwatchApi.command).mock.calls.map(call => call[0])).toEqual(["stationSaleTimes"]);
+  });
+  test("applies only the date when the sale has started or no official time is known", async () => {
+    const onApplyDate = vi.fn();
+    const { rerender } = render(<SaleCalendar {...props} now={now + 1000} onApplyDate={onApplyDate} />);
+    await screen.findByText("10:00");
+    fireEvent.click(screen.getByRole("button", { name: "设为行程日期" }));
+    expect(onApplyDate).toHaveBeenLastCalledWith({ date: props.tripDate });
+
+    rerender(<SaleCalendar {...props} station="" onApplyDate={onApplyDate} />);
+    fireEvent.click(screen.getByRole("button", { name: "设为行程日期" }));
+    expect(onApplyDate).toHaveBeenLastCalledWith({ date: props.tripDate });
+    expect(onApplyDate).toHaveBeenCalledTimes(2);
+  });
+  test("an expired trip offers no action until a valid date is previewed", () => {
+    const onApplyDate = vi.fn();
+    render(<SaleCalendar {...props} station="" tripDate="2026-09-26" onApplyDate={onApplyDate} />);
+    expect(screen.queryByRole("button", { name: /设为行程/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "2026-09-27 预售期内" }));
+    expect(screen.getByRole("button", { name: "设为行程日期" })).toBeTruthy();
+    expect(onApplyDate).not.toHaveBeenCalled();
   });
   test("discards an old station response even when it finishes last", async () => {
     let resolveOld!: (value: StationSaleTimes) => void;
@@ -42,12 +75,29 @@ describe("SaleCalendar", () => {
   });
   test("expired information stops providing a countdown", async () => {
     vi.mocked(railwatchApi.command).mockResolvedValue({ ...info(), expires_at: now / 1000 + 0.5 });
-    const { rerender } = render(<SaleCalendar {...props} />);
+    const onApplyDate = vi.fn();
+    const { rerender } = render(<SaleCalendar {...props} onApplyDate={onApplyDate} />);
     await screen.findByText("10:00");
-    rerender(<SaleCalendar {...props} now={now + 600} />);
+    rerender(<SaleCalendar {...props} now={now + 600} onApplyDate={onApplyDate} />);
     expect(screen.queryByText("10:00")).toBeNull();
     expect(screen.queryByText("00:00:01")).toBeNull();
     expect(screen.getByText("起售数据已过期，请刷新后核对。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "设为行程并定时" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "设为行程日期" }));
+    expect(onApplyDate).toHaveBeenCalledExactlyOnceWith({ date: props.tripDate });
+  });
+  test("a failed refresh prevents applying a timer from the previous cached result", async () => {
+    vi.mocked(railwatchApi.command).mockResolvedValueOnce(info()).mockRejectedValueOnce(new Error("offline"));
+    const onApplyDate = vi.fn();
+    render(<SaleCalendar {...props} onApplyDate={onApplyDate} />);
+    await screen.findByRole("button", { name: "设为行程并定时" });
+    const refresh = screen.getByRole("button", { name: "刷新起售时间" });
+    await waitFor(() => expect(refresh.classList.contains("ant-btn-loading")).toBe(false));
+    fireEvent.click(refresh);
+    await screen.findByText("起售时间暂不可用，请稍后刷新或前往官方核对。");
+    expect(screen.queryByRole("button", { name: "设为行程并定时" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "设为行程日期" }));
+    expect(onApplyDate).toHaveBeenCalledExactlyOnceWith({ date: props.tripDate });
   });
   test("preserves an out-of-window trip and refreshes without editing it", async () => {
     render(<SaleCalendar {...props} tripDate="2026-12-31" />);

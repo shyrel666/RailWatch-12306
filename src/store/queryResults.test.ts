@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { createRailWatchStore, defaultStatus } from "./railwatchStore";
 import { queryConfig, querySnapshot, queryTime } from "../test/queryFixtures";
 import type { QuerySnapshot } from "../types";
-import { missingTargetsNotice, queryFreshness, renumberTimetable, replaceTrainCode } from "../lib/queryResults";
+import { missingTargetsNotice, queryFamily, queryFreshness, renumberTimetable, replaceTrainCode } from "../lib/queryResults";
 
 function monitorStore() {
   const store = createRailWatchStore();
@@ -91,6 +91,34 @@ describe("structured query ownership and per-date retention", () => {
     expect(store.getState().manualQueryError).toContain("本次查询结果已作废");
   });
 
+  test("custom dates accept only selected results and edits invalidate their query family", () => {
+    const store = createRailWatchStore();
+    const config = { ...queryConfig, date_range: "自定义", custom_dates: ["2026-09-25", queryConfig.date] };
+    store.getState().setConfig(config);
+    store.getState().beginManualQuery("one", config);
+    const primary = querySnapshot({ run_id: null });
+    const forDate = (date: string) => ({ ...primary, conditions: { ...primary.conditions, date },
+      rows: primary.rows.map(row => ({ ...row, date })) });
+    store.getState().applyResults({ request_id: "one", snapshots: [forDate("2026-09-25"), forDate("2026-09-23")], rows: [] });
+    expect(store.getState().results.map(row => row.date)).toEqual(["2026-09-25"]);
+    store.getState().setConfig({ custom_dates: [queryConfig.date, "2026-09-25"] });
+    expect(store.getState().queryViews).toEqual({});
+    expect(store.getState().manualQueryId).toBeNull();
+    expect(queryFamily({ ...config, custom_dates: [] })).toBe(queryFamily({ ...config, custom_dates: [config.date] }));
+    expect(queryFamily(queryConfig)).toBe(queryFamily({ ...queryConfig, custom_dates: config.custom_dates }));
+  });
+
+  test("editing the primary custom date retains the other dates and their order", () => {
+    const store = createRailWatchStore();
+    const config = { ...queryConfig, date_range: "自定义",
+      custom_dates: ["2026-09-23", queryConfig.date, "2026-09-25", "2026-09-27", "2026-09-29"] };
+    store.getState().setConfig(config);
+    store.getState().setConfig({ date: "2026-09-30" });
+    expect(store.getState().config.custom_dates).toEqual(["2026-09-23", "2026-09-30", "2026-09-25", "2026-09-27", "2026-09-29"]);
+    store.getState().setConfig({ date: "2026-09-25" });
+    expect(store.getState().config.custom_dates).toEqual(["2026-09-23", "2026-09-25", "2026-09-27", "2026-09-29"]);
+  });
+
   test("stopped tasks reject late results and query-start events", () => {
     const store = monitorStore();
     const snapshot = querySnapshot();
@@ -140,6 +168,15 @@ test("freshness accounts for query timeout, multi-date cycles, backoff and stopp
   expect(queryFreshness(view, { ...active, monitoring: false }, queryConfig, queryTime + 2)).toContain("当前未监控");
   expect(queryFreshness(view, { ...active, task: { status: "stopping" } }, queryConfig, queryTime + 2)).toContain("已暂停");
   expect(queryFreshness({ ...view, latest: { ...snap, status: "error", error: "限频" } }, active, queryConfig, queryTime)).toContain("本轮查询失败");
+});
+
+test("freshness counts unique custom dates including the primary date", () => {
+  const snap = querySnapshot();
+  const view = { owner: "run", latest: snap, success: snap };
+  const active = { ...defaultStatus, monitoring: true, task: { status: "querying" } };
+  const config = { ...queryConfig, date_range: "自定义", custom_dates: ["2026-09-25", "2026-09-25", "2026-09-29"] };
+  expect(queryFreshness(view, active, config, queryTime + 29)).toContain("查询中");
+  expect(queryFreshness(view, active, config, queryTime + 30)).toContain("已过期");
 });
 
 describe("target trains missing from complete results", () => {

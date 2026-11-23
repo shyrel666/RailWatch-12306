@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 // Fallback for older runtimes; the active policy is supplied by Python.
 export const PRESALE_WINDOW_DAYS = 15;
+export const MAX_CUSTOM_DATES = 5;
 const DAY = 86_400_000;
 export type TripDateStatus = { daysFromToday: number | null; expired: boolean; beyondPresale: boolean; warning: string | null };
 
@@ -10,7 +11,7 @@ export function todayIso(today: Date = new Date()): string {
 }
 
 function dayNumber(value: string): number | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000-")) return null;
   const timestamp = Date.parse(`${value}T00:00:00Z`);
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value ? timestamp / DAY : null;
 }
@@ -30,17 +31,31 @@ export function isoDaysFromToday(offsetDays: number, today = new Date()): string
   return new Date((dayNumber(todayIso(today))! + offsetDays) * DAY).toISOString().slice(0, 10);
 }
 
-export function getDateRangeStatus(date: string, range: string, today = new Date(), windowDays = PRESALE_WINDOW_DAYS) {
+export function orderedCustomDates(date: string, customDates: string[] = []): string[] {
+  const dates = date && !customDates.includes(date) ? [date, ...customDates] : customDates;
+  return [...new Set(dates)].slice(0, MAX_CUSTOM_DATES);
+}
+
+export function expandTripDates(date: string, range: string, customDates?: string[]): string[] {
   const base = dayNumber(date);
-  const valid: string[] = [], skipped: string[] = [];
-  if (base === null) return { valid, skipped, invalid: true };
+  if (base === null) return [];
+  if (range === "自定义") {
+    if (customDates?.some(value => dayNumber(value) === null)) return [];
+    return orderedCustomDates(date, customDates);
+  }
   const radius = range === "±2天" ? 2 : range === "±1天" ? 1 : 0;
-  for (let offset = -radius; offset <= radius; offset++) {
-    const value = new Date((base + offset) * DAY).toISOString().slice(0, 10);
+  return Array.from({ length: 2 * radius + 1 }, (_, i) => new Date((base + i - radius) * DAY).toISOString().slice(0, 10));
+}
+
+export function getDateRangeStatus(date: string, range: string, today = new Date(), windowDays = PRESALE_WINDOW_DAYS,
+  customDates?: string[]) {
+  const dates = expandTripDates(date, range, customDates);
+  const valid: string[] = [], skipped: string[] = [];
+  for (const value of dates) {
     const status = getTripDateStatus(value, today, windowDays);
     (status.expired || status.beyondPresale ? skipped : valid).push(value);
   }
-  return { valid, skipped, invalid: false };
+  return { valid, skipped, invalid: dates.length === 0 };
 }
 
 export function useBeijingToday() {

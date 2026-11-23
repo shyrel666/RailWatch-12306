@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { railwatchApi } from "../lib/railwatchApi";
@@ -188,6 +188,37 @@ describe("SettingsPage", () => {
     await userEvent.click(toggle);
     await waitFor(() => expect(command).toHaveBeenCalledWith("savePreferences", { close_to_tray: true }));
     expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  test("defaults to 30 minutes and saves only the selected sale reminder lead time", async () => {
+    const command = vi.spyOn(railwatchApi, "command").mockImplementation(async (_name, payload = {}) => ({
+      theme: "light", close_to_tray: false, notification_settings: {},
+      sale_reminder_lead_minutes: payload.sale_reminder_lead_minutes,
+    }) as never);
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const select = screen.getByRole<HTMLSelectElement>("combobox", { name: "起售提醒提前时间" });
+    await waitFor(() => expect(select.disabled).toBe(false));
+    expect(select.value).toBe("30");
+    expect(within(select).getAllByRole("option").map(option => option.textContent)).toEqual([
+      "10 分钟", "15 分钟", "30 分钟", "60 分钟",
+    ]);
+    await userEvent.selectOptions(select, "60");
+    expect(command).toHaveBeenCalledWith("savePreferences", { sale_reminder_lead_minutes: 60 });
+    await waitFor(() => expect(select.value).toBe("60"));
+  });
+
+  test("shows the saved sale reminder lead time and preserves it after a failed save", async () => {
+    vi.spyOn(railwatchApi, "command").mockImplementation(async name => {
+      if (name === "savePreferences") throw new Error("save failed");
+      return { theme: "light", close_to_tray: false, notification_settings: {}, sale_reminder_lead_minutes: 75 } as never;
+    });
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const select = screen.getByRole<HTMLSelectElement>("combobox", { name: "起售提醒提前时间" });
+    await waitFor(() => expect(select.disabled).toBe(false));
+    expect(select.value).toBe("75");
+    await userEvent.selectOptions(select, "15");
+    expect((await screen.findByText("起售提醒提前时间未保存，请重试。")).getAttribute("role")).toBe("alert");
+    expect(select.value).toBe("75");
   });
 
   test("idle login keeping follows the saved preference and a save round-trips", async () => {

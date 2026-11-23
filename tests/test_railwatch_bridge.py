@@ -517,6 +517,158 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 bridge._wait_for_target_timestamp(1080, {"keep_alive":True})
             self.assertEqual(bridge.driver.execute_async_script.call_count, 1)
 
+    def test_auto_stop_before_scheduled_sale_waits_only_until_deadline_without_browser(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_time import MONITOR_AUTO_STOP_MESSAGE, MONITOR_AUTO_STOP_TITLE
+
+        events = []
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
+        bridge.is_monitoring = True
+        bridge._ensure_driver = Mock()
+        bridge._send_keep_alive = Mock()
+        auto_stop = dt.datetime.fromisoformat("2026-06-10T08:00:00+08:00")
+        bridge._task.cancel.wait = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        clock = [auto_stop.timestamp() - 1]
+        config = {"timer_enabled": True, "sale_at": "2026-06-10T08:30:00+08:00",
+                  "auto_stop_at": auto_stop.isoformat(), "auto_submit": True, "keep_alive": True}
+        with patch("railwatch_bridge.time.time", lambda: clock[0]), patch("railwatch_bridge.time.monotonic", lambda: clock[0]):
+            bridge._monitor_worker(config)
+        self.assertEqual(clock[0], auto_stop.timestamp())
+        bridge._ensure_driver.assert_not_called()
+        bridge._send_keep_alive.assert_not_called()
+        self.assertEqual([entry["message"] for entry in bridge.log_entries].count(MONITOR_AUTO_STOP_MESSAGE), 1)
+        notices = [event["payload"] for event in events if event["event"] == "notify"]
+        self.assertEqual([(note["title"], note["message"], note["priority"]) for note in notices],
+                         [(MONITOR_AUTO_STOP_TITLE, MONITOR_AUTO_STOP_MESSAGE, "notice")])
+
+    def test_auto_stop_at_sale_waits_for_wall_time_when_monotonic_is_ahead(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_time import MONITOR_AUTO_STOP_MESSAGE, MONITOR_AUTO_STOP_TITLE
+
+        events = []
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
+        bridge.is_monitoring = True
+        task = bridge._task
+        scheduled = dt.datetime.fromisoformat("2026-06-10T08:00:00+08:00")
+        wall = scheduled.timestamp() - 0.015625
+        monotonic = 100.0
+        wait_calls = []
+
+        def wait(seconds):
+            nonlocal wall, monotonic
+            if not wait_calls:
+                # The monotonic projection reaches the deadline while the wall clock still lags.
+                wall += seconds - 0.00390625
+                monotonic += seconds + 0.00390625
+            else:
+                wall += seconds
+                monotonic += seconds
+            wait_calls.append(seconds)
+
+        task.cancel.wait = wait
+        with patch("railwatch_bridge.time.time", lambda: wall), patch("railwatch_bridge.time.monotonic", lambda: monotonic), \
+                patch.object(bridge, "_ensure_driver") as ensure, \
+                patch.object(bridge.order_journal, "record_telemetry") as telemetry:
+            bridge._monitor_worker({"timer_enabled": True, "sale_at": scheduled.isoformat(),
+                                    "auto_stop_at": scheduled.isoformat()})
+
+        self.assertEqual(wall, scheduled.timestamp())
+        self.assertEqual(len(wait_calls), 2)
+        ensure.assert_not_called()
+        telemetry.assert_not_called()
+        self.assertEqual([entry["message"] for entry in bridge.log_entries].count(MONITOR_AUTO_STOP_MESSAGE), 1)
+        self.assertEqual([(event["payload"]["title"], event["payload"]["priority"])
+                          for event in events if event["event"] == "notify"], [(MONITOR_AUTO_STOP_TITLE, "notice")])
+
+    def test_monitor_startup_at_0200_delays_browser_and_automation_checks_until_0500(self):
+        from railwatch_bridge import RailWatchBridge
+
+        events = []
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
+        bridge.is_monitoring = True
+        task = bridge._task
+        start = dt.datetime.fromisoformat("2026-06-10T02:00:00+08:00")
+        resume = start.replace(hour=5).timestamp()
+        wall = start.timestamp()
+        wait_calls = []
+        browser_calls = []
+
+        def wait(seconds):
+            nonlocal wall
+            wait_calls.append((seconds, task.last_tick))
+            wall += seconds
+
+        def record(name, result):
+            def invoke(*args):
+                browser_calls.append((name, wall))
+                return result
+            return Mock(side_effect=invoke)
+
+        task.cancel.wait = wait
+        bridge._ensure_driver = record("driver", Mock())
+        bridge._make_param_filler = Mock()
+        bridge._prepare_query_page = record("query_page", True)
+        bridge._send_keep_alive = record("login", "ok")
+        bridge._existing_trip_blocks = record("existing_order", True)
+        with patch("railwatch_bridge.time.time", lambda: wall), patch("railwatch_bridge.time.monotonic", lambda: wall):
+            bridge._monitor_worker({"auto_submit": True, "maintenance_sleep": True})
+
+        self.assertTrue(wait_calls)
+        self.assertTrue(all(0 < seconds <= 30 for seconds, _ in wait_calls))
+        self.assertEqual(wait_calls[0][1], start.timestamp())
+        self.assertGreater(wait_calls[-1][1], wait_calls[0][1])
+        self.assertEqual(browser_calls, [(name, resume) for name in ("driver", "query_page", "login", "existing_order")])
+        waiting = [event["payload"] for event in events if event["event"] == "state"
+                   and event["payload"].get("status_message") == "12306 夜间维护休眠中，05:00 恢复"]
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0]["task"]["next_query_at"], resume)
+
+    def test_maintenance_startup_cancellation_or_earlier_auto_stop_skips_browser(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_time import MONITOR_AUTO_STOP_MESSAGE
+
+        start = dt.datetime.fromisoformat("2026-06-10T02:00:00+08:00")
+        stop = start + dt.timedelta(seconds=45)
+        for cancel in (True, False):
+            with self.subTest(cancel=cancel):
+                events = []
+                bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
+                bridge.is_monitoring = True
+                task = bridge._task
+                wall = start.timestamp()
+                wait_calls = []
+
+                def wait(seconds):
+                    nonlocal wall
+                    wall += seconds
+                    wait_calls.append(seconds)
+                    if cancel:
+                        task.cancel.set()
+
+                task.cancel.wait = wait
+                with patch("railwatch_bridge.time.time", lambda: wall), patch("railwatch_bridge.time.monotonic", lambda: wall), \
+                        patch.object(bridge, "_ensure_driver") as ensure:
+                    bridge._monitor_worker({"auto_submit": True, "maintenance_sleep": True,
+                                            "auto_stop_at": stop.isoformat()})
+
+                ensure.assert_not_called()
+                self.assertEqual(wait_calls, [30.0] if cancel else [30.0, 15.0])
+                self.assertEqual([entry["message"] for entry in bridge.log_entries].count(MONITOR_AUTO_STOP_MESSAGE),
+                                 0 if cancel else 1)
+                self.assertEqual([event["payload"]["priority"] for event in events if event["event"] == "notify"],
+                                 [] if cancel else ["notice"])
+
+    def test_monitor_date_window_preserves_custom_date_order(self):
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        now = dt.datetime.fromisoformat("2026-06-10T08:00:00+08:00").timestamp()
+        config = {"date": "2026-06-12", "date_range": "自定义",
+                  "custom_dates": ["2026-06-20", "2026-06-09", "2026-06-12", "2026-06-30"]}
+        self.assertEqual(bridge._valid_dates(config, now, announce=True), ["2026-06-20", "2026-06-12"])
+        self.assertEqual([entry["message"] for entry in bridge.log_entries],
+                         ["跳过 2026-06-09：已过期", "跳过 2026-06-30：超出可查询窗口"])
+
     def test_wait_for_target_time_skips_keep_alive_when_disabled(self):
         from railwatch_bridge import RailWatchBridge
 

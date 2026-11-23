@@ -4,6 +4,7 @@ import { DEFAULT_QUERY_STRATEGY } from "../lib/queryStrategy";
 import { DEFAULT_DATE_STRATEGY } from "../lib/dateStrategy";
 import { DEFAULT_ORDER_POLICY } from "../lib/orderPolicy";
 import { conditionsMatch, mergeQuerySnapshots, queryFamily, queryRows, type QueryViews } from "../lib/queryResults";
+import { orderedCustomDates } from "../lib/tripDate";
 import type {
   EnvironmentOperation,
   EnvironmentProgress,
@@ -27,6 +28,16 @@ import type {
 
 export function tripFingerprint(config: RailWatchConfig) {
   return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => key !== "query_jobs").sort(([a], [b]) => a.localeCompare(b))));
+}
+
+function mergeTripConfig(config: RailWatchConfig, patch: Partial<RailWatchConfig>): RailWatchConfig {
+  const next = { ...config, ...patch };
+  if (patch.custom_dates !== undefined || next.date === config.date || !config.custom_dates?.length) return next;
+  const canReplace = next.date && !config.custom_dates.includes(next.date);
+  const dates = canReplace
+    ? config.custom_dates.map(date => date === config.date ? next.date : date)
+    : config.custom_dates.filter(date => date !== config.date);
+  return { ...next, custom_dates: orderedCustomDates(next.date, dates) };
 }
 
 function humanActionKey(action: HumanActionPayload) {
@@ -94,12 +105,15 @@ export const defaultConfig: RailWatchConfig = {
   alternate_accept_new_trains: false,
   alternate_new_train_windows: [],
   date_range: "单日",
+  custom_dates: [],
   smart_rate: true,
+  maintenance_sleep: false,
   timer_enabled: false,
   target_time: "00:00:00",
   sale_at: "",
   sale_time_source: "manual",
   sale_time_checked_at: "",
+  auto_stop_at: "",
   burst_window_seconds: 45,
   prewarm_lead_seconds: 120,
   config_version: 2,
@@ -275,7 +289,7 @@ export function createRailWatchStore() {
     draftError: null,
     initializeTrip: (config, savedAt, draft) => set(state => {
       const preserveEdits = !state.tripInitialized && state.editRevision > 0;
-      return { config: { ...defaultConfig, ...config, ...(preserveEdits ? state.pendingTripEdits : {}) },
+      return { config: mergeTripConfig({ ...defaultConfig, ...config }, preserveEdits ? state.pendingTripEdits : {}),
       savedConfig: { ...defaultConfig, ...config }, savedAt, configSaveError: null, draftRead: draft, tripInitialized: true,
       pendingTripEdits: {}, editRevision: preserveEdits ? state.editRevision : 0,
       draftRevision: draft.status === "available" ? draft.draft.revision : 0,
@@ -432,7 +446,7 @@ export function createRailWatchStore() {
       set({ dismissedHumanActionKey: get().lastHumanAction ? humanActionKey(get().lastHumanAction!) : null, lastHumanAction: null });
     },
     setConfig: (patch) => {
-      const config = { ...get().config, ...patch };
+      const config = mergeTripConfig(get().config, patch);
       if (tripFingerprint(config) === tripFingerprint(get().config)) return;
       const changed = queryFamily(config) !== queryFamily(get().config);
       set({ config, editRevision: get().editRevision + 1, draftSaveState: "editing", draftError: null,

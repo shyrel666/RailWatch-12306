@@ -12,6 +12,7 @@ import time
 from typing import Dict, Literal, Mapping, Optional
 
 from railwatch_config_contract import validate_trip_draft
+from railwatch_policies import IDLE_POLICIES
 
 ThemeMode = Literal["system", "light", "dark"]
 UI_PREFERENCES_FILE = "ui_preferences.json"
@@ -204,6 +205,11 @@ def _read_ui_preferences(data_dir: str) -> dict:
 def load_ui_preferences(data_dir: str) -> dict:
     with PREFERENCES_LOCK:
         data = _read_ui_preferences(data_dir)
+        try:
+            lead = validate_sale_reminder_lead_minutes(
+                data.get("sale_reminder_lead_minutes", IDLE_POLICIES["sale_reminder_lead_minutes"]))
+        except ValueError:
+            lead = IDLE_POLICIES["sale_reminder_lead_minutes"]
         # Return only public UI fields; old files may contain unrelated secrets.
         return {
             "theme": normalize_theme(data.get("theme", "system")),
@@ -211,11 +217,20 @@ def load_ui_preferences(data_dir: str) -> dict:
             "auto_rehearsal": data.get("auto_rehearsal") is True,
             # Off unless turned on, like other new features: it probes the 12306 login in the background.
             "idle_keep_alive": data.get("idle_keep_alive") is True,
+            "sale_reminder_lead_minutes": lead,
         }
 
 
+def validate_sale_reminder_lead_minutes(value: object) -> int:
+    if type(value) is not int or not 5 <= value <= 120:
+        raise ValueError("起售提醒提前时间必须为 5 至 120 分钟的整数。")
+    return value
+
+
 def save_ui_preferences(data_dir: str, patch: dict) -> dict:
-    if not isinstance(patch, dict) or set(patch) - {"theme", "close_to_tray", "auto_rehearsal", "idle_keep_alive"}:
+    if not isinstance(patch, dict) or set(patch) - {
+        "theme", "close_to_tray", "auto_rehearsal", "idle_keep_alive", "sale_reminder_lead_minutes",
+    }:
         raise ValueError("界面偏好更新字段无效。")
     if "theme" in patch and patch["theme"] not in ("system", "light", "dark"):
         raise ValueError("主题必须为 system、light 或 dark。")
@@ -225,6 +240,8 @@ def save_ui_preferences(data_dir: str, patch: dict) -> dict:
         raise ValueError("自动彩排必须为布尔值。")
     if "idle_keep_alive" in patch and not isinstance(patch["idle_keep_alive"], bool):
         raise ValueError("空闲保持登录必须为布尔值。")
+    if "sale_reminder_lead_minutes" in patch:
+        validate_sale_reminder_lead_minutes(patch["sale_reminder_lead_minutes"])
     with PREFERENCES_LOCK:
         if patch:
             existing = _read_ui_preferences(data_dir)

@@ -18,6 +18,10 @@ export function TimerSettings({ config, update, windowDays }: {
   const detail = saleDay(config.date, now, presaleDays(windowDays), info);
   const target = config.sale_at?.endsWith("+08:00") ? Date.parse(config.sale_at) : NaN;
   const validTarget = Number.isFinite(target);
+  const autoStopAt = config.auto_stop_at?.replace(/\+08:00$/, "").replace(/(\.\d{3})\d+$/, "$1") || "";
+  const autoStop = Date.parse(config.auto_stop_at || "");
+  const stopWarning = autoStop <= now ? "已到达自动停止时间，启动后将立即停止。"
+    : config.timer_enabled && autoStop <= target ? "自动停止时间与定时启动时间相同或更早，监控会在开始查询前停止。" : null;
   const canApply = !loading && !error && detail.saleAt !== null && detail.saleAt > now;
   const released = detail.state === "window" || detail.state === "open";
   const usingSaleTime = config.timer_enabled && canApply && target === detail.saleAt;
@@ -97,5 +101,16 @@ export function TimerSettings({ config, update, windowDays }: {
         与本行程的起售时间不一致，可点击「设为起售时间」更新。
       </p>}
     </>}
+    <div className="trip-field">
+      <label htmlFor="timer-auto-stop">自动停止时间（北京时间）</label>
+      <div className="trip-input-with-action">
+        <input id="timer-auto-stop" className="native-input" type="datetime-local" step="1" value={autoStopAt}
+          aria-describedby={stopWarning ? "timer-auto-stop-warning" : undefined}
+          onChange={event => update({ auto_stop_at: event.target.value ? `${event.target.value}+08:00` : "" })} />
+        <Button aria-label="清除自动停止时间" disabled={!config.auto_stop_at}
+          onClick={() => update({ auto_stop_at: "" })}>清除</Button>
+      </div>
+      {stopWarning && <small id="timer-auto-stop-warning" className="trip-date-hint is-warning" role="status">{stopWarning}</small>}
+    </div>
   </PreferenceSection>;
 }

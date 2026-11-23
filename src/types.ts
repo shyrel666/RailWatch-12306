@@ -40,15 +40,18 @@ export type RailWatchConfig = {
   order_watch_enabled?: boolean;
   order_watch_interval_seconds?: number;
   date_range: string;
+  custom_dates?: string[];
   date_strategy?: "round_robin" | "preferred_date" | "inventory_first";
   date_scan_budget_seconds?: number;
   smart_rate: boolean;
+  maintenance_sleep?: boolean;
   timer_enabled: boolean;
   prefill_enabled?: boolean;
   target_time: string;
   sale_at?: string;
   sale_time_source?: string;
   sale_time_checked_at?: string;
+  auto_stop_at?: string;
   burst_window_seconds?: number;
   prewarm_lead_seconds?: number;
   config_version?: number;
@@ -86,6 +89,7 @@ export type RailWatchPreferences = {
   close_to_tray: boolean;
   auto_rehearsal?: boolean;
   idle_keep_alive?: boolean;
+  sale_reminder_lead_minutes?: number;
   notification_settings: NotificationSettings;
 };
 
@@ -95,6 +99,7 @@ export type PreferencesPatch = {
   close_to_tray?: boolean;
   auto_rehearsal?: boolean;
   idle_keep_alive?: boolean;
+  sale_reminder_lead_minutes?: number;
   notification_settings?: NotificationSettingsPatch;
 };
 

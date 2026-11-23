@@ -142,6 +142,9 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
         `席别优先顺序：${config.seat_keyword || "不限"}`,
         `乘客：${config.passengers || "未指定"}`,
         `起售时刻：${config.timer_enabled ? config.sale_at || "未设置" : "未启用定时"}`,
+        ...(config.maintenance_sleep === true ? ["夜间维护休眠：01:00–05:00 自动暂停，05:00 恢复（北京时间）"] : []),
+        ...(typeof config.auto_stop_at === "string" && config.auto_stop_at.trim()
+          ? [`自动停止时间（北京时间）：${config.auto_stop_at}`] : []),
         `自动提交：${config.auto_submit ? "开" : "关"}；自动候补：${config.auto_alternate ? "开" : "关"}`,
         config.alternate_mode === "multiple" ? `候补清单：最多${config.alternate_max_combinations ?? 5}个已配置组合、3个日期，合并为一个订单`
           : "候补清单：首个可用组合",

@@ -75,6 +75,7 @@ class PreferencePatchTests(unittest.TestCase):
         result = self.bridge.load_preferences()
         self.assertEqual(result["theme"], "dark")
         self.assertFalse(result["close_to_tray"])
+        self.assertEqual(result["sale_reminder_lead_minutes"], 30)
         self.assertTrue(result["notification_settings"]["window_attention"])
         self.assertNotIn("old-secret", json.dumps(result))
 
@@ -99,6 +100,34 @@ class PreferencePatchTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 self.runtime._dispatch("savePreferences", payload)
         self.assertEqual(self.bridge.load_preferences()["theme"], "dark")
+
+    def test_sale_reminder_lead_round_trips_and_other_patches_preserve_it(self):
+        for minutes in (5, 15, 120):
+            with self.subTest(minutes=minutes):
+                self.assertEqual(self.request({"sale_reminder_lead_minutes": minutes})["sale_reminder_lead_minutes"], minutes)
+                self.assertEqual(self.request({"theme": "dark"})["sale_reminder_lead_minutes"], minutes)
+                self.assertEqual(load_ui_preferences(self.directory.name)["sale_reminder_lead_minutes"], minutes)
+
+    def test_invalid_sale_reminder_lead_does_not_commit_any_preferences(self):
+        before = self.request({"theme": "dark", "sale_reminder_lead_minutes": 60})
+        for invalid in (None, True, 15.0, "15", 4, 121):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    save_ui_preferences(self.directory.name, {"sale_reminder_lead_minutes": invalid})
+                with self.assertRaises(ValueError):
+                    self.runtime._dispatch("savePreferences", {"theme": "light", "sale_reminder_lead_minutes": invalid,
+                                                               "notification_settings": {"sound_loop": False}})
+        self.assertEqual(self.bridge.load_preferences(), before)
+
+    def test_damaged_sale_reminder_preference_falls_back_to_policy_default(self):
+        path = Path(self.directory.name, UI_PREFERENCES_FILE)
+        for content in ('{"broken":', '{"theme": "dark", "sale_reminder_lead_minutes": 121}',
+                        '{"theme": "dark", "sale_reminder_lead_minutes": true}'):
+            with self.subTest(content=content):
+                path.write_text(content, encoding="utf-8")
+                preferences = load_ui_preferences(self.directory.name)
+                self.assertEqual(preferences["sale_reminder_lead_minutes"], 30)
+                self.assertEqual(preferences["theme"], "dark" if '"theme"' in content else "system")
 
     def test_secret_failure_does_not_change_any_requested_preference(self):
         self.request({"theme": "dark", "close_to_tray": True})
@@ -188,7 +217,7 @@ class PreferencePatchTests(unittest.TestCase):
             theme.result(timeout=3)
             tray.result(timeout=3)
         self.assertEqual(load_ui_preferences(self.directory.name), {"theme": "dark", "close_to_tray": True, "auto_rehearsal": False,
-                                                                    "idle_keep_alive": False})
+                                                                    "idle_keep_alive": False, "sale_reminder_lead_minutes": 30})
         self.assertTrue(json.loads(path.read_text(encoding="utf-8"))["future_ui"])
 
 
@@ -206,6 +235,9 @@ class DraftAndLegacyCompatibilityTests(unittest.TestCase):
         self.assertFalse(config["auto_submit"])
         self.assertFalse(config["auto_alternate"])
         self.assertFalse(config["timer_enabled"])
+        self.assertEqual(config["custom_dates"], [])
+        self.assertFalse(config["maintenance_sleep"])
+        self.assertEqual(config["auto_stop_at"], "")
         valid, skipped = eligible_travel_dates(config["date"], config["date_range"], today=dt.date(2026, 9, 22))
         self.assertEqual(valid, [])
         self.assertTrue(all(item["reason"] == "已过期" for item in skipped))
@@ -217,6 +249,32 @@ class DraftAndLegacyCompatibilityTests(unittest.TestCase):
         parsed["config"]["from_station_cn"] = "changed"
         self.assertEqual(payload["config"]["from_station_cn"], "")
         self.assertEqual(validate_trip_draft(self.draft(config={"date": ""}))["config"], {"date": ""})
+
+    def test_phase_one_trip_settings_round_trip_through_saved_config(self):
+        config = {"date": "2026-06-10", "date_range": "自定义",
+                  "custom_dates": ["2026-06-20", "2026-06-10", "2026-06-20"],
+                  "maintenance_sleep": "true", "auto_stop_at": "2026-06-01T08:00:00+0800"}
+        expected = {"custom_dates": ["2026-06-20", "2026-06-10"], "maintenance_sleep": True,
+                    "auto_stop_at": "2026-06-01T08:00:00+08:00"}
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = RailWatchBridge(directory)
+            bridge.save_config(config)
+            saved = bridge.load_config()
+            for value in (saved, saved["query_jobs"][0]):
+                self.assertEqual({key: value[key] for key in expected}, expected)
+
+    def test_new_trip_fields_validate_config_and_allow_incomplete_drafts(self):
+        for patch in ({"custom_dates": "2026-06-10"}, {"custom_dates": [20260610]},
+                      {"custom_dates": ["2026-06-10"] * 6}, {"custom_dates": ["2026-02-29"]},
+                      {"auto_stop_at": "2026-06-01T08:00:00"}, {"auto_stop_at": "2026-06-01T08:00:00Z"},
+                      {"auto_stop_at": True}):
+            with self.subTest(patch=patch), self.assertRaises(ValueError):
+                validate_config(patch)
+        draft = self.draft(config={"custom_dates": ["", "2026-"], "auto_stop_at": "", "maintenance_sleep": True})
+        self.assertEqual(validate_trip_draft(draft), draft)
+        for value in ({}, [7], [None]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_trip_draft(self.draft(config={"custom_dates": value}))
 
     def test_draft_rejects_invalid_versions_revisions_and_field_types(self):
         invalid = [None, [], {}, self.draft(schema_version=True), self.draft(schema_version=2),

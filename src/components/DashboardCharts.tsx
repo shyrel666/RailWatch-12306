@@ -4,6 +4,7 @@ import { Activity, ArrowRight, CalendarRange } from "lucide-react";
 import { msTick, niceTicks } from "../lib/chartScale";
 import { railwatchApi } from "../lib/railwatchApi";
 import { conclusionTone } from "../lib/runConclusion";
+import { isAutoStopWaiting, isMaintenanceWaiting } from "../lib/taskDisplay";
 import { isoDaysFromToday, todayIso } from "../lib/tripDate";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import type { QueryPulse, QueryPulseItem, RailWatchStatus, RunReviewSummary } from "../types";
@@ -45,6 +46,7 @@ function median(values: number[]) {
 }
 
 function liveText(status: RailWatchStatus, now: number) {
+  if (isAutoStopWaiting(status) || isMaintenanceWaiting(status)) return status.status_message;
   if (status.task?.status === "waiting") return "等待定时启动";
   if (status.task?.status === "querying") return "查询中";
   if (status.task?.next_query_at)

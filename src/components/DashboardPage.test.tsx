@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { railwatchApi } from "../lib/railwatchApi";
 import { isoDaysFromToday } from "../lib/tripDate";
 import {
   defaultConfig,
@@ -31,7 +32,10 @@ function resetStore() {
 
 describe("DashboardPage", () => {
   beforeEach(resetStore);
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
 
   test("shows one trip summary and sends the next action to environment setup", async () => {
     render(<DashboardPage />);
@@ -122,11 +126,85 @@ describe("DashboardPage", () => {
     expect(screen.queryByText("广州")).toBeNull();
     expect(screen.getByText("北京 · 出发站")).toBeTruthy();
     expect(screen.queryByText("广州 · 出发站")).toBeNull();
+    expect(screen.queryByRole("button", { name: /设为行程/ })).toBeNull();
     expect(screen.getByText("查询次数").parentElement?.textContent).toContain(
       "9",
     );
     expect(within(screen.getByRole("region", { name: "查询脉搏" })).getByRole("status").textContent).toBe("监控中");
     expect(screen.queryByText(/下次查询/)).toBeNull();
+  });
+
+  test("uses an explicit calendar action to set the trip and official timer without starting monitoring", async () => {
+    const now = Date.parse("2026-09-27T09:59:59+08:00");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const command = vi.spyOn(railwatchApi, "command").mockImplementation(async name => (
+      name === "stationSaleTimes" ? {
+        station: "北京", status: "available", checked_at: now / 1000 - 10, expires_at: now / 1000 + 60,
+        schedules: [{ station_name: "北京", station_code: "BJP", sale_time: "10:00", start_date: "2010-01-01", stop_date: "2099-12-31" }],
+      } : undefined
+    ) as never);
+    render(<DashboardPage />);
+    await screen.findByRole("button", { name: "设为行程并定时" });
+    await userEvent.click(screen.getByRole("button", { name: "2026-10-12 未进入预售期" }));
+    expect(railwatchStore.getState().config.date).toBe("");
+    expect(railwatchStore.getState().activePage).toBe("仪表盘");
+    await userEvent.click(screen.getByRole("button", { name: "设为行程并定时" }));
+    expect(railwatchStore.getState().config).toMatchObject({
+      date: "2026-10-12", timer_enabled: true, sale_at: "2026-09-28T10:00:00+08:00", target_time: "10:00:00",
+      sale_time_source: "12306", sale_time_checked_at: new Date(now - 10_000).toISOString(),
+    });
+    expect(railwatchStore.getState().activePage).toBe("行程设置");
+    expect(railwatchStore.getState().pageSection).toBe("trip-timer");
+    expect(command.mock.calls.map(([name]) => name)).not.toContain("startMonitor");
+  });
+
+  test("applies a date with no known sale time without activating a timer", async () => {
+    const now = Date.parse("2026-09-27T09:59:59+08:00");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    railwatchStore.setState({ config: { ...defaultConfig, from_station_cn: "" } });
+    render(<DashboardPage />);
+    await userEvent.click(screen.getByRole("button", { name: "2026-09-27 预售期内" }));
+    await userEvent.click(screen.getByRole("button", { name: "设为行程日期" }));
+    expect(railwatchStore.getState().config).toMatchObject({ date: "2026-09-27", timer_enabled: false, sale_at: "" });
+    expect(railwatchStore.getState().activePage).toBe("行程设置");
+    expect(railwatchStore.getState().pageSection).toBe("trip-basics");
+  });
+
+  test.each(["12306", "manual"] as const)("applies a different date with a prior %s timer", async source => {
+    const now = Date.parse("2026-09-27T09:59:59+08:00");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const timer = { timer_enabled: true, sale_at: "2026-09-28T10:00:00+08:00", target_time: "10:00:00",
+      sale_time_source: source, sale_time_checked_at: new Date(now).toISOString() };
+    railwatchStore.setState({ config: { ...defaultConfig, from_station_cn: "", date: "2026-10-12", ...timer } });
+    render(<DashboardPage />);
+    await userEvent.click(screen.getByRole("button", { name: "2026-09-27 预售期内" }));
+    await userEvent.click(screen.getByRole("button", { name: "设为行程日期" }));
+    expect(railwatchStore.getState().config).toMatchObject({ date: "2026-09-27", ...(source === "manual" ? timer : {
+      timer_enabled: false, sale_at: "", target_time: "", sale_time_source: "", sale_time_checked_at: "",
+    }) });
+  });
+
+  test("shows overnight maintenance as a paused monitoring state", () => {
+    const message = "12306 夜间维护休眠中，05:00 恢复";
+    railwatchStore.setState({ status: { ...defaultStatus, monitoring: true, environment_ready: true, login_ready: true,
+      task: { status: "waiting" }, status_message: message } });
+    render(<DashboardPage />);
+    expect(within(screen.getByLabelText("当前行程")).getByText("夜间维护休眠")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "查询脉搏" })).getByRole("status").textContent).toBe(message);
+  });
+
+  test("shows the stop time while a task waits to end before the scheduled start", () => {
+    const now = Date.parse("2026-09-27T09:59:59+08:00");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const message = "等待自动停止时间";
+    railwatchStore.setState({ status: { ...defaultStatus, monitoring: true, environment_ready: true, login_ready: true,
+      task: { status: "waiting", started_at: now / 1000 - 1, next_query_at: now / 1000 + 61 }, status_message: message } });
+    render(<DashboardPage />);
+    const board = within(screen.getByLabelText("当前行程"));
+    expect(board.getByText(message)).toBeTruthy();
+    expect(board.getByText("距自动停止")).toBeTruthy();
+    expect(board.getByText("00:01:01")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "查询脉搏" })).getByRole("status").textContent).toBe(message);
   });
   test("prioritizes pending payment over monitoring and environment flags", async () => {
     railwatchStore.setState({

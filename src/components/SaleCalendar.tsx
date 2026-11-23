@@ -9,8 +9,23 @@ import { IDLE_POLICY } from "../lib/idlePolicy";
 import { railwatchApi } from "../lib/railwatchApi";
 import { Hint } from "./DisplayPrimitives";
 
-type Props = { station: string; destination?: string; tripDate: string; windowDays?: number; now: number };
-export function SaleCalendar({ station: rawStation, destination: rawDestination = "", tripDate, windowDays, now }: Props) {
+export type SaleCalendarSelection = {
+  date: string;
+  saleAt?: string;
+  targetTime?: string;
+  checkedAt?: number | null;
+};
+
+type Props = {
+  station: string;
+  destination?: string;
+  tripDate: string;
+  windowDays?: number;
+  now: number;
+  onApplyDate?: (payload: SaleCalendarSelection) => void;
+};
+
+export function SaleCalendar({ station: rawStation, destination: rawDestination = "", tripDate, windowDays, now, onApplyDate }: Props) {
   const station = rawStation.trim();
   const destination = rawDestination.trim();
   const reminders = useSaleReminders(Boolean(station && destination));
@@ -27,6 +42,15 @@ export function SaleCalendar({ station: rawStation, destination: rawDestination 
   const [linkError, setLinkError] = useState(false);
   const outdated = info?.expires_at !== null && info?.expires_at !== undefined && now / 1000 >= info.expires_at;
   const issue = error || info?.warning || (outdated ? "起售数据已过期，请刷新后核对。" : null);
+  const timedSelection: SaleCalendarSelection | null = !loading && !issue
+    && detail.saleAt !== null && detail.saleAt > now && info?.checked_at != null
+    ? {
+      date: selected,
+      saleAt: `${detail.releaseDate}T${detail.time}:00+08:00`,
+      targetTime: `${detail.time}:00`,
+      checkedAt: info.checked_at,
+    }
+    : null;
   return (
     <section className="sale-calendar" aria-label="购票日历与起售时间">
       <div className="section-heading">
@@ -64,6 +88,12 @@ export function SaleCalendar({ station: rawStation, destination: rawDestination 
           {detail.saleAt !== null && detail.saleAt > now && detail.state !== "expired" && <p className="sale-calendar-countdown">
             距起售 <strong>{countdown(detail.saleAt, now)}</strong>
           </p>}
+          {onApplyDate && detail.state !== "expired" && detail.state !== "invalid" && (
+            <Button className="sale-calendar-apply" size="small" type="primary"
+              onClick={() => onApplyDate(timedSelection ?? { date: selected })}>
+              {timedSelection ? "设为行程并定时" : "设为行程日期"}
+            </Button>
+          )}
           {station && destination && detail.saleAt !== null && detail.saleAt > now ? (
             <SaleReminderControl station={station} destination={destination} date={selected} reminders={reminders} />
           ) : null}

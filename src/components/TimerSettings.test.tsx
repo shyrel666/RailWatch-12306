@@ -143,3 +143,44 @@ test("changing the trip date uses the current presale policy, and refreshing onl
   await waitFor(() => expect(railwatchApi.command).toHaveBeenLastCalledWith("stationSaleTimes", { station: "北京", force: true }));
   expect(update).not.toHaveBeenCalled();
 });
+
+test("auto-stop is available for immediate starts, keeps Beijing time, and clears independently", () => {
+  const update = vi.fn();
+  const immediate = { ...config, from_station_cn: "", timer_enabled: false };
+  const { rerender } = render(<TimerSettings config={immediate} update={update} />);
+  const input = screen.getByLabelText("自动停止时间（北京时间）") as HTMLInputElement;
+  const clear = screen.getByRole<HTMLButtonElement>("button", { name: "清除自动停止时间" });
+  expect(clear.disabled).toBe(true);
+  fireEvent.change(input, { target: { value: "2026-09-27T11:45:51" } });
+  expect(update).toHaveBeenLastCalledWith({
+    auto_stop_at: expect.stringMatching(/^2026-09-27T11:45:51(?:\.000)?\+08:00$/),
+  });
+  rerender(<TimerSettings config={{ ...immediate, auto_stop_at: "2026-09-27T11:45:51+08:00" }} update={update} />);
+  expect(input.value).toMatch(/^2026-09-27T11:45:51(?:\.000)?$/);
+  rerender(<TimerSettings config={{ ...immediate, auto_stop_at: "2026-09-27T11:45:51.123456+08:00" }} update={update} />);
+  expect(input.value).toBe("2026-09-27T11:45:51.123");
+  fireEvent.click(clear);
+  expect(update).toHaveBeenLastCalledWith({ auto_stop_at: "" });
+  expect(vi.mocked(railwatchApi.command)).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["before now", "08:59:00", "已到达自动停止时间，启动后将立即停止。"],
+  ["equal to now", "09:00:00", "已到达自动停止时间，启动后将立即停止。"],
+  ["before the scheduled start", "11:00:00", "自动停止时间与定时启动时间相同或更早，监控会在开始查询前停止。"],
+  ["equal to the scheduled start", "12:00:00", "自动停止时间与定时启动时间相同或更早，监控会在开始查询前停止。"],
+  ["after the scheduled start", "12:01:00", null],
+])("auto-stop %s shows the appropriate warning", (_scenario, time, warning) => {
+  const timed = { ...config, from_station_cn: "", sale_at: "2026-09-27T12:00:00+08:00" };
+  const update = vi.fn();
+  render(<TimerSettings config={{ ...timed, auto_stop_at: `2026-09-27T${time}+08:00` }} update={update} />);
+  const input = screen.getByLabelText("自动停止时间（北京时间）");
+  if (warning) {
+    expect(screen.getByText(warning)).toBeTruthy();
+    expect(input.getAttribute("aria-describedby")).toBe("timer-auto-stop-warning");
+  } else {
+    expect(screen.queryByText(/已到达自动停止时间|监控会在开始查询前停止/)).toBeNull();
+    expect(input.hasAttribute("aria-describedby")).toBe(false);
+  }
+  expect(update).not.toHaveBeenCalled();
+});

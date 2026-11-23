@@ -37,6 +37,8 @@ import { NotificationSettingsPanel } from "./NotificationSettingsPanel";
 import { SettingRow, SettingsSection } from "./SettingsPrimitives";
 import { IDLE_POLICY } from "../lib/idlePolicy";
 
+const SALE_REMINDER_OPTIONS = [10, 15, 30, 60];
+
 const SECTIONS: { id: string; label: string; icon: LucideIcon }[] = [
   { id: "settings-environment", label: "环境与登录", icon: Activity },
   { id: "settings-appearance", label: "外观", icon: Palette },
@@ -156,6 +158,8 @@ export function SettingsPage({
   const [closeToTray, setCloseToTray] = useState(false);
   const [idleKeepAlive, setIdleKeepAlive] = useState(false);
   const [idleSaving, setIdleSaving] = useState(false);
+  const [saleReminderLead, setSaleReminderLead] = useState(IDLE_POLICY.sale_reminder_lead_minutes);
+  const [saleReminderSaving, setSaleReminderSaving] = useState(false);
   const [traySaving, setTraySaving] = useState(false);
   const [trayReady, setTrayReady] = useState(false);
   const [trayError, setTrayError] = useState("");
@@ -175,8 +179,13 @@ export function SettingsPage({
   useEffect(() => {
     let alive = true;
     void railwatchApi.command<RailWatchPreferences>("loadPreferences").then((value) => {
-      if (alive) { setCloseToTray(value.close_to_tray === true); setAutoRehearsal(value.auto_rehearsal === true);
-        setIdleKeepAlive(value.idle_keep_alive === true); setTrayReady(true); }
+      if (alive) {
+        setCloseToTray(value.close_to_tray === true);
+        setAutoRehearsal(value.auto_rehearsal === true);
+        setIdleKeepAlive(value.idle_keep_alive === true);
+        setSaleReminderLead(value.sale_reminder_lead_minutes ?? IDLE_POLICY.sale_reminder_lead_minutes);
+        setTrayReady(true);
+      }
     }).catch((error) => { if (alive) setTrayError(error instanceof Error ? error.message : "无法加载关闭偏好。"); });
     return () => { alive = false; };
   }, [setAutoRehearsal]);
@@ -199,6 +208,19 @@ export function SettingsPage({
     } catch (error) {
       setTrayError(error instanceof Error ? error.message : "关闭偏好保存失败。");
     } finally { setTraySaving(false); }
+  };
+  const saveSaleReminderLead = async (next: number) => {
+    setSaleReminderSaving(true);
+    setTrayError("");
+    try {
+      const saved = await railwatchApi.command<RailWatchPreferences>("savePreferences", { sale_reminder_lead_minutes: next });
+      if (saved.sale_reminder_lead_minutes !== next) throw new Error("起售提醒提前时间未保存");
+      setSaleReminderLead(next);
+    } catch {
+      setTrayError("起售提醒提前时间未保存，请重试。");
+    } finally {
+      setSaleReminderSaving(false);
+    }
   };
   const checkLogin = async () => {
     setCheckingLogin(true);
@@ -399,7 +421,7 @@ export function SettingsPage({
         <SettingsSection id="settings-appearance" icon={Palette} title="外观" description="选择界面配色，切换后立即生效。">
           <ThemePicker />
         </SettingsSection>
-        <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式、开售前检查与登录保持。">
+        <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式、开售前检查、登录保持与起售提醒。">
           <SettingRow
             icon={PanelBottomClose}
             title={isMac ? "关闭到菜单栏" : "关闭到托盘"}
@@ -438,6 +460,18 @@ export function SettingsPage({
             }
           >
             <p>未在监控时，受控浏览器开着就每 {Math.round(IDLE_POLICY.login_keep_alive_seconds / 60)} 分钟检查一次登录状态，只检查登录、不查余票；已确认的登录失效时按通知设置提醒。</p>
+          </SettingRow>
+          <SettingRow icon={Bell} title="起售提醒提前时间" control={
+            <select aria-label="起售提醒提前时间" className="compact-select" value={saleReminderLead}
+              disabled={!trayReady || saleReminderSaving}
+              onChange={event => void saveSaleReminderLead(Number(event.target.value))}>
+              {!SALE_REMINDER_OPTIONS.includes(saleReminderLead) && (
+                <option value={saleReminderLead} disabled>{saleReminderLead} 分钟</option>
+              )}
+              {SALE_REMINDER_OPTIONS.map(minutes => <option value={minutes} key={minutes}>{minutes} 分钟</option>)}
+            </select>
+          }>
+            <p>适用于在购票日历中设置的起售提醒。</p>
           </SettingRow>
           {trayError && <p role="alert" className="settings-error">{trayError}</p>}
         </SettingsSection>

@@ -46,7 +46,9 @@ class AlternatePlan:
             raise ValueError("候补组合上限无效")
         dates = config.get("_alternate_dates")
         if dates is None:
-            dates = expand_travel_dates(config.get("date", intent.date), config.get("date_range", "单日"))
+            dates = expand_travel_dates(config.get("date", intent.date), config.get("date_range", "单日"), config.get("custom_dates"))
+        if config.get("date_range") == "自定义" and intent.date not in dates[:ORDER_POLICIES["max_dates"]]:
+            raise ValueError("首个候补组合不在已授权范围内")
         ordered = [intent.date, *dates]
         self.dates = list(dict.fromkeys(ordered))[:ORDER_POLICIES["max_dates"]]
         if not self.allows(self.primary):

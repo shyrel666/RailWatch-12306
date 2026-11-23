@@ -25,6 +25,7 @@
 .sale-calendar-status.open, .sale-calendar-status.window { color: var(--success); }
 .sale-calendar-status.waiting, .sale-calendar-status.unknown, .sale-calendar-detail .sale-calendar-warning { color: var(--warning); }
 .sale-calendar-countdown strong { display: block; margin-top: 2px; color: var(--text); font-family: var(--font-mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+.sale-calendar-apply { margin-top: 10px; }
 .sale-calendar-reminder { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 10px; }
 .sale-calendar-reminder > small { color: var(--muted); font-size: 11px; }
 .sale-calendar-reminder-set { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 12px; }
@@ -591,6 +592,30 @@ html[data-theme="dark"] .chart-card {
   gap: 12px 14px;
   align-items: start;
 }
+.trip-date-range .segmented-control { height: auto; min-height: 34px; }
+.trip-date-range .segmented-option { min-height: 28px; padding: 0 4px; }
+.trip-custom-dates {
+  grid-column: 1 / -1;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.trip-custom-date-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.trip-custom-date-list > li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 6px;
+}
+.trip-custom-date-list > li > span:first-child { overflow-wrap: anywhere; }
+.trip-custom-date-list small { color: var(--accent-text); }
+.trip-custom-date-actions { display: inline-flex; margin-left: auto; }
 .trip-subsection {
   padding-top: 12px;
   border-top: 1px solid var(--border);
@@ -1004,6 +1029,15 @@ html[data-theme="dark"] .chart-card {
   padding-left: 14px;
   border-left: 1px solid var(--border);
 }
+.trip-query-switches > .switch-row + .trip-maintenance-switch {
+  grid-column: 1 / -1;
+  margin-top: 10px;
+  padding: 10px 0 0;
+  border-left: 0;
+  border-top: 1px solid var(--border);
+}
+.trip-maintenance-label { display: grid; gap: 3px; }
+.trip-maintenance-label > small { color: var(--muted); font-size: 12px; }
 .switch-row {
   display: flex;
   align-items: center;

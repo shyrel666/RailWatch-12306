@@ -178,9 +178,8 @@ class RailWatchRuntime:
             "savePreferences": lambda: self.bridge.save_preferences(
                 payload.get("theme"),
                 payload.get("notification_settings"),
-                close_to_tray=payload.get("close_to_tray"),
-                auto_rehearsal=payload.get("auto_rehearsal"),
-                idle_keep_alive=payload.get("idle_keep_alive"),
+                **{key: payload[key] for key in ("close_to_tray", "auto_rehearsal", "idle_keep_alive",
+                                                  "sale_reminder_lead_minutes") if key in payload},
             ),
             "notificationStatus": lambda: self.bridge.notification_status(),
             "testNotification": lambda: self.bridge.test_notification(),

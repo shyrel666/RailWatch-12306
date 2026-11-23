@@ -1,5 +1,5 @@
 import type { MissingTargets, QueryConditions, QuerySnapshot, RailWatchConfig, RailWatchStatus, RenumberCandidate } from "../types";
-import { getDateRangeStatus } from "./tripDate";
+import { expandTripDates } from "./tripDate";
 
 export type QueryView = { owner: string; latest: QuerySnapshot; success: QuerySnapshot | null };
 export type QueryViews = Record<string, QueryView>;
@@ -30,7 +30,8 @@ export function missingTargetsNotice(report: MissingTargets | null) {
 
 export function queryFamily(config: RailWatchConfig) {
   return JSON.stringify([config.from_station_cn.trim(), config.to_station_cn.trim(), config.date, config.date_range,
-    queryTargets(config.train_code.toUpperCase()), queryTargets(config.seat_keyword)]);
+    queryTargets(config.train_code.toUpperCase()), queryTargets(config.seat_keyword),
+    config.date_range === "自定义" ? expandTripDates(config.date, config.date_range, config.custom_dates) : null]);
 }
 
 export function snapshotMatches(snapshot: QuerySnapshot, config: RailWatchConfig) {
@@ -39,9 +40,8 @@ export function snapshotMatches(snapshot: QuerySnapshot, config: RailWatchConfig
 }
 
 export function queryRouteMatches(c: QueryConditions, config: RailWatchConfig) {
-  const dates = getDateRangeStatus(config.date, config.date_range);
   return c.from_station === config.from_station_cn.trim() && c.to_station === config.to_station_cn.trim() &&
-    [...dates.valid, ...dates.skipped].includes(c.date);
+    expandTripDates(config.date, config.date_range, config.custom_dates).includes(c.date);
 }
 
 export function selectableQueryTrains(views: QueryViews, config: RailWatchConfig) {
@@ -82,7 +82,7 @@ export function queryFreshness(view: QueryView, status: RailWatchStatus, config:
   if (!status.monitoring) return "上次成功结果 · 当前未监控";
   if (["error", "human_action", "stopping", "verification", "unknown"].includes(status.task?.status ?? "") || status.error_message)
     return "上次成功结果 · 查询已暂停";
-  const days = config.date_range === "±2天" ? 5 : config.date_range === "±1天" ? 3 : 1;
+  const days = Math.max(1, expandTripDates(config.date, config.date_range, config.custom_dates).length);
   const cycle = days * (config.query_timeout + config.interval) + 5;
   const overdue = now > (view.success.fetched_at ?? 0) + cycle;
   if (overdue) return "数据已过期 · 显示上次成功结果";

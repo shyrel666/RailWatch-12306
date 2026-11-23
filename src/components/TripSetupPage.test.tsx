@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConfigProvider } from "antd";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -138,6 +138,50 @@ test("date strategy and budget survive leaving settings without enabling trading
   expect((screen.getByRole("spinbutton", { name: "跨日期扫描预算（秒）" }) as HTMLInputElement).value).toBe("45");
   expect(screen.getByRole("button", { name: /多日期策略：.*扫描预算45秒/ })).toBeTruthy();
   view.unmount();
+});
+
+test("custom dates can be added, reordered and removed within the five-date limit", async () => {
+  resetStore();
+  const dates = Array.from({ length: 6 }, (_, i) => isoDaysFromToday(i + 1));
+  railwatchStore.getState().setConfig({ date: dates[0], auto_alternate: true, alternate_mode: "multiple" });
+  const runCommand = vi.fn(async (_command: string) => undefined);
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={runCommand} />);
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  const panel = within(screen.getByRole("group", { name: "自定义日期" }));
+  expect(panel.getByText("首选").parentElement?.textContent).toContain(dates[0]);
+  expect(panel.queryByRole("button", { name: `移除日期 ${dates[0]}` })).toBeNull();
+  const input = panel.getByLabelText("新增出发日期") as HTMLInputElement;
+  const add = panel.getByRole<HTMLButtonElement>("button", { name: "添加日期" });
+  fireEvent.change(input, { target: { value: dates[0] } });
+  expect(add.disabled).toBe(true);
+  for (const date of dates.slice(1, 5)) {
+    fireEvent.change(input, { target: { value: date } });
+    await user.click(add);
+  }
+  expect(input.disabled).toBe(true);
+  expect(add.disabled).toBe(true);
+  expect(panel.getByText("多组合候补最多提交前 3 个日期")).toBeTruthy();
+  await user.click(panel.getByRole("button", { name: `上移日期 ${dates[1]}` }));
+  expect(railwatchStore.getState().config.custom_dates).toEqual([dates[1], dates[0], ...dates.slice(2, 5)]);
+  await user.click(panel.getByRole("button", { name: `移除日期 ${dates[2]}` }));
+  await user.click(panel.getByRole("button", { name: `移除日期 ${dates[3]}` }));
+  expect(panel.queryByText("多组合候补最多提交前 3 个日期")).toBeNull();
+  expect(input.disabled).toBe(false);
+  expect(railwatchStore.getState().config.custom_dates).toEqual([dates[1], dates[0], dates[4]]);
+  expect(runCommand.mock.calls.some(([command]) => command === "startMonitor")).toBe(false);
+});
+
+test("maintenance sleep is off by default and can be changed independently", async () => {
+  resetStore();
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={vi.fn(async () => undefined)} />);
+  await user.click(screen.getByRole("heading", { name: "查询策略" }));
+  const toggle = screen.getByRole("switch", { name: "夜间维护休眠" });
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(screen.getByText("01:00–05:00 自动暂停，05:00 恢复")).toBeTruthy();
+  await user.click(toggle);
+  expect(railwatchStore.getState().config).toMatchObject({ maintenance_sleep: true, timer_enabled: false, auto_stop_at: "" });
 });
 
 describe("TripSetupPage", () => {
@@ -531,7 +575,8 @@ describe("TripSetupPage", () => {
 
     expect(railwatchStore.getState().config.date_range).toBe("±2天");
     expect(railwatchStore.getState().config.query_timeout).toBe(41);
-    expect(screen.queryByRole("button", { name: "自定义" })).toBeNull();
+    expect(screen.getByRole("button", { name: "自定义" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByRole("group", { name: "自定义日期" })).toBeNull();
   });
 
   test("date picker cannot start before today and shows no hint for a valid date", () => {

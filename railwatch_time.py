@@ -17,6 +17,8 @@ import urllib.request
 DEFAULT_12306_TIME_URL = "https://kyfw.12306.cn/otn/leftTicket/init"
 DEFAULT_SYNC_INTERVAL_SECONDS = 300.0
 DEFAULT_BURST_WINDOW_SECONDS = 45.0
+MONITOR_AUTO_STOP_TITLE = "监控已自动停止"
+MONITOR_AUTO_STOP_MESSAGE = "已到达设定的自动停止时间，监控已自动停止。"
 
 
 class ServerTimeSync:
@@ -163,14 +165,32 @@ def reset_server_time_sync() -> None:
     _GLOBAL_SYNC = None
 
 
+def resolve_optional_beijing_timestamp(value: object, field_label: str = "时间") -> Optional[float]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_label}格式无效")
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        target = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_label}格式无效") from exc
+    if target.utcoffset() != timedelta(hours=8):
+        raise ValueError(f"{field_label}必须包含北京时间时区 +08:00")
+    return target.timestamp()
+
+
+def maintenance_resume_timestamp(now_ts: float) -> Optional[float]:
+    now = beijing_now(now_ts)
+    if 1 <= now.hour < 5:
+        return now.replace(hour=5, minute=0, second=0, microsecond=0).timestamp()
+    return None
+
+
 def resolve_sale_timestamp(config):
     value = str(config.get("sale_at", "")).strip()
     if not value:
         raise ValueError("请核对并填写完整起售日期时间（北京时间）。")
-    try:
-        target = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError("起售时刻格式无效") from exc
-    if target.utcoffset() != timedelta(hours=8):
-        raise ValueError("起售时刻必须包含北京时间时区 +08:00")
-    return target.timestamp()
+    return resolve_optional_beijing_timestamp(value, "起售时刻")

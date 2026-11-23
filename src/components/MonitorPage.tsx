@@ -11,7 +11,7 @@ import { Bell, BellRing, CalendarRange, Layers, Lock, Play, ShieldCheck, Square 
 import { Hint } from "./DisplayPrimitives";
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import { railwatchStore, tripFingerprint } from "../store/railwatchStore";
-import { displayedConfig, taskLabels } from "../lib/taskDisplay";
+import { displayedConfig, isAutoStopWaiting, isMaintenanceWaiting, taskLabels } from "../lib/taskDisplay";
 import {
   executionReference,
   getDateRangeStatus,
@@ -93,6 +93,7 @@ export function MonitorPage({
     draftConfig.date_range,
     executionReference(draftConfig, today),
     windowDays,
+    draftConfig.custom_dates,
   );
   const seconds = status.task?.started_at
     ? Math.max(0, Math.floor(now / 1000 - status.task.started_at))
@@ -155,6 +156,10 @@ export function MonitorPage({
         trains: queryTargets(replaceTrainCode(favorite.trains.join(","), from, to)) }, `已将本路线收藏车次 ${from} 替换为 ${to}`);
     }
   };
+  const maintenanceWaiting = isMaintenanceWaiting(status);
+  const autoStopWaiting = isAutoStopWaiting(status);
+  const waitingHeadline = maintenanceWaiting ? "夜间维护休眠" : autoStopWaiting ? "等待自动停止" : null;
+  const waitingCaption = maintenanceWaiting ? "距恢复监控" : autoStopWaiting ? "距自动停止" : null;
   const headline = unresolvedOrder
     ? "当前订单待处理"
     : lastHumanAction
@@ -163,7 +168,7 @@ export function MonitorPage({
         ? "监控异常"
         : !status.monitoring && automationIssue
           ? "自动化配置待完善"
-          : taskLabels[status.task?.status || ""] ||
+          : waitingHeadline || taskLabels[status.task?.status || ""] ||
             (canStart ? "监控就绪" : "等待就绪");
   const message = unresolvedOrder
     ? "请先处理当前订单，再开始下一次监控"
@@ -171,17 +176,18 @@ export function MonitorPage({
       ? "请按照下方提示在官方页面继续操作"
       : status.error_message ||
         (status.monitoring
-          ? status.status_message
+          ? autoStopWaiting ? "监控将在定时开始查询前停止" : status.status_message
           : automationIssue ||
             (canStart ? "行程已配置，可启动监控" : "请配置有效的行程日期"));
-  const waitingForSale = status.monitoring && status.task?.status === "waiting";
+  const waiting = status.monitoring && status.task?.status === "waiting";
+  const waitingForSale = waiting && !waitingCaption;
   const boardTone: BoardTone =
     unresolvedOrder || lastHumanAction
       ? "wait"
       : status.error_message
         ? "stop"
         : status.monitoring
-          ? waitingForSale
+          ? waiting
             ? "wait"
             : "go"
           : automationIssue
@@ -189,7 +195,9 @@ export function MonitorPage({
             : "idle";
   const saleAt = config.timer_enabled && config.sale_at ? Date.parse(config.sale_at) : NaN;
   const display =
-    waitingForSale && Number.isFinite(saleAt) && saleAt > now
+    waitingCaption
+      ? { caption: waitingCaption, value: saleCountdown((status.task?.next_query_at ?? 0) * 1000, now), tone: "led" as const }
+      : waitingForSale && Number.isFinite(saleAt) && saleAt > now
       ? { caption: "距定时开售", value: saleCountdown(saleAt, now), note: prefillDirect ? "预填已就绪，到点后直接购票" : prefillNotice ? "未使用预填，到点后常规查询" : "到点后自动开始查询", tone: "led" as const }
       : status.monitoring
         ? {
@@ -402,9 +410,9 @@ export function MonitorPage({
           </strong>
         </div>
         <div className="st-metric">
-          <em>{prefillDirect ? (waitingForSale ? "起售倒计时" : "订单状态") : "下次刷新"}</em>
+          <em>{waitingCaption ?? (prefillDirect ? (waitingForSale ? "起售倒计时" : "订单状态") : "下次刷新")}</em>
           <strong className="st-mono">
-            {prefillDirect && !waitingForSale
+            {prefillDirect && !waiting
               ? (status.task?.status === "reconciling" ? "核对中" : order?.status === "pending_payment" ? "待支付"
                 : order?.status === "submitting" ? "等待结果" : taskLabels[order?.status || ""] || "已就绪")
               : status.monitoring ? countdown : "—"}

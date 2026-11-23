@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { defaultConfig, defaultRuntimeInfo, defaultStatus, railwatchStore } from "../store/railwatchStore";
 import { MonitorPage } from "./MonitorPage";
-import { todayIso } from "../lib/tripDate";
+import { isoDaysFromToday, todayIso } from "../lib/tripDate";
 import type { CommandRunner } from "./componentTypes";
 import { queryConfig, querySnapshot } from "../test/queryFixtures";
 
@@ -75,6 +75,34 @@ describe("MonitorPage", () => {
       expect(screen.queryByText("本次未使用官方预填")).toBeNull();
       expect(screen.queryByText("未使用预填，到点后常规查询")).toBeNull();
     }
+  });
+
+  test.each([
+    ["12306 夜间维护休眠中，05:00 恢复", "夜间维护休眠", "12306 夜间维护休眠中，05:00 恢复", "距恢复监控"],
+    ["等待自动停止时间", "等待自动停止", "监控将在定时开始查询前停止", "距自动停止"],
+  ])("%s shows its own countdown with a scheduled sale time", (status_message, heading, message, caption) => {
+    const config = { ...defaultConfig, timer_enabled: true, maintenance_sleep: true,
+      sale_at: new Date(Date.now() + 60_000).toISOString() };
+    railwatchStore.setState({ config, status: { ...defaultStatus, monitoring: true, current_config: config,
+      status_message,
+      task: { run_id: "maintenance", status: "waiting", next_query_at: Date.now() / 1000 + 3600 } } });
+    render(<MonitorPage busy={null} runCommand={vi.fn(async () => undefined)} />);
+    const board = within(screen.getByRole("region", { name: "监控控制" }));
+    expect(board.getByRole("heading", { name: heading })).toBeTruthy();
+    expect(board.getByText(message)).toBeTruthy();
+    expect(board.getByText(caption)).toBeTruthy();
+    expect(screen.queryByText("距定时开售")).toBeNull();
+  });
+
+  test("starting a monitoring run confirms eligible custom dates in order", async () => {
+    const date = isoDaysFromToday(1);
+    const custom_dates = [isoDaysFromToday(3), date, isoDaysFromToday(16)];
+    const config = { ...defaultConfig, date, date_range: "自定义", custom_dates };
+    railwatchStore.setState({ config });
+    const runCommand = vi.fn(async () => undefined);
+    render(<MonitorPage busy={null} runCommand={runCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "启动监控" }));
+    expect(runCommand).toHaveBeenCalledWith("startMonitor", { config, expected_dates: custom_dates.slice(0, 2) });
   });
 
   test("prefill payment shows one confirmation without manufacturing query rows or hits", () => {

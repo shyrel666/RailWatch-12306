@@ -79,6 +79,23 @@ describe("ipcSecurity", () => {
     expect(isExportPathAllowed("exportLog", { path: chosenPath }, grants)).toBe(false);
     expect(isExportPathAllowed("exportLog", {}, grants)).toBe(true);
   });
+
+  test("summarizes scheduled maintenance and auto-stop only when configured", () => {
+    const autoStopAt = "2026-11-24T04:30:00+08:00";
+    const combined = getCommandConfirmation("startMonitor", {
+      config: { maintenance_sleep: true, auto_stop_at: autoStopAt },
+    })?.message;
+    expect(combined).toContain("夜间维护休眠：01:00–05:00 自动暂停，05:00 恢复（北京时间）");
+    expect(combined).toContain(`自动停止时间（北京时间）：${autoStopAt}`);
+
+    const onlyAutoStop = getCommandConfirmation("startMonitor", { auto_stop_at: autoStopAt })?.message;
+    expect(onlyAutoStop).toContain(autoStopAt);
+    expect(onlyAutoStop).not.toContain("夜间维护休眠");
+
+    const disabled = getCommandConfirmation("startMonitor", { config: { maintenance_sleep: false, auto_stop_at: "" } })?.message;
+    expect(disabled).not.toContain("夜间维护休眠");
+    expect(disabled).not.toContain("自动停止时间");
+  });
 });
 
 test("rehearsal commands are restricted and explain the offline boundary", () => {

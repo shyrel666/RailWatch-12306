@@ -6,11 +6,12 @@ import datetime as dt
 import math
 import re
 import urllib.parse
-from railwatch_dates import validate_travel_date, beijing_now
+from railwatch_dates import beijing_now, expand_travel_dates, validate_travel_date
 from railwatch_alternate_options import canonical_deadline, deadline_minutes, normalize_windows
 from dataclasses import asdict
 from railwatch_policies import (DATE_STRATEGIES, NOTIFICATION_CHANNEL_TABLE, ORDER_POLICIES, TRAIN_CODE_BODY, normalize_strategy,
                                 priority_defaults)
+from railwatch_time import resolve_optional_beijing_timestamp, resolve_sale_timestamp
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -47,13 +48,16 @@ TRIP_FIELD_KEYS = (
     "order_watch_enabled",
     "order_watch_interval_seconds",
     "date_range",
+    "custom_dates",
     "date_strategy",
     "date_scan_budget_seconds",
     "smart_rate",
+    "maintenance_sleep",
     "timer_enabled",
     "prefill_enabled",
     "target_time",
     "sale_at",
+    "auto_stop_at",
     "sale_time_source",
     "sale_time_checked_at",
     "burst_window_seconds",
@@ -104,12 +108,15 @@ def default_config(
                                                "order_watch_enabled", "order_watch_interval_seconds",
                                                "prefill_enabled")},
         "date_range": "单日",
+        "custom_dates": [],
         "date_strategy": DATE_STRATEGIES["default"],
         "date_scan_budget_seconds": DATE_STRATEGIES["scan_budget_seconds"],
         "smart_rate": True,
+        "maintenance_sleep": False,
         "timer_enabled": False,
         "target_time": target_time,
         "sale_at": "",
+        "auto_stop_at": "",
         "sale_time_source": "manual",
         "sale_time_checked_at": "",
         "burst_window_seconds": DEFAULT_BURST_WINDOW_SECONDS,
@@ -196,9 +203,15 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     for key in ("sale_at", "sale_time_source", "sale_time_checked_at"):
         trip[key] = str(trip.get(key, "")).strip()
     if trip["sale_at"]:
-        from railwatch_time import resolve_sale_timestamp
         resolve_sale_timestamp(trip)
+    auto_stop_ts = resolve_optional_beijing_timestamp(trip.get("auto_stop_at"), "自动停止时间")
+    trip["auto_stop_at"] = beijing_now(auto_stop_ts).isoformat() if auto_stop_ts is not None else ""
     trip["date_range"] = str(trip.get("date_range", "单日")).strip() or "单日"
+    custom_dates = trip.get("custom_dates", [])
+    if (not isinstance(custom_dates, list) or len(custom_dates) > 5 or
+            not all(isinstance(value, str) for value in custom_dates)):
+        raise ValueError("自定义日期必须是最多包含 5 项的日期列表。")
+    trip["custom_dates"] = list(dict.fromkeys(validate_travel_date(value).isoformat() for value in custom_dates))
     trip["date_strategy"] = str(trip.get("date_strategy", DATE_STRATEGIES["default"]))
     if trip["date_strategy"] not in DATE_STRATEGIES["strategies"]:
         raise ValueError("不支持的多日期策略")
@@ -240,6 +253,7 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     trip["auto_alternate"] = _to_bool(trip.get("auto_alternate"))
     trip["keep_alive"] = _to_bool(trip.get("keep_alive"))
     trip["smart_rate"] = _to_bool(trip.get("smart_rate"))
+    trip["maintenance_sleep"] = _to_bool(trip.get("maintenance_sleep"))
     trip["timer_enabled"] = _to_bool(trip.get("timer_enabled"))
     trip["prefill_enabled"] = _to_bool(trip.get("prefill_enabled", ORDER_POLICIES["prefill_enabled"]))
     normalize_strategy(trip, raw_trip)
@@ -463,6 +477,8 @@ def validate_trip_draft(payload: object) -> dict:
         normalize_passenger_selections(config["passenger_selections"])
     if "alternate_new_train_windows" in config:
         normalize_windows(config["alternate_new_train_windows"])
+    if "custom_dates" in config and not all(isinstance(value, str) for value in config["custom_dates"]):
+        raise ValueError("草稿字段类型无效：custom_dates")
     return deepcopy(payload)
 
 
@@ -533,11 +549,10 @@ def automation_config_issue(config) -> Optional[str]:
             if not deadline_minutes(config.get("alternate_deadline", "开车前1小时")):
                 raise ValueError("请重新选择截止兑现时间，仅支持官网提供的选项。")
             if config.get("alternate_accept_new_trains"):
-                from railwatch_dates import expand_travel_dates
                 windows = normalize_windows(config.get("alternate_new_train_windows", []))
                 if not windows:
                     raise ValueError("接受新增列车时，请设置至少一个日期和出发时段。")
-                dates = expand_travel_dates(config.get("date", ""), config.get("date_range", "单日"))
+                dates = expand_travel_dates(config.get("date", ""), config.get("date_range", "单日"), config.get("custom_dates"))
                 if any(item.date not in dates for item in windows):
                     raise ValueError("新增列车日期须在当前行程日期范围内，请重新选择。")
     except ValueError as exc:

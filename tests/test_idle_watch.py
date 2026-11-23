@@ -89,6 +89,19 @@ class IdleBridgeTests(unittest.TestCase):
             self.assertEqual(self.notices(), [])
             self.assertEqual(self.bridge.list_sale_reminders()["items"][0]["sale_at"], NOW + 4800)
 
+    def test_saved_lead_controls_existing_reminders_on_next_check(self):
+        self.bridge._official_sale_at = Mock(return_value=NOW + 1200)
+        with patch("railwatch_bridge.time.time", return_value=NOW):
+            self.bridge.save_preferences(sale_reminder_lead_minutes=15)
+            added = self.bridge.add_sale_reminder("上海虹桥", "北京南", "2026-12-01")
+            self.assertEqual(added["lead_minutes"], 15)
+            self.bridge._remind_sales()
+            self.assertEqual(self.notices(), [])
+            self.bridge.save_preferences(sale_reminder_lead_minutes=60)
+            self.bridge._remind_sales()
+            self.assertEqual(len(self.notices()), 1)
+            self.assertEqual(self.bridge.list_sale_reminders()["lead_minutes"], 60)
+
     def test_unknown_official_time_refuses_a_reminder(self):
         self.bridge._official_sale_at = Mock(return_value=None)
         with self.assertRaisesRegex(ValueError, "未能确定该日期的官方起售时间"):

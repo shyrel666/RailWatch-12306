@@ -22,7 +22,7 @@ import {
   getTripDateStatus,
   useBeijingToday,
 } from "../lib/tripDate";
-import { displayedConfig } from "../lib/taskDisplay";
+import { displayedConfig, isAutoStopWaiting, isMaintenanceWaiting } from "../lib/taskDisplay";
 import { dashboardAction, hasSetupWarning, hasUnresolvedOrder } from "../lib/dashboardState";
 import { countdown } from "../lib/saleCalendar";
 import { automationConfigIssue } from "../lib/automationReadiness";
@@ -33,7 +33,7 @@ import { DepartureBoard, TrainCodes, type BoardTone } from "./DepartureBoard";
 import type { WorkflowStep } from "./DisplayPrimitives";
 import { TripDateWarning } from "./DisplayPrimitives";
 import { QueryPulseCard, RunHistoryCard } from "./DashboardCharts";
-import { SaleCalendar } from "./SaleCalendar";
+import { SaleCalendar, type SaleCalendarSelection } from "./SaleCalendar";
 
 function formatTripDate(date: string) {
   if (!date) {
@@ -126,8 +126,9 @@ function boardStatus(status: RailWatchStatus): {
   if (hasSetupWarning(status))
     return { tone: "wait", label: status.environment_ready ? "等待登录" : "等待环境检查", live: false };
   if (status.error_message) return { tone: "stop", label: "监控异常", live: false };
+  if (isAutoStopWaiting(status)) return { tone: "wait", label: status.status_message, live: false };
   if (status.monitoring && status.task?.status === "waiting")
-    return { tone: "wait", label: "等待定时启动", live: false };
+    return { tone: "wait", label: isMaintenanceWaiting(status) ? "夜间维护休眠" : "等待定时启动", live: false };
   if (status.monitoring) return { tone: "go", label: "监控运行中", live: true };
   return { tone: "idle", label: "监控未运行", live: false };
 }
@@ -149,6 +150,15 @@ function boardDisplay(
   loops: number,
   now: number,
 ) {
+  if (isAutoStopWaiting(status) && status.task?.next_query_at) {
+    const stopAt = status.task.next_query_at * 1000;
+    return {
+      caption: "距自动停止",
+      value: countdown(stopAt, now),
+      note: `北京时间 ${formatClockTime(stopAt)} 停止`,
+      tone: "led" as const,
+    };
+  }
   if (status.monitoring && status.task?.started_at) {
     const seconds = Math.max(0, Math.floor(now / 1000 - status.task.started_at));
     return {
@@ -197,6 +207,7 @@ export function DashboardPage({ onCheckEnvironment }: { onCheckEnvironment?: () 
   const loops = useRailWatchStore((state) => state.monitorLoops);
   const human = useRailWatchStore((state) => state.lastHumanAction);
   const navigate = useRailWatchStore((state) => state.setActivePage);
+  const setConfig = useRailWatchStore((state) => state.setConfig);
   const windowDays = useRailWatchStore(
     (state) => state.runtime.date_policy?.presale_window_days,
   );
@@ -208,6 +219,7 @@ export function DashboardPage({ onCheckEnvironment }: { onCheckEnvironment?: () 
     config.date_range,
     executionReference(config, today),
     windowDays,
+    config.custom_dates,
   );
   const tripValid = Boolean(
     config.from_station_cn.trim() &&
@@ -230,6 +242,25 @@ export function DashboardPage({ onCheckEnvironment }: { onCheckEnvironment?: () 
   const dateStatus = getTripDateStatus(config.date, today, windowDays);
   const board = boardStatus(status);
   const display = boardDisplay(config, status, dateStatus.daysFromToday, loops, now);
+  const applyCalendarDate = ({ date, saleAt, targetTime, checkedAt }: SaleCalendarSelection) => {
+    if (saleAt && targetTime && checkedAt != null) {
+      setConfig({
+        date,
+        timer_enabled: true,
+        sale_at: saleAt,
+        target_time: targetTime,
+        sale_time_source: "12306",
+        sale_time_checked_at: new Date(checkedAt * 1000).toISOString(),
+      });
+      navigate("行程设置", "trip-timer");
+      return;
+    }
+    const previousOfficialTimer = draft.date !== date && draft.sale_time_source === "12306";
+    setConfig(previousOfficialTimer
+      ? { date, timer_enabled: false, sale_at: "", target_time: "", sale_time_source: "", sale_time_checked_at: "" }
+      : { date });
+    navigate("行程设置", "trip-basics");
+  };
   return (
     <div className="dashboard" aria-label="RailWatch 仪表盘">
       <DepartureBoard
@@ -315,7 +346,8 @@ export function DashboardPage({ onCheckEnvironment }: { onCheckEnvironment?: () 
         <RunHistoryCard monitoring={status.monitoring} now={now} />
       </div>
       <SaleCalendar station={config.from_station_cn} destination={config.to_station_cn} tripDate={config.date}
-        windowDays={windowDays} now={now} />
+        windowDays={windowDays} now={now}
+        onApplyDate={config.from_station_cn.trim() === draft.from_station_cn.trim() ? applyCalendarDate : undefined} />
       <section className="dashboard-events" aria-label="最近活动">
         <div className="section-heading">
           <h2><ScrollText size={15} /> 最近活动</h2>

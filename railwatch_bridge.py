@@ -52,6 +52,7 @@ from railwatch_preferences import (
     save_trip_draft,
     unprotect_local_secret,
     uses_system_keychain,
+    validate_sale_reminder_lead_minutes,
 )
 from railwatch_trip_choices import load_trip_choices, remember_route, save_train_favorites
 from railwatch_train_schedules import TrainSchedules
@@ -67,7 +68,15 @@ from railwatch_system import (
     probe_connectivity,
     proxy_status_snapshot,
 )
-from railwatch_time import ServerTimeSync, get_server_time_sync, resolve_sale_timestamp
+from railwatch_time import (
+    MONITOR_AUTO_STOP_MESSAGE,
+    MONITOR_AUTO_STOP_TITLE,
+    ServerTimeSync,
+    get_server_time_sync,
+    maintenance_resume_timestamp,
+    resolve_optional_beijing_timestamp,
+    resolve_sale_timestamp,
+)
 from railwatch_orders import OrderJournal, OrderIntent, OrderResult, STAGES
 from railwatch_order_page import OrderPage
 from railwatch_prefill import PrefillAdapter, PrefillFallback, prefill_eligible_reason
@@ -138,6 +147,7 @@ CHROMEDRIVER_MIRROR_HINT = (
 ORDER_OBSERVATION_SECONDS = 600
 MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
 IDLE_TICK_SECONDS = 15.0
+_PREFERENCE_UNSET = object()
 SCHEDULE_FLUSH_SECONDS = 300.0
 MONITOR_PREWARM_INTERVAL_SECONDS = 30.0
 NOTIFICATION_SETTINGS_FILE = "notification_settings.json"
@@ -486,8 +496,19 @@ class RailWatchBridge:
             self._transition(task)
             task.cancel.wait(min(remaining, 0.2))
 
+    def _wait_until_wall_time(self, task, deadline: float) -> Optional[float]:
+        """Return the wall-clock reading that reached the deadline, or None on cancellation."""
+        while not task.cancel.is_set():
+            now = time.time()
+            if now >= deadline:
+                return now
+            self._transition(task)
+            task.cancel.wait(min(deadline - now, 30.0))
+        return None
+
     def _valid_dates(self, config, timestamp=None, announce=False):
-        dates, skipped = eligible_travel_dates(config["date"], config.get("date_range", "单日"), beijing_now(timestamp).date())
+        dates, skipped = eligible_travel_dates(config["date"], config.get("date_range", "单日"),
+                                              beijing_now(timestamp).date(), config.get("custom_dates"))
         if announce:
             for item in skipped:
                 self.log(f"跳过 {item['date']}：{item['reason']}", "WARN")
@@ -726,7 +747,8 @@ class RailWatchBridge:
         return sale_at.timestamp() if sale_at is not None else None
 
     def _sale_reminder_list(self, now) -> dict:
-        return {"items": self.sale_reminders.items(now), "lead_minutes": IDLE_POLICIES["sale_reminder_lead_minutes"]}
+        return {"items": self.sale_reminders.items(now),
+                "lead_minutes": load_ui_preferences(self.data_dir)["sale_reminder_lead_minutes"]}
 
     def list_sale_reminders(self) -> dict:
         return self._sale_reminder_list(time.time())
@@ -779,7 +801,7 @@ class RailWatchBridge:
 
     def _remind_sales(self) -> None:
         now = time.time()
-        lead = IDLE_POLICIES["sale_reminder_lead_minutes"] * 60
+        lead = load_ui_preferences(self.data_dir)["sale_reminder_lead_minutes"] * 60
         for entry in self.sale_reminders.due(now, lead):
             # The reminder was set from the official schedule; recheck it once before sending.
             try:
@@ -803,7 +825,8 @@ class RailWatchBridge:
         task = self._task if self.is_monitoring else None
         covered = bool(task and task.config.get("from_station_cn") == entry["from_station"]
                        and task.config.get("to_station_cn") == entry["to_station"]
-                       and entry["date"] in expand_travel_dates(task.config.get("date", ""), task.config.get("date_range", "单日")))
+                       and entry["date"] in expand_travel_dates(task.config.get("date", ""), task.config.get("date_range", "单日"),
+                                                               task.config.get("custom_dates")))
         hints = ["当前监控任务已包含该日期" if covered else "如需抢票，请提前设置定时任务"]
         if not self.state.login_ready:
             hints.insert(0, "受控浏览器尚未确认登录，请提前登录 12306")
@@ -1862,8 +1885,11 @@ class RailWatchBridge:
 
     def save_preferences(self, theme: Optional[str] = None, notification_settings: Optional[dict] = None,
                          close_to_tray: Optional[bool] = None, auto_rehearsal: Optional[bool] = None,
-                         idle_keep_alive: Optional[bool] = None) -> dict:
+                         idle_keep_alive: Optional[bool] = None,
+                         sale_reminder_lead_minutes: object = _PREFERENCE_UNSET) -> dict:
         ui_patch = {}
+        if sale_reminder_lead_minutes is not _PREFERENCE_UNSET:
+            ui_patch["sale_reminder_lead_minutes"] = validate_sale_reminder_lead_minutes(sale_reminder_lead_minutes)
         if idle_keep_alive is not None:
             if not isinstance(idle_keep_alive, bool):
                 raise ValueError("空闲保持登录必须为布尔值。")
@@ -2148,14 +2174,38 @@ class RailWatchBridge:
             # Freeze the date before every potentially blocking initialization step.
             if config.get("timer_enabled") and task.target_timestamp is None:
                 task.target_timestamp = resolve_sale_timestamp(config)
-            if task.cancel.is_set():
+            auto_stop_ts = resolve_optional_beijing_timestamp(config.get("auto_stop_at"), "自动停止时间")
+            maintenance_sleep = config.get("maintenance_sleep", False)
+            now = time.time()
+            if task.cancel.is_set() or self._auto_stop_monitor_if_due(auto_stop_ts, now):
+                return
+            resume_ts = maintenance_resume_timestamp(now) if maintenance_sleep else None
+            if resume_ts is not None:
+                self.log("当前处于 12306 夜间维护时段（01:00–05:00），监控已暂停，将在 05:00 自动恢复。")
+                self._transition(task, "waiting", next_query_at=resume_ts, message="12306 夜间维护休眠中，05:00 恢复")
+                wait_until = min(resume_ts, auto_stop_ts) if auto_stop_ts is not None else resume_ts
+                now = self._wait_until_wall_time(task, wait_until)
+                if now is None or self._auto_stop_monitor_if_due(auto_stop_ts, now):
+                    return
+                self.log("12306 维护时段结束，恢复余票监控。")
+            if task.target_timestamp is not None and auto_stop_ts is not None and auto_stop_ts <= task.target_timestamp:
+                # The deadline wins even when the scheduled query has yet to start.
+                self._transition(task, "waiting", next_query_at=auto_stop_ts, message="等待自动停止时间")
+                now = self._wait_until_wall_time(task, auto_stop_ts)
+                if now is not None:
+                    self._auto_stop_monitor_if_due(auto_stop_ts, now)
                 return
             if not CORE_AVAILABLE or TicketMonitor is None:
                 raise RuntimeError(f"核心模块不可用: {CORE_IMPORT_ERROR}")
+            if resume_ts is not None:
+                self._transition(task, "preparing")
             with self._driver_lock:
+                if task.cancel.is_set():
+                    return
                 driver = self._ensure_driver()
                 auto_rehearsal = (config.get("timer_enabled") and task.target_timestamp
                                   and task.target_timestamp - time.time() > 900
+                                  and not (maintenance_sleep and maintenance_resume_timestamp(time.time()) is not None)
                                   and load_ui_preferences(self.data_dir).get("auto_rehearsal", False))
                 if auto_rehearsal and time.monotonic() - self._last_rehearsal_at < 120:
                     self.log("刚完成过彩排，本次任务跳过自动彩排；复盘不会包含本任务的预测。", "WARN")
@@ -2222,11 +2272,18 @@ class RailWatchBridge:
                         order_journal=self.order_journal, on_order=self._handle_order, run_id=task.run_id,
                         train_schedules=self.train_schedules,
                     )
+                    if (maintenance_sleep or auto_stop_ts is not None) and not monitor.wait_for_monitoring_window():
+                        return
                     if config.get("timer_enabled") and not monitor.prepare():
+                        return
+                    if self._auto_stop_monitor_if_due(auto_stop_ts, time.time()):
                         return
                     armed_prefill = None
                     prefill_adapter = None
                     prefill_skip = prefill_eligible_reason(config, task.target_timestamp, now=time.time())
+                    if (prefill_skip is None and maintenance_sleep and
+                            (maintenance_resume_timestamp(time.time()) or maintenance_resume_timestamp(task.target_timestamp))):
+                        prefill_skip = "起售时间处于夜间维护休眠时段"
                     if (prefill_skip is not None and task.target_timestamp is not None and config.get("timer_enabled")
                             and config.get("auto_submit") and config.get("prefill_enabled", True) is not False):
                         # The user asked for the pre-fill; say why this run starts without it.
@@ -2308,9 +2365,14 @@ class RailWatchBridge:
                         self.log("准备完成时已进入最后10秒或超过起售点；本次继续执行，但不能计作准点准备完成。", "WARN")
                     if config.get("timer_enabled") and not self._wait_for_target_time(config):
                         return
-                    if task.cancel.is_set():
+                    if task.cancel.is_set() or self._auto_stop_monitor_if_due(auto_stop_ts, time.time()):
                         return
                     run_query_loop = True
+                    if armed_prefill is not None and maintenance_sleep and maintenance_resume_timestamp(time.time()):
+                        # Resume with a fresh query if the armed action missed its window.
+                        armed_prefill = None
+                        self.order_journal.mark(task.run_id, "prefill_fallback", detail={"stage": "maintenance_sleep"})
+                        self._publish_prefill_notice("夜间维护休眠后恢复常规余票查询")
                     if armed_prefill is not None and prefill_adapter is not None:
                         outcome = prefill_adapter.execute_armed(
                             armed_prefill,
@@ -2519,6 +2581,7 @@ class RailWatchBridge:
 
     def _wait_for_target_timestamp(self, wait_until: float, config: dict) -> bool:
         wall, mono = time.time(), time.monotonic()
+        auto_stop_ts = resolve_optional_beijing_timestamp(config.get("auto_stop_at"), "自动停止时间")
         deadline = mono + max(0, wait_until - wall)
         last_check, last_tick = mono, mono
         while self.is_monitoring:
@@ -2526,6 +2589,8 @@ class RailWatchBridge:
             if task.cancel.is_set():
                 return False
             current_mono, current_wall = time.monotonic(), time.time()
+            if self._auto_stop_monitor_if_due(auto_stop_ts, current_wall):
+                return False
             drift = (current_wall - wall) - (current_mono - mono)
             if abs(drift) > 1 or current_mono - last_tick > 5:
                 self._handle_human_action({"message": "系统时间发生跳变或电脑刚从休眠恢复，请重新检查起售时间、登录和订单后启动。"})
@@ -2542,7 +2607,9 @@ class RailWatchBridge:
             final_login_check = (10 < remaining <= 60 and not task.sale_login_checked
                                  and current_mono >= task.sale_login_retry_at
                                  and (config.get("auto_submit") or config.get("auto_alternate")))
-            if final_login_check or (remaining > 10 and config.get("keep_alive") and current_mono - last_check >= 60):
+            keep_alive_due = remaining > 10 and config.get("keep_alive") and current_mono - last_check >= 60
+            if (final_login_check or keep_alive_due) and not (
+                    config.get("maintenance_sleep") and maintenance_resume_timestamp(current_wall)):
                 self._send_keep_alive()
                 last_check = time.monotonic()
                 task.last_login_check = last_check
@@ -2570,6 +2637,8 @@ class RailWatchBridge:
                 # Recalculate the deadline after a blocking browser probe; never
                 # spend the old remaining duration after the target has arrived.
                 continue
+            if auto_stop_ts is not None:
+                remaining = min(remaining, auto_stop_ts - current_wall)
             task.cancel.wait(min(0.02 if remaining <= 10 else 0.2, remaining))
         return False
 
@@ -2766,8 +2835,19 @@ $targets.Count
         owner = getattr(self._event_context, "run_id", None)
         return not owner or bool(self._task and owner == self._task.run_id)
 
+    def _auto_stop_monitor_if_due(self, auto_stop_ts: Optional[float], now: float) -> bool:
+        if auto_stop_ts is None or now < auto_stop_ts:
+            return False
+        self.log(MONITOR_AUTO_STOP_MESSAGE)
+        self._handle_notify(MONITOR_AUTO_STOP_TITLE, MONITOR_AUTO_STOP_MESSAGE)
+        return True
+
     def _handle_notify(self, title: str, message: str) -> None:
         if not self._owns_context():
+            return
+        if title == MONITOR_AUTO_STOP_TITLE and message == MONITOR_AUTO_STOP_MESSAGE:
+            self.emit("notify", {"title": title, "message": message, "priority": "notice",
+                                 "event_id": f"monitor_auto_stop:{self._task.run_id if self._task else 'idle'}"})
             return
         self.log(f"{title}: {message}", "SUCCESS")
         self._notify_async(title, message, event_type="verification")
@@ -2888,13 +2968,16 @@ $targets.Count
             order_watch_enabled=config["order_watch_enabled"],
             order_watch_interval_seconds=config["order_watch_interval_seconds"],
             date_range=config["date_range"],
+            custom_dates=config["custom_dates"],
             date_strategy=config["date_strategy"],
             date_scan_budget_seconds=config["date_scan_budget_seconds"],
             smart_rate=config["smart_rate"],
+            maintenance_sleep=config["maintenance_sleep"],
             timer_enabled=config["timer_enabled"],
             prefill_enabled=config.get("prefill_enabled", True),
             target_time=config["target_time"],
             sale_at=config.get("sale_at", ""),
+            auto_stop_at=config["auto_stop_at"],
             sale_time_source=config.get("sale_time_source", "manual"),
             sale_time_checked_at=config.get("sale_time_checked_at", ""),
             burst_window_seconds=config.get("burst_window_seconds", 45),

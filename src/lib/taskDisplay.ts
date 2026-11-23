@@ -4,6 +4,15 @@ export function displayedConfig(config: RailWatchConfig, status: RailWatchStatus
   return status.monitoring ? { ...config, ...status.current_config } : config;
 }
 
+export function isMaintenanceWaiting(status: RailWatchStatus): boolean {
+  return status.monitoring && status.task?.status === "waiting"
+    && status.status_message === "12306 夜间维护休眠中，05:00 恢复";
+}
+
+export function isAutoStopWaiting(status: RailWatchStatus): boolean {
+  return status.monitoring && status.task?.status === "waiting" && status.status_message === "等待自动停止时间";
+}
+
 export const taskLabels: Record<string, string> = {
   preparing: "准备监控", waiting: "等待定时启动", querying: "查询中", backoff: "等待下一次查询",
   stopping: "正在停止", stopped: "监控已停止", human_action: "需要人工处理", hit: "已命中", error: "监控异常",

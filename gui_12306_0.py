@@ -43,12 +43,19 @@ from railwatch_alternate_flow import AlternateFlow
 from railwatch_orders import OrderIntent, OrderResult
 from railwatch_config_contract import parse_codes, parse_passenger_names
 from railwatch_order_page import OrderPage
-from railwatch_time import ServerTimeSync, get_server_time_sync
+from railwatch_time import (
+    MONITOR_AUTO_STOP_MESSAGE,
+    MONITOR_AUTO_STOP_TITLE,
+    ServerTimeSync,
+    get_server_time_sync,
+    maintenance_resume_timestamp,
+    resolve_optional_beijing_timestamp,
+)
 from railwatch_preferences import atomic_write_json
 from railwatch_seats import seat_prefix
 from railwatch_task import is_session_lost
 from railwatch_date_plan import DatePlan
-from railwatch_policies import DATE_STRATEGIES, QUERY_STRATEGIES
+from railwatch_policies import DATE_STRATEGIES, ORDER_POLICIES, QUERY_STRATEGIES
 from railwatch_timing import PhaseTiming
 
 
@@ -177,9 +184,12 @@ class QueryConfig:
     order_watch_enabled: bool = True
     order_watch_interval_seconds: int = 60
     date_range: str = "单日"
+    custom_dates: List[str] = field(default_factory=list)
     date_strategy: str = "round_robin"
     date_scan_budget_seconds: float = 30.0
     smart_rate: bool = True
+    maintenance_sleep: bool = False
+    auto_stop_at: str = ""
     timer_enabled: bool = False
     target_time: str = "00:00:00"
     sale_at: str = ""
@@ -220,9 +230,12 @@ class QueryConfig:
             "order_watch_enabled": self.order_watch_enabled,
             "order_watch_interval_seconds": self.order_watch_interval_seconds,
             "date_range": self.date_range,
+            "custom_dates": self.custom_dates,
             "date_strategy": self.date_strategy,
             "date_scan_budget_seconds": self.date_scan_budget_seconds,
             "smart_rate": self.smart_rate,
+            "maintenance_sleep": self.maintenance_sleep,
+            "auto_stop_at": self.auto_stop_at,
             "timer_enabled": self.timer_enabled,
             "prefill_enabled": self.prefill_enabled,
             "target_time": self.target_time,
@@ -262,9 +275,12 @@ class QueryConfig:
             order_watch_enabled=data.get("order_watch_enabled", True),
             order_watch_interval_seconds=data.get("order_watch_interval_seconds", 60),
             date_range=data.get("date_range", "单日"),
+            custom_dates=data.get("custom_dates", []),
             date_strategy=data.get("date_strategy", "round_robin"),
             date_scan_budget_seconds=data.get("date_scan_budget_seconds", 30.0),
             smart_rate=data.get("smart_rate", True),
+            maintenance_sleep=data.get("maintenance_sleep", False),
+            auto_stop_at=data.get("auto_stop_at", ""),
             timer_enabled=data.get("timer_enabled", False),
             prefill_enabled=data.get("prefill_enabled", True),
             target_time=data.get("target_time", "00:00:00"),
@@ -718,6 +734,8 @@ class TicketMonitor(BaseHandler):
         self.on_hit = on_hit
         self.human_action = human_action_callback
         self.server_time_sync = server_time_sync or get_server_time_sync(log_callback=self.log)
+        self._maintenance_sleep = cfg.get("maintenance_sleep", False)
+        self._auto_stop_ts = resolve_optional_beijing_timestamp(cfg.get("auto_stop_at"), "自动停止时间")
         
         # 解析目标车次和席别
         self.target_trains = self._parse_train_targets()
@@ -747,7 +765,10 @@ class TicketMonitor(BaseHandler):
         self._query_timing = None
         self._query_invalidated = False
         self._date_revisit_ms = None
-        self.travel_dates = expand_travel_dates(travel_date, str(cfg.get("date_range", "单日"))) if travel_date else []
+        self.travel_dates = (
+            expand_travel_dates(travel_date, str(cfg.get("date_range", "单日")), cfg.get("custom_dates"))
+            if travel_date else []
+        )
         self.current_loop_date = ""
         # 参数同步：定时/爆发路径不依赖浏览器残留的上次查询条件
         self.param_filler = param_filler
@@ -798,8 +819,10 @@ class TicketMonitor(BaseHandler):
             # Freeze the eligible date set from the task, not a range expanded
             # again around the most recently queried date.
             self.date_plan.sync(self.travel_dates)
+            dates = (self.travel_dates[:ORDER_POLICIES["max_dates"]]
+                     if self.cfg.get("date_range") == "自定义" else self.date_plan.dates)
             saved_config["_alternate_dates"] = ([intent.date] if self._sale_focus_active() or self._prefer_alternate
-                                                else list(self.date_plan.dates))
+                                                else list(dates))
             self.alternate_flow.cfg = saved_config
             def bind_intent(updated):
                 nonlocal intent
@@ -903,9 +926,13 @@ class TicketMonitor(BaseHandler):
         else:
             time.sleep(seconds)
 
-    def _sleep(self, seconds):
+    def _sleep(self, seconds, *, backoff=True):
         self._finish_query_timing()
-        self.tick(status="backoff", next_query_at=time.time() + seconds)
+        if backoff:
+            now = time.time()
+            if self._auto_stop_ts is not None:
+                seconds = min(seconds, max(0.0, self._auto_stop_ts - now))
+            self.tick(status="backoff", next_query_at=now + seconds)
         if seconds >= 0.2 and self.order_journal:
             # Write buffered query telemetry while idle, never before a click.
             # The flush counts toward this wait so the cadence does not drift.
@@ -1005,14 +1032,51 @@ class TicketMonitor(BaseHandler):
     def _candidate_ready(self, train, seat, action):
         return self._candidate_key(train, seat, action) not in self._candidate_cooldowns
 
+    def _stop_at_deadline(self, now: float) -> bool:
+        if self._auto_stop_ts is None or now < self._auto_stop_ts:
+            return False
+        self.log(MONITOR_AUTO_STOP_MESSAGE)
+        self.notify(MONITOR_AUTO_STOP_TITLE, MONITOR_AUTO_STOP_MESSAGE)
+        return True
+
+    def wait_for_monitoring_window(self) -> bool:
+        """Wait for maintenance to end, or return false on cancellation or auto-stop."""
+        if self.should_stop():
+            return False
+        if not self._maintenance_sleep and self._auto_stop_ts is None:
+            return True
+
+        now = time.time()
+        if self._stop_at_deadline(now):
+            return False
+        resume_ts = maintenance_resume_timestamp(now) if self._maintenance_sleep else None
+        if resume_ts is None:
+            return True
+
+        self.log("当前处于 12306 夜间维护时段（01:00–05:00），监控已暂停，将在 05:00 自动恢复。")
+        self.tick(status="waiting", next_query_at=resume_ts, message="12306 夜间维护休眠中，05:00 恢复")
+        sleep_until = min(resume_ts, self._auto_stop_ts) if self._auto_stop_ts is not None else resume_ts
+        step = 30.0 if self._wait_callback else 0.2
+        while now < sleep_until and not self.should_stop():
+            self._sleep(min(step, sleep_until - now), backoff=False)
+            now = time.time()
+        if self.should_stop() or self._stop_at_deadline(now):
+            return False
+
+        self.log("12306 维护时段结束，恢复余票监控。")
+        self._temporary_query_failures = 0
+        if self.rate_limiter:
+            self.rate_limiter.reset()
+        return True
+
     def run(self):
         """Run a prepared monitor without repeating startup work at the deadline."""
-        if not self._prepared and not self.prepare():
+        if not self._prepared and (not self.wait_for_monitoring_window() or not self.prepare()):
             return
         base_interval = max(1.0, _read_float(self.cfg.get("interval", 3), 3.0))
 
         loop_count = 0
-        while not self.should_stop():
+        while self.wait_for_monitoring_window():
             loop_count += 1
             try:
                 # 生成本轮的随机间隔
@@ -1546,7 +1610,9 @@ class TicketMonitor(BaseHandler):
                         return train, seat, value, row, book, "book"
                 if not self.target_seats and not self.auto_submit:
                     return train, "未指定席别", "有票", row, book, "book"
-            if self.auto_alternate:
+            if self.auto_alternate and (
+                    self.cfg.get("date_range") != "自定义" or self.cfg.get("alternate_mode") != "multiple"
+                    or self.cfg.get("date") in self.travel_dates[:ORDER_POLICIES["max_dates"]]):
                 for _, train, snapshot in ranked:
                     row = snapshot["element"]
                     for seat in self.target_seats:

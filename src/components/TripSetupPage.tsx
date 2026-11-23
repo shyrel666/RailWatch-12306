@@ -22,9 +22,12 @@ import {
 import { useRailWatchStore } from "../store/useRailWatchStore";
 import { tripFingerprint } from "../store/railwatchStore";
 import {
+  MAX_CUSTOM_DATES,
   executionReference,
+  expandTripDates,
   getDateRangeStatus,
   getTripDateStatus,
+  orderedCustomDates,
   todayIso,
   useBeijingToday,
 } from "../lib/tripDate";
@@ -38,8 +41,6 @@ import {
   priorityDefaults, queryPriority, requestMode as getRequestMode,
   type QueryPriority, type RequestMode,
 } from "../lib/queryStrategy";
-
-type DateRangePreset = "单日" | "±1天" | "±2天";
 
 const trainCodes = (value: string) => [...new Set(value.toUpperCase().split(/[,，、;；\s]+/).filter(Boolean))];
 
@@ -172,6 +173,49 @@ function SegmentedControl<T extends string>({
   );
 }
 
+function CustomTripDates({ config, onChange }: {
+  config: RailWatchConfig;
+  onChange: (dates: string[]) => void;
+}) {
+  const [newDate, setNewDate] = useState("");
+  const dates = orderedCustomDates(config.date, config.custom_dates);
+  const isPrimary = (date: string) => Boolean(date) && date === config.date;
+  const atLimit = dates.filter(date => !isPrimary(date)).length >= MAX_CUSTOM_DATES - 1;
+  const canAdd = !atLimit && !dates.includes(newDate) && expandTripDates(newDate, "单日").length > 0;
+  const moveDate = (index: number, offset: number) => {
+    const next = [...dates];
+    const target = index + offset;
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+
+  return <div className="trip-custom-dates trip-field" role="group" aria-labelledby="trip-custom-dates-label">
+    <span id="trip-custom-dates-label">自定义日期</span>
+    {dates.length > 0 && <ol className="trip-custom-date-list">
+      {dates.map((date, index) => <li key={date}>
+        <span className="mono">{date || "空日期"}</span>
+        {isPrimary(date) && <small>首选</small>}
+        <span className="trip-custom-date-actions">
+          <Button type="text" size="small" aria-label={`上移日期 ${date || "空日期"}`} disabled={index === 0}
+            onClick={() => moveDate(index, -1)}>↑</Button>
+          <Button type="text" size="small" aria-label={`下移日期 ${date || "空日期"}`} disabled={index === dates.length - 1}
+            onClick={() => moveDate(index, 1)}>↓</Button>
+          {!isPrimary(date) && <Button type="text" size="small" aria-label={`移除日期 ${date || "空日期"}`}
+            onClick={() => onChange(dates.filter(item => item !== date))}>移除</Button>}
+        </span>
+      </li>)}
+    </ol>}
+    <div className="trip-input-with-action">
+      <input aria-label="新增出发日期" className="native-input" type="date" value={newDate} disabled={atLimit}
+        onChange={event => setNewDate(event.target.value)} />
+      <Button disabled={!canAdd} onClick={() => { onChange([...dates, newDate]); setNewDate(""); }}>添加日期</Button>
+    </div>
+    {atLimit && <small className="field-help">已选择最多 5 个日期</small>}
+    {dates.length > 3 && config.auto_alternate && config.alternate_mode === "multiple" &&
+      <small className="trip-date-hint is-warning" role="status">多组合候补最多提交前 3 个日期</small>}
+  </div>;
+}
+
 function parsePassengers(value: string) {
   return value
     .split(/[,，、]/)
@@ -204,10 +248,7 @@ export function TripSetupPage({
   const applyDraft = useRailWatchStore(state => state.applyDraft);
   const dismissDraft = useRailWatchStore(state => state.dismissDraft);
   const markConfigSaved = useRailWatchStore(state => state.markConfigSaved);
-  const [dateRange, setDateRange] = useState<DateRangePreset>(
-    () => (config.date_range as DateRangePreset) || "单日",
-  );
-  useEffect(() => setDateRange((config.date_range as DateRangePreset) || "单日"), [config.date_range]);
+  const dateRange = config.date_range || "单日";
   const formalDirty = savedConfig ? tripFingerprint(config) !== tripFingerprint(savedConfig) : false;
   const formatSavedAt = (at: number | null) => at === null ? "未知" : new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
@@ -250,6 +291,7 @@ export function TripSetupPage({
     config.date_range,
     executionReference(config, today),
     windowDays,
+    config.custom_dates,
   );
   const passengerNames = useMemo(
     () => parsePassengers(config.passengers),
@@ -375,7 +417,6 @@ export function TripSetupPage({
     if (loaded) {
       setConfig(loaded);
       markConfigSaved(loaded, savedAt ?? Date.now() / 1000);
-      setDateRange((loaded.date_range as DateRangePreset) || "单日");
     }
   };
 
@@ -506,18 +547,17 @@ export function TripSetupPage({
                       {rangeStatus.skipped.length ? ` · 跳过 ${rangeStatus.skipped.map(date => date.slice(5)).join("、")}` : ""}
                     </small> : null}
                 </label>
-                <div className="trip-field">
+                <div className="trip-field trip-date-range">
                   <span>日期范围</span>
                   <SegmentedControl
                     ariaLabel="日期范围"
-                    options={["单日", "±1天", "±2天"] as const}
+                    options={["单日", "±1天", "±2天", "自定义"] as const}
                     value={dateRange}
-                    onChange={(next) => {
-                      setDateRange(next);
-                      update({ date_range: next });
-                    }}
+                    onChange={(next) => update({ date_range: next })}
                   />
                 </div>
+                {dateRange === "自定义" &&
+                  <CustomTripDates config={config} onChange={custom_dates => update({ custom_dates })} />}
                 <div className="trip-field">
                   <span className="trip-field-label-with-help">车次
                     <Hint text="可填写多个车次，按顺序优先。留空则查询本路线全部车次，可在查询结果中勾选加入。" /></span>
@@ -788,6 +828,15 @@ export function TripSetupPage({
                     checked={config.smart_rate}
                     onChange={(checked) => update({ smart_rate: checked })}
                   />
+                </span>
+                <span className="switch-row trip-maintenance-switch">
+                  <span className="trip-maintenance-label">
+                    <span className="switch-row-label">夜间维护休眠</span>
+                    <small id="trip-maintenance-help">01:00–05:00 自动暂停，05:00 恢复</small>
+                  </span>
+                  <Switch aria-label="夜间维护休眠" aria-describedby="trip-maintenance-help"
+                    checked={config.maintenance_sleep ?? false}
+                    onChange={checked => update({ maintenance_sleep: checked })} />
                 </span>
               </div>
             </PreferenceSection>

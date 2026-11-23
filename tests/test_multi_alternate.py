@@ -66,6 +66,30 @@ class MultiAlternateTests(unittest.TestCase):
         self.assertFalse(plan.validate((CHOICES[0], CHOICES[0])))
         self.assertEqual(AlternatePlan(PRIMARY, {**CONFIG, "_alternate_dates": [PRIMARY.date]}).dates, [PRIMARY.date])
 
+    def test_custom_dates_keep_waitlist_cap_and_order(self):
+        dates = [PRIMARY.date, "2026-10-18", "2026-10-13", "2026-10-12", "2026-10-15"]
+        plan = AlternatePlan(PRIMARY, {**CONFIG, "date_range": "自定义", "custom_dates": dates})
+        self.assertEqual(plan.dates, dates[:3])
+        self.assertTrue(plan.allows(replace(plan.primary, date=dates[2])))
+        self.assertFalse(plan.allows(replace(plan.primary, date=dates[3])))
+        with self.assertRaisesRegex(ValueError, "不在已授权范围内"):
+            AlternatePlan(replace(PRIMARY, date=dates[3]), {**CONFIG, "date_range": "自定义", "custom_dates": dates})
+
+    def test_monitor_keeps_later_custom_dates_for_queries_but_outside_multiple_waitlist(self):
+        from gui_12306_0 import TicketMonitor
+
+        dates = [PRIMARY.date, "2026-10-18", "2026-10-13", "2026-10-12", "2026-10-15"]
+        monitor = TicketMonitor(Mock(), {**CONFIG, "date_range": "自定义", "custom_dates": dates,
+                                        "auto_alternate": True}, log_callback=Mock())
+        monitor._row_snapshot = [{"element": Mock(), "train": "G101", "seats": {"二等座": "候补"}}]
+        monitor._find_alternate_button = Mock(return_value=Mock())
+        self.assertEqual(monitor.travel_dates, dates)
+        monitor.cfg["date"] = dates[3]
+        self.assertIsNone(monitor._find_hit_row())
+        monitor._find_alternate_button.assert_not_called()
+        monitor.cfg["date"] = dates[2]
+        self.assertEqual(monitor._find_hit_row()[-1], "alternate")
+
     def test_config_defaults_validation_and_roundtrip(self):
         from gui_12306_0 import QueryConfig
         from railwatch_bridge import RailWatchBridge

@@ -2,7 +2,45 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
-from railwatch_time import ServerTimeSync, reset_server_time_sync
+from railwatch_time import (
+    ServerTimeSync,
+    maintenance_resume_timestamp,
+    reset_server_time_sync,
+    resolve_optional_beijing_timestamp,
+)
+
+
+class MonitoringTimeTests(unittest.TestCase):
+    def test_optional_timestamp_accepts_an_empty_value_or_beijing_offset(self):
+        self.assertIsNone(resolve_optional_beijing_timestamp(None))
+        self.assertIsNone(resolve_optional_beijing_timestamp(""))
+        value = "2026-11-24T04:30:00+08:00"
+        self.assertEqual(resolve_optional_beijing_timestamp(value), datetime.fromisoformat(value).timestamp())
+
+    def test_optional_timestamp_ignores_surrounding_whitespace(self):
+        self.assertIsNone(resolve_optional_beijing_timestamp(" \t\r\n"))
+        value = "2026-11-24T04:30:00+08:00"
+        self.assertEqual(
+            resolve_optional_beijing_timestamp(f" \t{value}\r\n"),
+            datetime.fromisoformat(value).timestamp(),
+        )
+
+    def test_optional_timestamp_rejects_invalid_values_and_implicit_or_other_offsets(self):
+        for invalid in (
+            123, False, [], "invalid", "2026-02-30T04:30:00+08:00", "2026-11-24T04:30:00",
+            "2026-11-24T04:30:00Z", "2026-11-24T04:30:00+09:00",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "自动停止时间"):
+                resolve_optional_beijing_timestamp(invalid, "自动停止时间")
+
+    def test_maintenance_starts_at_one_and_ends_at_five_beijing_time(self):
+        resume = datetime.fromisoformat("2026-11-24T05:00:00+08:00").timestamp()
+        for local_time, expected in (
+            ("00:59:59", None), ("01:00:00", resume), ("04:59:59", resume), ("05:00:00", None),
+        ):
+            with self.subTest(local_time=local_time):
+                timestamp = datetime.fromisoformat(f"2026-11-24T{local_time}+08:00").timestamp()
+                self.assertEqual(maintenance_resume_timestamp(timestamp), expected)
 
 
 class ServerTimeSyncTests(unittest.TestCase):
