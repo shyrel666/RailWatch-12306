@@ -16,7 +16,7 @@ import time
 
 from railwatch_config_contract import parse_codes, parse_passenger_names
 from railwatch_order_page import normalized_date, stations_in_order, train_token
-from railwatch_task import TaskCancelled, browser_tab_lifecycle, is_session_lost
+from railwatch_task import TaskCancelled, browser_tab_lifecycle, driver_call_section, is_session_lost
 
 ORDER_URL = "https://kyfw.12306.cn/otn/view/train_order.html"
 UNFINISHED_TAB, UNTRAVELED_TAB = "未完成订单", "未出行订单"
@@ -149,51 +149,52 @@ def read_existing_orders(page, *, url=ORDER_URL, budget=10.0, settle=3.0, timing
             page.wait(min(page.poll_interval, left))
         raise TaskCancelled()
 
-    if page.stop():
-        raise TaskCancelled()
-    original = driver.current_window_handle
-    page_timeout = driver.timeouts.page_load
-    temporary = None
-    try:
-        # Capture our handle before cancellation can unwind the operation.
-        with browser_tab_lifecycle(driver):
-            driver.switch_to.new_window("tab")
-            temporary = driver.current_window_handle
+    with driver_call_section(driver):
         if page.stop():
             raise TaskCancelled()
-        driver.set_page_load_timeout(budget)
+        original = driver.current_window_handle
+        page_timeout = driver.timeouts.page_load
+        temporary = None
         try:
-            driver.get(url)
-        finally:
-            timing["navigation_ms"] = spent(started)
-        opened = time.monotonic()
-        try:
-            tab = open_untraveled()
-            timing["tabs_ms"] = spent(opened)
-            if tab is None:
-                return list(unfinished.values()) or None
-            tab.click()
-            clicked = time.monotonic()
-            untraveled = untraveled_records()
-            timing["untraveled_ms"] = spent(clicked)
-        except TaskCancelled:
-            raise
-        except Exception as exc:
-            if not unfinished or is_session_lost(exc):
-                raise
-            timing["reason"] = type(exc).__name__
-            return list(unfinished.values())
-        if untraveled is None:
-            return list(unfinished.values()) or None
-        return list(unfinished.values()) + untraveled
-    finally:
-        with browser_tab_lifecycle(driver):
+            # Capture our handle before cancellation can unwind the operation.
+            with browser_tab_lifecycle(driver):
+                driver.switch_to.new_window("tab")
+                temporary = driver.current_window_handle
+            if page.stop():
+                raise TaskCancelled()
+            driver.set_page_load_timeout(budget)
             try:
-                driver.set_page_load_timeout(page_timeout)
-            except Exception:
-                pass  # The caller applies its own timeout again after the check.
-            if temporary and temporary != original and temporary in driver.window_handles:
-                driver.switch_to.window(temporary)
-                driver.close()
-            if original in driver.window_handles:
-                driver.switch_to.window(original)
+                driver.get(url)
+            finally:
+                timing["navigation_ms"] = spent(started)
+            opened = time.monotonic()
+            try:
+                tab = open_untraveled()
+                timing["tabs_ms"] = spent(opened)
+                if tab is None:
+                    return list(unfinished.values()) or None
+                tab.click()
+                clicked = time.monotonic()
+                untraveled = untraveled_records()
+                timing["untraveled_ms"] = spent(clicked)
+            except TaskCancelled:
+                raise
+            except Exception as exc:
+                if not unfinished or is_session_lost(exc):
+                    raise
+                timing["reason"] = type(exc).__name__
+                return list(unfinished.values())
+            if untraveled is None:
+                return list(unfinished.values()) or None
+            return list(unfinished.values()) + untraveled
+        finally:
+            with browser_tab_lifecycle(driver):
+                try:
+                    driver.set_page_load_timeout(page_timeout)
+                except Exception:
+                    pass  # The caller applies its own timeout again after the check.
+                if temporary and temporary != original and temporary in driver.window_handles:
+                    driver.switch_to.window(temporary)
+                    driver.close()
+                if original in driver.window_handles:
+                    driver.switch_to.window(original)

@@ -546,6 +546,398 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         bridge.driver.execute_script.assert_not_called()
         self.assertNotIn("driver-internal-details", str(caught.exception))
 
+    def test_focus_browser_waits_for_active_order_probe_and_focuses_restored_tab(self):
+        import threading
+        from types import SimpleNamespace
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_order_page import OrderPage
+        from railwatch_orders import OrderIntent, OrderResult
+        from railwatch_task import MonitorTask, guard_browser
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        task = MonitorTask({})
+        probe_in_temp = threading.Event()
+        release_probe = threading.Event()
+        focus_done = threading.Event()
+        focused_handles = []
+
+        class StatefulDriver:
+            def __init__(self):
+                self.handles = ["payment-tab"]
+                self.current_window_handle = "payment-tab"
+                self.switch_to = SimpleNamespace(new_window=self.new_window, window=self.switch_window)
+                self.closed = []
+
+            @property
+            def window_handles(self):
+                return list(self.handles)
+
+            def new_window(self, kind):
+                assert kind == "tab"
+                self.handles.append("probe-tab")
+                self.current_window_handle = "probe-tab"
+
+            def switch_window(self, handle):
+                assert handle in self.handles
+                self.current_window_handle = handle
+
+            def close(self):
+                self.closed.append(self.current_window_handle)
+                self.handles.remove(self.current_window_handle)
+                self.current_window_handle = self.handles[0] if self.handles else ""
+
+            def execute(self, command, params=None):
+                return {"value": None}
+
+            def execute_cdp_cmd(self, cmd, params):
+                assert cmd == "Page.bringToFront"
+                focused_handles.append(self.current_window_handle)
+
+        driver = StatefulDriver()
+        bridge.driver = driver
+        intent = OrderIntent("regular", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",))
+        page = OrderPage(driver, task.cancel.is_set, lambda _seconds: None)
+
+        def fake_reconcile(*_args, **_kwargs):
+            self.assertEqual(driver.current_window_handle, "probe-tab")
+            probe_in_temp.set()
+            self.assertTrue(release_probe.wait(3))
+            # Focusing must not steal the active handle before the temporary tab closes.
+            self.assertEqual(driver.current_window_handle, "probe-tab")
+            return OrderResult("pending_payment", order_id="E123456", evidence={"matched": True})
+
+        page.reconcile = fake_reconcile
+        focus_result = []
+
+        def run_focus():
+            focus_result.append(bridge.focus_browser())
+            focus_done.set()
+
+        with guard_browser(driver, task, lambda: None, call_lock=bridge._driver_call_lock):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                probe_future = pool.submit(page.probe_known_order, intent, "E123456")
+                self.assertTrue(probe_in_temp.wait(3))
+                focus_future = pool.submit(run_focus)
+                self.assertFalse(focus_done.wait(0.1))
+                release_probe.set()
+                probe_result = probe_future.result(timeout=3)
+                focus_future.result(timeout=3)
+
+        self.assertEqual(probe_result.status, "pending_payment")
+        self.assertEqual(driver.closed, ["probe-tab"])
+        self.assertEqual(driver.window_handles, ["payment-tab"])
+        self.assertEqual(focus_result, [{"focused": True}])
+        self.assertEqual(focused_handles, ["payment-tab"])
+
+    def test_focus_browser_serializes_with_release_driver(self):
+        import threading
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        quit_started = threading.Event()
+        release_quit = threading.Event()
+        driver = Mock(current_window_handle="order-tab", service=None)
+
+        def slow_quit():
+            quit_started.set()
+            self.assertTrue(release_quit.wait(3))
+
+        driver.quit.side_effect = slow_quit
+        bridge.driver = driver
+        focus_started = threading.Event()
+
+        def run_focus():
+            focus_started.set()
+            return bridge.focus_browser()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            release_future = pool.submit(bridge._release_driver)
+            self.assertTrue(quit_started.wait(3))
+            focus_future = pool.submit(run_focus)
+            self.assertTrue(focus_started.wait(3))
+            release_quit.set()
+            release_future.result(timeout=3)
+            with self.assertRaisesRegex(RuntimeError, "受控浏览器未打开"):
+                focus_future.result(timeout=3)
+
+        driver.switch_to.window.assert_not_called()
+        driver.execute_cdp_cmd.assert_not_called()
+
+    def test_focus_browser_succeeds_while_guarded_task_is_cancelling(self):
+        from types import SimpleNamespace
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_task import MonitorTask, guard_browser
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        task = MonitorTask({})
+        ticks = []
+        commands = []
+
+        class GuardedDriver:
+            def __init__(self):
+                self.switch_to = SimpleNamespace(window=lambda handle: self.execute("switchToWindow", {"handle": handle}))
+
+            @property
+            def current_window_handle(self):
+                return self.execute("getCurrentWindowHandle")
+
+            def execute_cdp_cmd(self, cmd, params):
+                return self.execute("executeCdpCommand", {"cmd": cmd, "params": params})
+
+            def execute(self, command, params=None):
+                commands.append((command, params))
+                return "order-tab" if command == "getCurrentWindowHandle" else {"value": None}
+
+        driver = GuardedDriver()
+        bridge.driver = driver
+        with guard_browser(driver, task, lambda: ticks.append(1), call_lock=bridge._driver_call_lock):
+            task.cancel.set()
+            self.assertEqual(bridge.focus_browser(), {"focused": True})
+
+        self.assertEqual(ticks, [])
+        self.assertEqual([cmd for cmd, _ in commands], ["getCurrentWindowHandle", "switchToWindow", "executeCdpCommand"])
+
+    def test_focus_browser_never_lets_background_thread_bypass_lock_or_cancellation(self):
+        import threading
+        from types import SimpleNamespace
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_task import MonitorTask, TaskCancelled, guard_browser
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        task = MonitorTask({})
+        focus_in_cdp = threading.Event()
+        release_focus = threading.Event()
+        click_done = threading.Event()
+        delivered = []
+        active_calls = []
+
+        class GuardedDriver:
+            def __init__(self):
+                self.switch_to = SimpleNamespace(window=lambda handle: self.execute("switchToWindow", {"handle": handle}))
+
+            @property
+            def current_window_handle(self):
+                return self.execute("getCurrentWindowHandle")
+
+            def execute_cdp_cmd(self, cmd, params):
+                return self.execute("executeCdpCommand", {"cmd": cmd, "params": params})
+
+            def execute(self, command, params=None):
+                # No two threads may ever enter raw execute concurrently.
+                assert not active_calls, f"concurrent WebDriver call: {active_calls} + {command}"
+                active_calls.append(command)
+                try:
+                    delivered.append(command)
+                    if command == "executeCdpCommand":
+                        focus_in_cdp.set()
+                        assert release_focus.wait(3)
+                    return "order-tab" if command == "getCurrentWindowHandle" else {"value": None}
+                finally:
+                    active_calls.pop()
+
+        driver = GuardedDriver()
+        bridge.driver = driver
+
+        def background_click():
+            try:
+                driver.execute("clickElement", {"id": "submitOrder_id"})
+            finally:
+                click_done.set()
+
+        with guard_browser(driver, task, lambda: None, call_lock=bridge._driver_call_lock):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                focus_future = pool.submit(bridge.focus_browser)
+                self.assertTrue(focus_in_cdp.wait(3))
+                task.cancel.set()
+                click_future = pool.submit(background_click)
+                self.assertFalse(click_done.wait(0.1))
+                self.assertNotIn("clickElement", delivered)
+                release_focus.set()
+                self.assertEqual(focus_future.result(timeout=3), {"focused": True})
+                with self.assertRaises(TaskCancelled):
+                    click_future.result(timeout=3)
+
+        self.assertNotIn("clickElement", delivered)
+
+    def test_focus_browser_times_out_cleanly_when_driver_lock_stays_busy(self):
+        import threading
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        bridge.FOCUS_BROWSER_LOCK_TIMEOUT_SECONDS = 0.05
+        bridge.driver = Mock(current_window_handle="order-tab")
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def hold_lock():
+            with bridge._driver_call_lock:
+                lock_held.set()
+                release_lock.wait(3)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            holder = pool.submit(hold_lock)
+            self.assertTrue(lock_held.wait(3))
+            try:
+                with self.assertRaisesRegex(RuntimeError, "正在执行核对或操作"):
+                    bridge.focus_browser()
+            finally:
+                release_lock.set()
+            holder.result(timeout=3)
+
+    def test_probe_known_order_caps_processing_queue_wait_and_closes_temp_tab(self):
+        from types import SimpleNamespace
+        from railwatch_order_page import OrderPage
+        from railwatch_orders import OrderIntent
+
+        clock = [100.0]
+
+        class QueueDriver:
+            def __init__(self):
+                self.handles = ["payment-tab"]
+                self.current_window_handle = "payment-tab"
+                self.switch_to = SimpleNamespace(new_window=self.new_window, window=self.switch_window)
+                self.closed = []
+                self.visited = []
+
+            @property
+            def window_handles(self):
+                return list(self.handles)
+
+            def new_window(self, kind):
+                self.handles.append("probe-tab")
+                self.current_window_handle = "probe-tab"
+
+            def switch_window(self, handle):
+                self.current_window_handle = handle
+
+            def close(self):
+                self.closed.append(self.current_window_handle)
+                self.handles.remove(self.current_window_handle)
+                self.current_window_handle = self.handles[0] if self.handles else ""
+
+            def get(self, url):
+                self.visited.append((self.current_window_handle, url))
+
+        driver = QueueDriver()
+        intent = OrderIntent("regular", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",))
+        page = OrderPage(driver, lambda: False, lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        page.RECOVERY_TAB_TIMEOUT = 5.0
+        page.PROBE_TAB_MAX_WAIT = 20.0
+        page.snapshot = lambda: {
+            "url": "https://kyfw.12306.cn/otn/view/train_order.html",
+            "processing": True,
+            "orders": [],
+            "dialogs": [],
+            "verification": False,
+        }
+
+        with patch("railwatch_order_page.time.monotonic", lambda: clock[0]):
+            result = page.probe_known_order(intent, "E123456")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertLessEqual(clock[0] - 100.0, 20.5)
+        self.assertEqual(driver.closed, ["probe-tab"])
+        self.assertEqual(driver.window_handles, ["payment-tab"])
+        self.assertEqual(driver.current_window_handle, "payment-tab")
+
+    def test_probe_submitted_alternate_is_not_truncated_by_background_probe_cap(self):
+        from types import SimpleNamespace
+        from railwatch_order_page import OrderPage
+        from railwatch_orders import OrderIntent
+
+        clock = [100.0]
+
+        class SlowCheckoutDriver:
+            def __init__(self):
+                self.handles = ["checkout-tab"]
+                self.current_window_handle = "checkout-tab"
+                self.switch_to = SimpleNamespace(new_window=self.new_window, window=self.switch_window)
+                self.closed = []
+                self.detail_opened = False
+
+            @property
+            def window_handles(self):
+                return list(self.handles)
+
+            def new_window(self, kind):
+                self.handles.append("probe-tab")
+                self.current_window_handle = "probe-tab"
+
+            def switch_window(self, handle):
+                self.current_window_handle = handle
+
+            def close(self):
+                self.closed.append(self.current_window_handle)
+                self.handles.remove(self.current_window_handle)
+                self.current_window_handle = self.handles[0] if self.handles else ""
+
+            def get(self, url):
+                pass
+
+            def execute_script(self, script, *args):
+                if "#J-payConfirm" in script:
+                    return {"amount": "¥553.0", "rate": "85"}
+                if not self.detail_opened:
+                    self.detail_opened = True
+                    return {
+                        "url": "https://kyfw.12306.cn/otn/view/lineUp_order.html",
+                        "error": False,
+                        "choices": [{"train": "G101", "date": "2026-09-10", "from": "北京", "to": "上海", "seat": "二等座"}],
+                        "close": Mock(),
+                    }
+                return None
+
+        driver = SlowCheckoutDriver()
+        intent = OrderIntent("alternate", "G101", "2026-09-10", "北京", "上海", "二等座", ("张三",))
+        page = OrderPage(driver, lambda: False, lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        page.RECOVERY_TAB_TIMEOUT = 5.0
+        page.PROBE_TAB_MAX_WAIT = 20.0
+
+        def fake_snapshot():
+            if driver.current_window_handle == "checkout-tab":
+                return {
+                    "url": "https://kyfw.12306.cn/otn/view/lineUp_pay.html",
+                    "alternateCheckout": True,
+                    "dialogs": [],
+                    "verification": False,
+                    "processing": False,
+                    "text": "请在 30 分钟内完成支付",
+                }
+            # Simulate an official queue taking 25 seconds (longer than the 20s background probe cap).
+            if clock[0] < 125.0:
+                return {
+                    "url": "https://kyfw.12306.cn/otn/view/lineUp_order.html",
+                    "processing": True,
+                    "orders": [],
+                    "dialogs": [],
+                    "verification": False,
+                }
+            return {
+                "url": "https://kyfw.12306.cn/otn/view/lineUp_order.html",
+                "processing": False,
+                "dialogs": [],
+                "verification": False,
+                "orders": [{
+                    "kind": "alternate",
+                    "order_id": "E888888",
+                    "state": "待支付",
+                    "passengers": ["张三"],
+                    "choices": [{"train": "G101", "date": "2026-09-10", "from": "北京", "to": "上海", "seat": "二等座"}],
+                    "detail_button": Mock(),
+                    "text": "E888888 待支付 G101 2026-09-10 北京 上海 二等座 张三",
+                }],
+            }
+
+        page.snapshot = fake_snapshot
+        with patch("railwatch_order_page.time.monotonic", lambda: clock[0]):
+            result = page.probe_submitted_alternate(intent)
+
+        self.assertEqual(result.status, "pending_payment")
+        self.assertEqual(result.order_id, "E888888")
+        self.assertGreaterEqual(clock[0] - 100.0, 25.0)
+        self.assertEqual(driver.closed, ["probe-tab"])
+        self.assertEqual(driver.current_window_handle, "checkout-tab")
+
     def test_wait_for_target_time_sends_keep_alive_when_enabled(self):
         from railwatch_bridge import RailWatchBridge
         with tempfile.TemporaryDirectory() as tmp:
@@ -757,6 +1149,44 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         self.assertIs(bridge._wait_for_target_time.call_args.args[0]["maintenance_sleep"], True)
         prefill.assert_not_called()
         monitor.wait_for_monitoring_window.assert_called_once()
+        monitor.run.assert_called_once()
+
+    def test_maintenance_sleep_skips_prefill_when_presale_window_falls_in_maintenance(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_time import maintenance_resume_timestamp
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        bridge.save_preferences(maintenance_sleep=True)
+        bridge.is_monitoring = True
+        # Thursday 00:50 and 05:00 are both outside maintenance, while 04:59 (T-60) is inside it.
+        now = dt.datetime.fromisoformat("2026-06-11T00:50:00+08:00").timestamp()
+        sale = dt.datetime.fromisoformat("2026-06-11T05:00:00+08:00").timestamp()
+        self.assertIsNone(maintenance_resume_timestamp(now))
+        self.assertIsNone(maintenance_resume_timestamp(sale))
+        self.assertIsNotNone(maintenance_resume_timestamp(sale - 60))
+        trip = {
+            "date": "2026-06-25",
+            "timer_enabled": True,
+            "auto_submit": True,
+            "sale_at": "2026-06-11T05:00:00+08:00",
+        }
+        bridge._ensure_driver = Mock(return_value=Mock())
+        bridge._make_param_filler = Mock()
+        bridge._prepare_query_page = Mock(return_value=True)
+        bridge._send_keep_alive = Mock(return_value="ok")
+        bridge._existing_trip_blocks = Mock(return_value=False)
+        bridge._wait_for_target_time = Mock(return_value=True)
+        monitor = Mock()
+        with (
+            patch("railwatch_bridge.time.time", return_value=now),
+            patch("railwatch_bridge.TicketMonitor", return_value=monitor),
+            patch("railwatch_bridge.prefill_eligible_reason", return_value=None),
+            patch("railwatch_bridge.PrefillAdapter") as prefill,
+        ):
+            bridge._monitor_worker(trip)
+
+        prefill.assert_not_called()
+        self.assertEqual(bridge.state.prefill_notice, "起售时间处于夜间维护休眠时段")
         monitor.run.assert_called_once()
 
     def test_monitor_date_window_preserves_custom_date_order(self):

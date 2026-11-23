@@ -1043,8 +1043,8 @@ class TicketMonitor(BaseHandler):
         self.notify(MONITOR_AUTO_STOP_TITLE, MONITOR_AUTO_STOP_MESSAGE)
         return True
 
-    def wait_for_monitoring_window(self) -> bool:
-        """Wait for maintenance to end, or return false on cancellation or auto-stop."""
+    def wait_for_monitoring_window(self, *, on_maintenance_resume: Optional[Callable[[], bool]] = None) -> bool:
+        """Wait for maintenance to end, then run the optional resume check."""
         if self.should_stop():
             return False
         if not self._maintenance_sleep and self._auto_stop_ts is None:
@@ -1071,7 +1071,7 @@ class TicketMonitor(BaseHandler):
         self._temporary_query_failures = 0
         if self.rate_limiter:
             self.rate_limiter.reset()
-        return True
+        return on_maintenance_resume is None or on_maintenance_resume()
 
     def run(self):
         """Run a prepared monitor without repeating startup work at the deadline."""
@@ -1381,7 +1381,7 @@ class TicketMonitor(BaseHandler):
     def _query_loop(self, loop_count: int, interval: float) -> bool:
         """单次监控循环，返回是否命中（风控优化版）"""
         self._row_snapshot = None
-        if self.should_stop() or not self.session_check():
+        if self.should_stop() or not self.session_check() or self._stop_at_deadline(time.time()):
             return True
         self.tick(status="querying", next_query_at=None)
         is_burst_mode = self._is_burst_mode(loop_count)

@@ -14,6 +14,9 @@ import type { RailWatchStatus } from "../types";
 
 function resetStore() {
   railwatchStore.setState({
+    activeTripPresetId: null,
+    tripBundleImporting: false,
+    tripPresetsVersion: 0,
     environmentProgress: null, environmentProgressVisible: false,
     rehearsalEnabled: false,
     runtime: {
@@ -230,6 +233,40 @@ describe("SettingsPage", () => {
     act(() => rejectImport(new Error("Error invoking remote method 'railwatch:import-trip-bundle': Error: 备份文件须包含一个 JSON 对象。")));
     expect((await screen.findByText("备份文件须包含一个 JSON 对象。")).getAttribute("role")).toBe("alert");
     expect(exportButton.disabled).toBe(false);
+  });
+
+  test("clears activeTripPresetId and bumps tripPresetsVersion only after a backup import succeeds", async () => {
+    railwatchStore.getState().setActiveTripPreset("preset-1");
+    vi.spyOn(railwatchApi, "exportTripBundle").mockResolvedValue({ ok: true });
+    vi.spyOn(railwatchApi, "importTripBundle")
+      .mockResolvedValueOnce({ cancelled: true })
+      .mockRejectedValueOnce(new Error("备份文件损坏"))
+      .mockResolvedValueOnce({ ok: true });
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "导出脱敏备份" }));
+    await screen.findByText("备份导出成功。");
+    expect(railwatchStore.getState().activeTripPresetId).toBe("preset-1");
+    expect(railwatchStore.getState().tripPresetsVersion).toBe(0);
+
+    const importButton = screen.getByRole("button", { name: "导入备份" });
+    await userEvent.click(importButton);
+    await screen.findByText("已取消导入备份。");
+    expect(railwatchStore.getState().activeTripPresetId).toBe("preset-1");
+    expect(railwatchStore.getState().tripPresetsVersion).toBe(0);
+    expect(railwatchStore.getState().tripBundleImporting).toBe(false);
+
+    await userEvent.click(importButton);
+    await screen.findByText("备份文件损坏");
+    expect(railwatchStore.getState().activeTripPresetId).toBe("preset-1");
+    expect(railwatchStore.getState().tripPresetsVersion).toBe(0);
+    expect(railwatchStore.getState().tripBundleImporting).toBe(false);
+
+    await userEvent.click(importButton);
+    await screen.findByText("备份导入成功。");
+    expect(railwatchStore.getState().activeTripPresetId).toBeNull();
+    expect(railwatchStore.getState().tripPresetsVersion).toBe(1);
+    expect(railwatchStore.getState().tripBundleImporting).toBe(false);
   });
 
   test("saves the tray preference as a patch", async () => {

@@ -1005,7 +1005,8 @@ class OrderPage:
         """
         timeout = self.RESULT_UNKNOWN_TIMEOUT if timeout is None else timeout
         started = time.monotonic()
-        deadline = started + timeout
+        cap = getattr(self, "_probe_deadline", None)
+        deadline = started + timeout if cap is None else min(started + timeout, cap)
         next_progress_log = started
         confirm_until = None
         while True:
@@ -1044,8 +1045,11 @@ class OrderPage:
             if result.status != "unknown" or self.stop():
                 return result
             now = time.monotonic()
+            if cap is not None and now >= cap:
+                self.log("后台核对超时，保留当前订单状态，稍后继续核对。")
+                return result
             if snap.get("processing"):
-                deadline = now + timeout
+                deadline = now + timeout if cap is None else min(now + timeout, cap)
                 if now >= next_progress_log:
                     self.log(f"官方仍在排队或处理订单，已等待 {int(now - started)} 秒，正在自动核对结果。")
                     next_progress_log = now + 30
@@ -1162,7 +1166,8 @@ class OrderPage:
             return result
         # Explicit recovery or a delivered confirmation with a temporary error;
         # normal payment observation never navigates away.
-        if self.stop():
+        cap = getattr(self, "_probe_deadline", None)
+        if self.stop() or (cap is not None and time.monotonic() >= cap):
             return result
         url = "https://kyfw.12306.cn/otn/view/" + ("lineUp_order.html" if intent.kind == "alternate" else "train_order.html")
         try:
@@ -1180,7 +1185,7 @@ class OrderPage:
                 labels = (("待兑现订单", "已处理订单") if intent.kind == "alternate"
                           else ("未出行订单", "历史订单"))
                 for label in labels:
-                    if self.stop():
+                    if self.stop() or (cap is not None and time.monotonic() >= cap):
                         break
                     current = self.snapshot()
                     if current.get("processing"):
@@ -1204,10 +1209,9 @@ class OrderPage:
 
     def probe_known_order(self, intent, known_id):
         """Read only the bound order in a disposable tab; preserve payment tabs."""
-        from railwatch_task import browser_tab_lifecycle
         if not known_id:
             return OrderResult("unknown", "缺少已绑定订单号，无法自动核对")
-        return self._probe_order_tab(intent, known_id)
+        return self._probe_order_tab(intent, known_id, max_wait=self.PROBE_TAB_MAX_WAIT)
 
     def probe_submitted_alternate(self, intent, known_id=""):
         """The checkout page triggers a read; only a matched official card binds an ID."""
@@ -1235,30 +1239,36 @@ class OrderPage:
             return replace(result, review=merged)
         return result
 
-    def _probe_order_tab(self, intent, known_id):
-        from railwatch_task import browser_tab_lifecycle
-        if self.stop():
-            raise TaskCancelled()
-        original = self.driver.current_window_handle
-        temporary = None
-        try:
-            # Capture our handle before cancellation can unwind the operation.
-            with browser_tab_lifecycle(self.driver):
-                self.driver.switch_to.new_window("tab")
-                temporary = self.driver.current_window_handle
+    def _probe_order_tab(self, intent, known_id, *, max_wait=None):
+        from railwatch_task import browser_tab_lifecycle, driver_call_section
+        with driver_call_section(self.driver):
             if self.stop():
                 raise TaskCancelled()
-            return self.reconcile(intent, known_id=known_id, navigate=True)
-        finally:
-            with browser_tab_lifecycle(self.driver):
-                handles = self.driver.window_handles
-                if temporary and temporary != original and temporary in handles:
-                    self.driver.switch_to.window(temporary)
-                    self.driver.close()
-                if original in self.driver.window_handles:
-                    self.driver.switch_to.window(original)
+            original = self.driver.current_window_handle
+            temporary = None
+            previous_deadline = getattr(self, "_probe_deadline", None)
+            if max_wait is not None:
+                self._probe_deadline = time.monotonic() + max_wait
+            try:
+                # Capture our handle before cancellation can unwind the operation.
+                with browser_tab_lifecycle(self.driver):
+                    self.driver.switch_to.new_window("tab")
+                    temporary = self.driver.current_window_handle
+                if self.stop():
+                    raise TaskCancelled()
+                return self.reconcile(intent, known_id=known_id, navigate=True)
+            finally:
+                self._probe_deadline = previous_deadline
+                with browser_tab_lifecycle(self.driver):
+                    handles = self.driver.window_handles
+                    if temporary and temporary != original and temporary in handles:
+                        self.driver.switch_to.window(temporary)
+                        self.driver.close()
+                    if original in self.driver.window_handles:
+                        self.driver.switch_to.window(original)
 
     RECOVERY_TAB_TIMEOUT = 5.0
+    PROBE_TAB_MAX_WAIT = 20.0
 
     def _recovery_tab(self, label, url):
         current = urlparse(self.driver.current_url)

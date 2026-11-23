@@ -2,6 +2,7 @@ import ast
 import io
 import json
 import re
+import tempfile
 import threading
 import time
 import unittest
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import railwatch_runtime
+from railwatch_bridge import RailWatchBridge
 from railwatch_runtime import RailWatchRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,50 @@ class RailWatchRuntimeTests(unittest.TestCase):
         runtime = RailWatchRuntime(bridge=bridge, writer=lambda _payload: None)
         result = runtime._dispatch("syncServerTime", {})
         self.assertEqual(result["offset_seconds"], 0.1)
+
+    def test_preset_import_waits_for_an_earlier_save(self):
+        data_dir = self.enterContext(tempfile.TemporaryDirectory())
+        with patch("railwatch_bridge.uses_system_keychain", return_value=False):
+            bridge = RailWatchBridge(data_dir=data_dir)
+        name = "行程方案"
+        preset_id = bridge.save_trip_preset(name, {"train_code": "G1"})["saved_id"]
+        save_trip_preset = bridge.save_trip_preset
+        save_started, release_save = threading.Event(), threading.Event()
+        responses = []
+        runtime = RailWatchRuntime(bridge=bridge, writer=responses.append, max_workers=2)
+        self.addCleanup(runtime.shutdown)
+
+        def blocked_save(*args):
+            save_started.set()
+            release_save.wait()
+            return save_trip_preset(*args)
+
+        def submit(request_id, command, payload):
+            return runtime.handle_line(json.dumps({"id": request_id, "command": command, "payload": payload}))
+
+        bundle = {"schema_version": 1, "presets": [
+            {"id": "external", "name": name, "config": {"train_code": "G3"}},
+        ]}
+        with patch.object(bridge, "save_trip_preset", side_effect=blocked_save):
+            try:
+                older_save = submit("save", "saveTripPreset", {
+                    "name": name, "config": {"train_code": "G2"}, "preset_id": preset_id,
+                })
+                self.assertTrue(save_started.wait(5))
+                later_import = submit("import", "importTripBundle", {"bundle": bundle})
+                # With the old shared pool, its only idle worker completed the import before this request.
+                submit("history", "orderHistory", {}).result(timeout=5)
+                import_waited_for_save = not later_import.done()
+            finally:
+                release_save.set()
+            older_save.result(timeout=5)
+            later_import.result(timeout=5)
+
+        self.assertEqual({reply["id"]: reply["ok"] for reply in responses},
+                         {"history": True, "save": True, "import": True})
+        self.assertTrue(import_waited_for_save)
+        item, = bridge.load_trip_presets()["items"]
+        self.assertEqual((item["id"], item["config"]["train_code"]), (preset_id, "G3"))
 
     def test_renderer_whitelist_matches_runtime_dispatch(self):
         """A whitelisted command the runtime cannot handle fails only when used; one missing from the whitelist cannot be sent."""

@@ -21,6 +21,7 @@ from railwatch_task import (
     SESSION_LOST_MESSAGE_HINTS,
     MonitorTask,
     TaskCancelled,
+    browser_tab_lifecycle,
     guard_browser,
     is_session_lost,
 )
@@ -293,7 +294,7 @@ def idle_browser_command(method):
             self._browser_busy = True
             self._browser_operation = method.__name__
         try:
-            with self._driver_lock:
+            with self._driver_lock, self._driver_call_lock:
                 return method(self, *args, **kwargs)
         finally:
             with self._task_lock:
@@ -322,6 +323,7 @@ class RailWatchBridge:
         self._admission_closed = False
         self._event_context = threading.local()
         self._driver_lock = threading.RLock()
+        self._driver_call_lock = threading.RLock()
         self.log_entries: List[Dict[str, str]] = []
         self._log_lock = threading.RLock()
         self._settings_lock = PREFERENCES_LOCK
@@ -884,14 +886,19 @@ class RailWatchBridge:
         if not self._driver_lock.acquire(blocking=False):
             return
         try:
-            with self._task_lock:
-                if self.driver is None or self._admission_closed or self.is_monitoring or self._browser_busy:
-                    return
-            self._idle_login_checked_at = time.monotonic()
+            if not self._driver_call_lock.acquire(blocking=False):
+                return
             try:
-                result = self._verify_login_session()
-            except Exception:
-                result = "unknown"
+                with self._task_lock:
+                    if self.driver is None or self._admission_closed or self.is_monitoring or self._browser_busy:
+                        return
+                self._idle_login_checked_at = time.monotonic()
+                try:
+                    result = self._verify_login_session()
+                except Exception:
+                    result = "unknown"
+            finally:
+                self._driver_call_lock.release()
         finally:
             self._driver_lock.release()
         if result == "ok" and not self.state.login_ready:
@@ -1112,7 +1119,7 @@ class RailWatchBridge:
                     self.log(f"提示: 请手动下载 ChromeDriver: {CHROMEDRIVER_MIRROR_HINT}", "INFO")
 
             report({"stage": "verifying", "message": "正在验证 Chrome 启动与驱动连接…"})
-            with self._driver_lock:
+            with self._driver_lock, self._driver_call_lock:
                 if self.driver and not driver_session_alive(self.driver):
                     self.log("受控浏览器已关闭，将重新启动 Chrome 进行环境检查。", "WARN")
                     self._release_driver()
@@ -1310,7 +1317,7 @@ class RailWatchBridge:
         runner = RehearsalRunner(config, checks, emit=self.emit, save=self.order_journal.save_rehearsal,
                                  log=self.log, session_lost=lambda exc: is_session_lost(exc) or isinstance(exc, DrillIsolationError), release=release,
                                  history=lambda: [self.run_review(item["run_id"]) for item in self.order_journal.recent_runs(5)["items"]])
-        with cancellable_browser(self.driver, cancel):
+        with self._driver_call_lock, cancellable_browser(self.driver, cancel):
             return runner.run(trigger="task" if run_id else "manual", cancel=cancel, run_id=run_id)
 
     def cancel_rehearsal(self):
@@ -1531,7 +1538,7 @@ class RailWatchBridge:
                 driver = self._ensure_driver()
                 driver.set_page_load_timeout(15)
                 driver.set_script_timeout(3)
-                with guard_browser(driver, task, lambda: self._transition(task)):
+                with guard_browser(driver, task, lambda: self._transition(task), call_lock=self._driver_call_lock):
                     page = OrderPage(driver, task.cancel.is_set, lambda seconds: self._task_wait(task, seconds),
                                      lambda stage, detail=None: self.order_journal.mark(task.run_id, stage, intent.intent_id, detail), log=self.log,
                                      trip_route=(task.config.get("from_station_cn", ""), task.config.get("to_station_cn", "")))
@@ -1686,8 +1693,9 @@ class RailWatchBridge:
                     break
                 probe = not pending or time.monotonic() >= next_probe
                 try:
-                    result = (page.probe_known_order(intent, previous.order_id) if probe else
-                              page.result(intent, submitted=True, known_id=previous.order_id))
+                    with self._driver_call_lock:
+                        result = (page.probe_known_order(intent, previous.order_id) if probe else
+                                  page.result(intent, submitted=True, known_id=previous.order_id))
                 except TaskCancelled:
                     raise
                 except Exception as exc:
@@ -1755,7 +1763,8 @@ class RailWatchBridge:
                 self._task_wait(task, min(delay, ORDER_OBSERVATION_SECONDS - elapsed))
                 if task.cancel.is_set(): break
                 try:
-                    result = page.result(intent, submitted=True, known_id=previous.order_id)
+                    with self._driver_call_lock:
+                        result = page.result(intent, submitted=True, known_id=previous.order_id)
                 except TaskCancelled:
                     raise
                 except Exception:
@@ -1824,24 +1833,32 @@ class RailWatchBridge:
             self._handle_human_action({"message": "电脑已从休眠恢复，请核对时间、登录及订单状态后继续。"})
         return self.emit_state()
 
+    FOCUS_BROWSER_LOCK_TIMEOUT_SECONDS = 5.0
+
     def focus_browser(self) -> dict:
-        driver = self.driver
         message = "受控浏览器未打开，请先在系统设置中打开登录页。"
-        if driver is None:
-            raise RuntimeError(message)
+        if not self._driver_call_lock.acquire(timeout=self.FOCUS_BROWSER_LOCK_TIMEOUT_SECONDS):
+            raise RuntimeError("受控浏览器正在执行核对或操作，请稍后再试。")
         try:
-            handle = driver.current_window_handle
-            if not handle:
+            driver = self.driver
+            if driver is None:
                 raise RuntimeError(message)
-            driver.switch_to.window(handle)
             try:
-                driver.execute_cdp_cmd("Page.bringToFront", {})
-            except Exception as exc:
-                if is_session_lost(exc):
-                    raise
-                driver.execute_script("window.focus();")
-        except (Exception, TaskCancelled):
-            raise RuntimeError(message) from None
+                with browser_tab_lifecycle(driver):
+                    handle = driver.current_window_handle
+                    if not handle:
+                        raise RuntimeError(message)
+                    driver.switch_to.window(handle)
+                    try:
+                        driver.execute_cdp_cmd("Page.bringToFront", {})
+                    except Exception as exc:
+                        if is_session_lost(exc):
+                            raise
+                        driver.execute_script("window.focus();")
+            except (Exception, TaskCancelled):
+                raise RuntimeError(message) from None
+        finally:
+            self._driver_call_lock.release()
         return {"focused": True}
 
     @idle_browser_command
@@ -2313,7 +2330,7 @@ class RailWatchBridge:
                     if self.driver is not driver:
                         raise RuntimeError("彩排后浏览器已失效，请重新打开登录页。")
                 config = {**config, "maintenance_sleep": maintenance_sleep}
-                with guard_browser(driver, task, lambda: self._transition(task)):
+                with guard_browser(driver, task, lambda: self._transition(task), call_lock=self._driver_call_lock):
                     driver.set_page_load_timeout(30)
                     driver.set_script_timeout(3)
                     self._transition(task)
@@ -2324,19 +2341,9 @@ class RailWatchBridge:
                         return
                     if not self._prepare_query_page(driver, config, task):
                         return
-                    if config.get("auto_submit") or config.get("auto_alternate"):
-                        login = self._send_keep_alive()
-                        if login == "unknown" and not task.cancel.is_set():
-                            self._task_wait(task, 0.5)
-                            if not task.cancel.is_set():
-                                login = self._send_keep_alive()
-                        task.last_login_check = time.monotonic()
-                        if task.cancel.is_set():
-                            return
-                        if login != "ok":
-                            self.state = replace(self.state, login_ready=False)
-                            self._handle_human_action({"message": "自动提交前未能确认登录有效，请在官方页面完成登录并重新检查。"})
-                            return
+                    automatic_actions = config.get("auto_submit") or config.get("auto_alternate")
+                    if automatic_actions and not self._confirm_automation_login(task):
+                        return
                     if not self._check_session_for_task(task):
                         return
                     if self._existing_trip_blocks(driver, config, task):
@@ -2363,8 +2370,13 @@ class RailWatchBridge:
                         order_journal=self.order_journal, on_order=self._handle_order, run_id=task.run_id,
                         train_schedules=self.train_schedules,
                     )
-                    if (maintenance_sleep or auto_stop_ts is not None) and not monitor.wait_for_monitoring_window():
-                        return
+                    if maintenance_sleep or auto_stop_ts is not None:
+                        # Startup checks can finish after maintenance has already started.
+                        recheck_login = (lambda: self._confirm_automation_login(task)) if automatic_actions else None
+                        if not monitor.wait_for_monitoring_window(on_maintenance_resume=recheck_login):
+                            return
+                        if self._auto_stop_monitor_if_due(auto_stop_ts, time.time()):
+                            return
                     if config.get("timer_enabled") and not monitor.prepare():
                         return
                     if self._auto_stop_monitor_if_due(auto_stop_ts, time.time()):
@@ -2372,8 +2384,11 @@ class RailWatchBridge:
                     armed_prefill = None
                     prefill_adapter = None
                     prefill_skip = prefill_eligible_reason(config, task.target_timestamp, now=time.time())
-                    if (prefill_skip is None and maintenance_sleep and
-                            (maintenance_resume_timestamp(time.time()) or maintenance_resume_timestamp(task.target_timestamp))):
+                    if (prefill_skip is None and maintenance_sleep and (
+                            maintenance_resume_timestamp(time.time())
+                            or maintenance_resume_timestamp(task.target_timestamp)
+                            or (task.target_timestamp is not None
+                                and maintenance_resume_timestamp(task.target_timestamp - 60)))):
                         prefill_skip = "起售时间处于夜间维护休眠时段"
                     if (prefill_skip is not None and task.target_timestamp is not None and config.get("timer_enabled")
                             and config.get("auto_submit") and config.get("prefill_enabled", True) is not False):
@@ -2606,9 +2621,41 @@ class RailWatchBridge:
             self._task_wait(task, 1)
         raise RuntimeError("连续三次无法准备查询页")
 
+    def _confirm_automation_login(self, task) -> bool:
+        login = self._send_keep_alive()
+        if login == "unknown" and not task.cancel.is_set():
+            self._task_wait(task, 0.5)
+            if not task.cancel.is_set():
+                login = self._send_keep_alive()
+        task.last_login_check = time.monotonic()
+        if task.cancel.is_set():
+            return False
+        if login == "ok":
+            return True
+        self.state = replace(self.state, login_ready=False)
+        self._handle_human_action({"message": "自动提交前未能确认登录有效，请在官方页面完成登录并重新检查。"})
+        return False
+
+    def _run_deferred_sale_login_check(self, task) -> bool:
+        self._send_keep_alive()
+        task.last_login_check = time.monotonic()
+        task.sale_login_checked = True
+        task.deferred_sale_login_check = False
+        if self._keep_alive_last_state != "ok":
+            self.state = replace(self.state, login_ready=False)
+            if not task.cancel.is_set():
+                self._handle_human_action({"message": "起售前未能确认登录有效，请检查官方页面后重新启动。"})
+            return False
+        self.log("维护时段结束后登录检查通过，开始执行监控。")
+        return not task.cancel.is_set()
+
     def _check_session_for_task(self, task):
         if task.cancel.is_set():
             return False
+        if task.deferred_sale_login_check and not task.sale_login_checked:
+            if maintenance_resume_timestamp(time.time()):
+                return not task.cancel.is_set()
+            return self._run_deferred_sale_login_check(task)
         if task.config.get("keep_alive") and time.monotonic() - task.last_login_check >= 60:
             target = task.target_timestamp
             burst_seconds = float(task.config.get("burst_window_seconds", 45))
@@ -2643,15 +2690,17 @@ class RailWatchBridge:
         return True
 
     def _send_keep_alive(self) -> str:
-        if not self.driver:
-            return "unknown"
         started = time.monotonic()
         failure = ""
-        try:
-            self.driver.set_script_timeout(LOGIN_PROBE_TIMEOUT_SECONDS)
-            result = self.driver.execute_async_script(LOGIN_CHECK_JS)
-        except Exception as exc:
-            result, failure = "unknown", type(exc).__name__
+        with self._driver_call_lock:
+            driver = self.driver
+            if not driver:
+                return "unknown"
+            try:
+                driver.set_script_timeout(LOGIN_PROBE_TIMEOUT_SECONDS)
+                result = driver.execute_async_script(LOGIN_CHECK_JS)
+            except Exception as exc:
+                result, failure = "unknown", type(exc).__name__
         if result not in ("ok", "expired"):
             result = "unknown"
         self._keep_alive_unknown_count = self._keep_alive_unknown_count + 1 if result == "unknown" else 0
@@ -2662,7 +2711,8 @@ class RailWatchBridge:
                 self._handle_human_action({"title":"需要检查登录", "message":"12306 登录态已失效，请重新登录后手动启动。" if result == "expired" else "连续三次无法确认登录状态，请检查浏览器和网络后手动启动。"})
         elif result == "ok":
             self.state = replace(self.state, login_ready=True)
-            self._check_device_id_consistency()
+            with self._driver_call_lock:
+                self._check_device_id_consistency()
         else:
             # Duration and exception type only, so slow links can be told apart from errors.
             self.log(f"暂时无法确认登录状态（耗时 {time.monotonic() - started:.1f} 秒"
@@ -2688,7 +2738,17 @@ class RailWatchBridge:
                 return False
             last_tick = current_mono
             remaining = deadline - current_mono
+            in_maintenance = bool(config.get("maintenance_sleep") and maintenance_resume_timestamp(current_wall))
             if remaining <= 0:
+                if in_maintenance and (config.get("auto_submit") or config.get("auto_alternate")):
+                    # A pre-maintenance check cannot stay trusted after sleeping through maintenance.
+                    task.sale_login_checked = False
+                    task.deferred_sale_login_check = True
+                elif task.deferred_sale_login_check and not task.sale_login_checked and not in_maintenance:
+                    if not self._run_deferred_sale_login_check(task):
+                        return False
+                    if self._auto_stop_monitor_if_due(auto_stop_ts, time.time()):
+                        return False
                 # Diagnostic only: don't put a synchronous SQLite commit between
                 # the deadline and the first query. Submission markers stay durable.
                 self.order_journal.record_telemetry(task.run_id, "scheduler_wake", detail={"target_at": wait_until, "late_ms": max(0, -remaining * 1000)})
@@ -2698,13 +2758,16 @@ class RailWatchBridge:
             final_login_check = (10 < remaining <= 60 and not task.sale_login_checked
                                  and current_mono >= task.sale_login_retry_at
                                  and (config.get("auto_submit") or config.get("auto_alternate")))
+            if final_login_check and in_maintenance:
+                task.deferred_sale_login_check = True
+            deferred_check_ready = (task.deferred_sale_login_check and not task.sale_login_checked
+                                    and current_mono >= task.sale_login_retry_at and not in_maintenance)
             keep_alive_due = remaining > 10 and config.get("keep_alive") and current_mono - last_check >= 60
-            if (final_login_check or keep_alive_due) and not (
-                    config.get("maintenance_sleep") and maintenance_resume_timestamp(current_wall)):
+            if ((final_login_check or keep_alive_due) and not in_maintenance) or deferred_check_ready:
                 self._send_keep_alive()
                 last_check = time.monotonic()
                 task.last_login_check = last_check
-                if final_login_check:
+                if final_login_check or deferred_check_ready:
                     # One inconclusive probe (slow link, script timeout) is not an expired
                     # login. Probe again only while the retry still ends before the quiet
                     # final ten seconds; an expired login stops at once.
@@ -2719,12 +2782,15 @@ class RailWatchBridge:
                                  f"（{task.sale_login_rechecks}/{policy['login_recheck_limit']}）。", "WARN")
                         continue
                     task.sale_login_checked = True
+                    task.deferred_sale_login_check = False
                     if self._keep_alive_last_state != "ok":
                         self.state = replace(self.state, login_ready=False)
                         if not task.cancel.is_set():
                             self._handle_human_action({"message": "起售前未能确认登录有效，请检查官方页面后重新启动。"})
                         return False
-                    self.log("起售前登录检查通过，最后10秒停止保活检查。")
+                    self.log("维护时段结束后登录检查通过，开始执行监控。"
+                             if deferred_check_ready and not final_login_check
+                             else "起售前登录检查通过，最后10秒停止保活检查。")
                 # Recalculate the deadline after a blocking browser probe; never
                 # spend the old remaining duration after the target has arrived.
                 continue
@@ -2803,14 +2869,15 @@ class RailWatchBridge:
 
     def _release_driver(self, strict: bool = False) -> None:
         """丢弃缓存句柄，并清理它残留的浏览器与 ChromeDriver 进程。"""
-        driver = self.driver
-        self.device_id_protector = None
-        if driver is None:
-            return
-        error = self._dispose_driver(driver)
-        if strict and error is not None:
-            raise RuntimeError("浏览器清理失败") from error
-        self.driver = None
+        with self._driver_call_lock:
+            driver = self.driver
+            self.device_id_protector = None
+            if driver is None:
+                return
+            error = self._dispose_driver(driver)
+            if strict and error is not None:
+                raise RuntimeError("浏览器清理失败") from error
+            self.driver = None
         self.emit_state(replace(self.state, login_ready=False, query_ready=False))
 
     def _terminate_profile_chrome(self) -> int:
@@ -2870,10 +2937,12 @@ $targets.Count
 
     def _ensure_driver(self, test_only: bool = False):
         if self.driver and not test_only:
-            if driver_session_alive(self.driver):
-                return self.driver
-            self.log("受控浏览器已关闭，正在重新启动 Chrome。", "WARN")
-            self._release_driver()
+            with self._driver_call_lock:
+                if self.driver and driver_session_alive(self.driver):
+                    return self.driver
+                if self.driver:
+                    self.log("受控浏览器已关闭，正在重新启动 Chrome。", "WARN")
+                    self._release_driver()
         if not SELENIUM_AVAILABLE or webdriver is None:
             raise RuntimeError("Selenium 未安装。")
 
@@ -2918,8 +2987,9 @@ $targets.Count
         # Bound a disconnected driver's transport as well as page/script waits.
         driver.command_executor.client_config.timeout = 35
         if not test_only:
-            self.driver = driver
-            self.device_id_protector = RailDeviceIdProtector(driver, self.log) if RailDeviceIdProtector else None
+            with self._driver_call_lock:
+                self.driver = driver
+                self.device_id_protector = RailDeviceIdProtector(driver, self.log) if RailDeviceIdProtector else None
         return driver
 
     def _owns_context(self):

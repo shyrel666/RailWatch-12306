@@ -141,8 +141,12 @@ function localDataError(error: unknown, fallback: string): string {
 }
 
 function LocalDataSettings({ runtime }: { runtime: RuntimeInfo }) {
+  const tripBundleImporting = useRailWatchStore(state => state.tripBundleImporting);
+  const beginTripBundleImport = useRailWatchStore(state => state.beginTripBundleImport);
+  const finishTripBundleImport = useRailWatchStore(state => state.finishTripBundleImport);
   const [operation, setOperation] = useState<"open" | "export" | "import" | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; error?: boolean } | null>(null);
+  const busy = operation !== null || tripBundleImporting;
 
   const openDataDir = async () => {
     setOperation("open");
@@ -162,12 +166,16 @@ function LocalDataSettings({ runtime }: { runtime: RuntimeInfo }) {
     const label = action === "export" ? "导出" : "导入";
     setOperation(action);
     setFeedback(null);
+    if (action === "import") beginTripBundleImport();
+    let imported = false;
     try {
       const result = await (action === "export" ? railwatchApi.exportTripBundle() : railwatchApi.importTripBundle());
+      imported = action === "import" && !("cancelled" in result);
       setFeedback({ message: "cancelled" in result ? `已取消${label}备份。` : `备份${label}成功。` });
     } catch (error) {
       setFeedback({ message: localDataError(error, `备份${label}失败，请重试。`), error: true });
     } finally {
+      if (action === "import") finishTripBundleImport(imported);
       setOperation(null);
     }
   };
@@ -182,7 +190,7 @@ function LocalDataSettings({ runtime }: { runtime: RuntimeInfo }) {
               <span className={"status-badge " + (runtime.data_dir_writable ? "green" : "amber")}>
                 {runtime.data_dir_writable ? "可读写" : "不可写"}
               </span>
-              <Button size="small" disabled={operation !== null} loading={operation === "open"} onClick={() => void openDataDir()}>
+              <Button size="small" disabled={busy} loading={operation === "open"} onClick={() => void openDataDir()}>
                 打开目录
               </Button>
             </div>
@@ -198,10 +206,10 @@ function LocalDataSettings({ runtime }: { runtime: RuntimeInfo }) {
       </div>
       <SettingRow icon={ClipboardList} title="方案与收藏备份" control={
         <div className="button-row">
-          <Button disabled={operation !== null} loading={operation === "export"} onClick={() => void transferBackup("export")}>
+          <Button disabled={busy} loading={operation === "export"} onClick={() => void transferBackup("export")}>
             导出脱敏备份
           </Button>
-          <Button disabled={operation !== null} loading={operation === "import"} onClick={() => void transferBackup("import")}>
+          <Button disabled={busy} loading={operation === "import" || tripBundleImporting} onClick={() => void transferBackup("import")}>
             导入备份
           </Button>
         </div>

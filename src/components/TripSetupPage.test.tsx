@@ -25,6 +25,8 @@ function resetStore() {
     status: { ...defaultStatus, query_ready: true },
     config: { ...defaultConfig, train_code: "" },
     activeTripPresetId: null,
+    tripBundleImporting: false,
+    tripPresetsVersion: 0,
     savedConfig: null,
     savedAt: null,
     configSaveError: null,
@@ -360,6 +362,148 @@ test("deleting a selected preset waits for confirmation and preserves the draft 
   expect(screen.getByRole("dialog", { name: "行程方案" })).toBeTruthy();
   expect(railwatchStore.getState().config.train_code).toBe("D3");
   expect(railwatchStore.getState().activeTripPresetId).toBeNull();
+});
+
+test("pauses preset actions during backup import and refreshes mounted presets after import succeeds", async () => {
+  resetStore();
+  const oldPreset: TripPreset = { id: "same-id", name: "常坐", config: { from_station_cn: "北京", to_station_cn: "上海", train_code: "G1" } };
+  const importedPreset: TripPreset = { id: "same-id", name: "常坐", config: { from_station_cn: "深圳", to_station_cn: "广州", train_code: "G99" } };
+  let resolveReload!: (value: { items: TripPreset[] }) => void;
+  let loadCalls = 0;
+  const runCommand = vi.fn(async (command: string) => {
+    if (command === "loadTripPresets") {
+      loadCalls += 1;
+      if (loadCalls === 1) return { items: [oldPreset] };
+      return new Promise<{ items: TripPreset[] }>(resolve => { resolveReload = resolve; });
+    }
+    if (command === "loadTripChoices") return { recent_routes: [], favorites: [] };
+    return undefined;
+  });
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => false)} runCommand={runCommand as CommandRunner} />);
+
+  const initial = await openTripPresets(user, "行程方案 (1)");
+  await user.click(initial.getByRole("button", { name: "常坐" }));
+  expect(railwatchStore.getState().activeTripPresetId).toBe("same-id");
+
+  const presets = await openTripPresets(user, "方案：常坐");
+  expect(presets.getByRole<HTMLButtonElement>("button", { name: "更新当前方案" }).disabled).toBe(false);
+
+  // While a backup import is running, stale preset actions stay locked.
+  act(() => { railwatchStore.getState().beginTripBundleImport(); });
+  expect(presets.getByRole<HTMLButtonElement>("button", { name: "常坐" }).disabled).toBe(true);
+  expect(presets.getByRole<HTMLButtonElement>("button", { name: "更新当前方案" }).disabled).toBe(true);
+
+  // Import finishes: active preset is cleared, stale items disappear, and fresh presets load.
+  act(() => { railwatchStore.getState().finishTripBundleImport(true); });
+  expect(railwatchStore.getState().activeTripPresetId).toBeNull();
+  expect(presets.queryByRole("button", { name: "常坐" })).toBeNull();
+  expect(presets.getByRole<HTMLButtonElement>("button", { name: "存为方案" }).disabled).toBe(true);
+  await waitFor(() => expect(loadCalls).toBe(2));
+
+  act(() => { resolveReload({ items: [importedPreset] }); });
+  const refreshed = await presets.findByRole<HTMLButtonElement>("button", { name: "常坐" });
+  await waitFor(() => expect(refreshed.disabled).toBe(false));
+  expect(presets.getByText(/深圳 → 广州/)).toBeTruthy();
+  await user.click(refreshed);
+  expect(railwatchStore.getState().config.train_code).toBe("G99");
+});
+
+test("defers initial preset loading when navigating to TripSetupPage mid-import until import completes", async () => {
+  resetStore();
+  const importedPreset: TripPreset = { id: "imported-1", name: "导入方案", config: { train_code: "G88" } };
+  railwatchStore.getState().beginTripBundleImport();
+  const runCommand = vi.fn(async (command: string) => {
+    if (command === "loadTripPresets") return { items: [importedPreset] };
+    if (command === "loadTripChoices") return { recent_routes: [], favorites: [] };
+    return undefined;
+  });
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => false)} runCommand={runCommand as CommandRunner} />);
+
+  expect(runCommand).not.toHaveBeenCalledWith("loadTripPresets");
+  expect(runCommand).not.toHaveBeenCalledWith("loadTripChoices");
+  const presets = await openTripPresets(user, "行程方案");
+  expect(presets.getByText("正在导入备份…")).toBeTruthy();
+  expect(presets.getByRole<HTMLButtonElement>("button", { name: "存为方案" }).disabled).toBe(true);
+
+  act(() => { railwatchStore.getState().finishTripBundleImport(true); });
+  const loaded = await presets.findByRole<HTMLButtonElement>("button", { name: "导入方案" });
+  await waitFor(() => expect(loaded.disabled).toBe(false));
+  expect(runCommand).toHaveBeenCalledWith("loadTripPresets");
+  expect(runCommand).toHaveBeenCalledWith("loadTripChoices");
+});
+
+test("discards a late saveTripPreset response from before a backup import even after unmount", async () => {
+  resetStore();
+  const oldPreset: TripPreset = { id: "same-id", name: "常坐", config: { from_station_cn: "北京", to_station_cn: "上海", train_code: "G1" } };
+  const importedPreset: TripPreset = { id: "same-id", name: "常坐", config: { from_station_cn: "深圳", to_station_cn: "广州", train_code: "G99" } };
+  let resolveSave!: (value: { items: TripPreset[]; saved_id: string }) => void;
+  let loadCount = 0;
+  const runCommand = vi.fn(async (command: string) => {
+    if (command === "loadTripPresets") {
+      loadCount += 1;
+      return { items: [loadCount === 1 ? oldPreset : importedPreset] };
+    }
+    if (command === "saveTripPreset") {
+      return new Promise<{ items: TripPreset[]; saved_id: string }>(resolve => { resolveSave = resolve; });
+    }
+    if (command === "loadTripChoices") return { recent_routes: [], favorites: [] };
+    return undefined;
+  });
+  const user = userEvent.setup();
+  const view = render(<TripSetupPage busy={null} confirm={vi.fn(async () => false)} runCommand={runCommand as CommandRunner} />);
+
+  const initial = await openTripPresets(user, "行程方案 (1)");
+  await user.click(initial.getByRole("button", { name: "常坐" }));
+  const presets = await openTripPresets(user, "方案：常坐");
+  await user.click(presets.getByRole("button", { name: "更新当前方案" }));
+  await waitFor(() => expect(resolveSave).toBeTypeOf("function"));
+
+  // Leave TripSetupPage and complete a backup import before the earlier save response arrives.
+  view.unmount();
+  act(() => {
+    railwatchStore.getState().beginTripBundleImport();
+    railwatchStore.getState().finishTripBundleImport(true);
+  });
+  expect(railwatchStore.getState().activeTripPresetId).toBeNull();
+
+  await act(async () => {
+    resolveSave({ items: [oldPreset], saved_id: "same-id" });
+  });
+  expect(railwatchStore.getState().activeTripPresetId).toBeNull();
+
+  // Also verify mounted components ignore a stale save response and keep the post-import list.
+  let resolveMountedSave!: (value: { items: TripPreset[]; saved_id: string }) => void;
+  const mountedRun = vi.fn(async (command: string) => {
+    if (command === "loadTripPresets") {
+      return { items: [railwatchStore.getState().tripPresetsVersion > 1 ? importedPreset : oldPreset] };
+    }
+    if (command === "saveTripPreset") {
+      return new Promise<{ items: TripPreset[]; saved_id: string }>(resolve => { resolveMountedSave = resolve; });
+    }
+    if (command === "loadTripChoices") return { recent_routes: [], favorites: [] };
+    return undefined;
+  });
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => false)} runCommand={mountedRun as CommandRunner} />);
+  const mountedInitial = await openTripPresets(user, "行程方案 (1)");
+  await user.click(mountedInitial.getByRole("button", { name: "常坐" }));
+  const mountedPresets = await openTripPresets(user, "方案：常坐");
+  await user.click(mountedPresets.getByRole("button", { name: "更新当前方案" }));
+  await waitFor(() => expect(resolveMountedSave).toBeTypeOf("function"));
+
+  act(() => {
+    railwatchStore.getState().beginTripBundleImport();
+    railwatchStore.getState().finishTripBundleImport(true);
+  });
+  expect(await mountedPresets.findByText(/深圳 → 广州/)).toBeTruthy();
+
+  await act(async () => {
+    resolveMountedSave({ items: [oldPreset], saved_id: "same-id" });
+  });
+  expect(railwatchStore.getState().activeTripPresetId).toBeNull();
+  expect(mountedPresets.getByText(/深圳 → 广州/)).toBeTruthy();
+  expect(mountedPresets.queryByText(/北京 → 上海/)).toBeNull();
 });
 
 describe("TripSetupPage", () => {

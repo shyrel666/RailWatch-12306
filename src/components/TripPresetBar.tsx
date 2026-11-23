@@ -14,6 +14,8 @@ export function TripPresetBar({ config, confirm, runCommand, onApply, disabled }
   disabled: boolean;
 }) {
   const activeId = useRailWatchStore(state => state.activeTripPresetId);
+  const tripBundleImporting = useRailWatchStore(state => state.tripBundleImporting);
+  const tripPresetsVersion = useRailWatchStore(state => state.tripPresetsVersion);
   const [items, setItems] = useState<TripPreset[]>([]);
   const [loading, setLoading] = useState(true);
   const [writing, setWriting] = useState(false);
@@ -26,23 +28,39 @@ export function TripPresetBar({ config, confirm, runCommand, onApply, disabled }
   const namedSaveButton = useRef<HTMLButtonElement>(null);
   const confirmingDelete = useRef(false);
   const restoreTriggerFocus = useRef(false);
+  const loadGeneration = useRef(0);
+  const loadedVersion = useRef(tripPresetsVersion);
   const active = items.find(item => item.id === activeId);
   const triggerLabel = active ? `方案：${active.name}` : items.length ? `行程方案 (${items.length})` : "行程方案";
-  const locked = loading || writing;
+  const locked = loading || writing || tripBundleImporting;
   const trimmedName = name?.trim() ?? "";
   const nameLength = [...trimmedName].length;
   const validName = nameLength > 0 && nameLength <= 40 && !/\p{Cc}/u.test(name ?? "");
 
   useEffect(() => {
+    if (tripBundleImporting) {
+      // Drop any in-flight read started before import completes and lock preset actions.
+      loadGeneration.current += 1;
+      setLoading(true);
+      return;
+    }
+    if (loadedVersion.current !== tripPresetsVersion) {
+      loadedVersion.current = tripPresetsVersion;
+      setItems([]);
+    }
     let mounted = true;
+    const generation = ++loadGeneration.current;
     setLoading(true);
     void runCommand<TripPresetsResult>("loadTripPresets").then(result => {
-      if (!mounted) return;
+      if (!mounted || loadGeneration.current !== generation) return;
       if (Array.isArray(result?.items)) setItems(result.items);
+      setLoading(false);
+    }, () => {
+      if (!mounted || loadGeneration.current !== generation) return;
       setLoading(false);
     });
     return () => { mounted = false; };
-  }, [runCommand]);
+  }, [runCommand, tripPresetsVersion, tripBundleImporting]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -112,17 +130,19 @@ export function TripPresetBar({ config, confirm, runCommand, onApply, disabled }
   };
 
   const savePreset = async (presetName: string, id?: string) => {
-    const { editRevision } = railwatchStore.getState();
+    const { editRevision, tripPresetsVersion } = railwatchStore.getState();
     setWriting(true);
     try {
       const result = await runCommand<TripPresetsResult>("saveTripPreset", {
         name: presetName, config, ...(id ? { preset_id: id } : {}),
       }, id ? "行程方案已更新" : "行程方案已保存");
       if (!Array.isArray(result?.items)) return;
+      const latest = railwatchStore.getState();
+      if (latest.tripBundleImporting || latest.tripPresetsVersion !== tripPresetsVersion) return;
       setItems(result.items);
       if (!id) closeNaming();
-      if (result.saved_id && railwatchStore.getState().editRevision === editRevision) {
-        railwatchStore.getState().setActiveTripPreset(result.saved_id);
+      if (result.saved_id && latest.editRevision === editRevision) {
+        latest.setActiveTripPreset(result.saved_id);
       }
     } finally {
       setWriting(false);
@@ -130,16 +150,21 @@ export function TripPresetBar({ config, confirm, runCommand, onApply, disabled }
   };
 
   const deletePreset = async (preset: TripPreset) => {
+    const { tripPresetsVersion } = railwatchStore.getState();
     setWriting(true);
     confirmingDelete.current = true;
     try {
       if (!await confirm("删除行程方案", `确定删除「${preset.name}」？`)) return;
       confirmingDelete.current = false;
+      const beforeDelete = railwatchStore.getState();
+      if (beforeDelete.tripBundleImporting || beforeDelete.tripPresetsVersion !== tripPresetsVersion) return;
       const result = await runCommand<TripPresetsResult>("deleteTripPreset", { preset_id: preset.id }, "行程方案已删除");
       if (!Array.isArray(result?.items)) return;
+      const latest = railwatchStore.getState();
+      if (latest.tripBundleImporting || latest.tripPresetsVersion !== tripPresetsVersion) return;
       setItems(result.items);
-      if (railwatchStore.getState().activeTripPresetId === preset.id) {
-        railwatchStore.getState().setActiveTripPreset(null);
+      if (latest.activeTripPresetId === preset.id) {
+        latest.setActiveTripPreset(null);
       }
     } finally {
       confirmingDelete.current = false;
@@ -183,7 +208,7 @@ export function TripPresetBar({ config, confirm, runCommand, onApply, disabled }
           </li>;
         })}
       </ul> : <p className="trip-preset-empty">
-        {loading ? "正在加载行程方案…" : "暂无已保存方案，可将当前配置存为方案以便快速切换。"}
+        {loading ? (tripBundleImporting ? "正在导入备份…" : "正在加载行程方案…") : "暂无已保存方案，可将当前配置存为方案以便快速切换。"}
       </p>}
       <footer className="trip-preset-footer">
         {name === null ? <div className="trip-preset-actions">

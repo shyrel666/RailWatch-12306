@@ -35,11 +35,14 @@ def is_session_lost(exc: BaseException) -> bool:
 
 
 @contextmanager
-def guard_browser(driver, task, tick):
+def guard_browser(driver, task, tick, call_lock=None):
     original = driver.execute
-    previous_cleanup = getattr(driver, "_railwatch_cleanup_execute", None)
-    driver._railwatch_cleanup_execute = original
-    def execute(command, params=None):
+    driver_dict = getattr(driver, "__dict__", {})
+    previous_bypass = driver_dict.get("_railwatch_bypass_tls")
+    previous_call_lock = driver_dict.get("_railwatch_call_lock")
+    bypass_tls = threading.local()
+
+    def _run(command, params=None):
         if task.cancel.is_set():
             raise TaskCancelled()
         tick()
@@ -48,12 +51,55 @@ def guard_browser(driver, task, tick):
             raise TaskCancelled()
         tick()
         return result
-    driver.execute = execute
+
+    def execute(command, params=None):
+        bypassed = getattr(bypass_tls, "depth", 0) > 0
+        if call_lock is None:
+            return original(command, params) if bypassed else _run(command, params)
+        with call_lock:
+            return original(command, params) if bypassed else _run(command, params)
+
+    def install():
+        driver._railwatch_bypass_tls = bypass_tls
+        if call_lock is not None:
+            driver._railwatch_call_lock = call_lock
+        driver.execute = execute
+
+    def restore():
+        driver.execute = original
+        if previous_bypass is None:
+            driver_dict.pop("_railwatch_bypass_tls", None)
+        else:
+            driver._railwatch_bypass_tls = previous_bypass
+        if previous_call_lock is None:
+            driver_dict.pop("_railwatch_call_lock", None)
+        else:
+            driver._railwatch_call_lock = previous_call_lock
+
+    if call_lock is None:
+        install()
+    else:
+        with call_lock:
+            install()
     try:
         yield
     finally:
-        driver.execute = original
-        driver._railwatch_cleanup_execute = previous_cleanup
+        if call_lock is None:
+            restore()
+        else:
+            with call_lock:
+                restore()
+
+
+@contextmanager
+def driver_call_section(driver):
+    """Serialize multi-step WebDriver operations against concurrent bridge calls."""
+    lock = getattr(driver, "__dict__", {}).get("_railwatch_call_lock")
+    if lock is None:
+        yield
+        return
+    with lock:
+        yield
 
 
 @contextmanager
@@ -62,15 +108,26 @@ def browser_tab_lifecycle(driver):
 
     Only use for tab handles, opening a blank tab, closing our tab and restoring
     the original handle. Inventory, navigation and page actions stay guarded.
+    Bypass state is thread-local so other threads still observe the call lock
+    and cancellation checks.
     """
-    guarded = driver.execute
-    raw = getattr(driver, "_railwatch_cleanup_execute", None)
-    if raw is not None:
-        driver.execute = raw
-    try:
-        yield
-    finally:
-        driver.execute = guarded
+    with driver_call_section(driver):
+        bypass_tls = getattr(driver, "__dict__", {}).get("_railwatch_bypass_tls")
+        if bypass_tls is None:
+            yield
+            return
+        depth = getattr(bypass_tls, "depth", 0)
+        bypass_tls.depth = depth + 1
+        try:
+            yield
+        finally:
+            if depth == 0:
+                try:
+                    del bypass_tls.depth
+                except AttributeError:
+                    pass
+            else:
+                bypass_tls.depth = depth
 
 
 @dataclass
@@ -89,6 +146,7 @@ class MonitorTask:
     last_tick: float = field(default_factory=time.monotonic)
     last_login_check: float = float("-inf")
     sale_login_checked: bool = False
+    deferred_sale_login_check: bool = False
     sale_login_rechecks: int = 0
     sale_login_retry_at: float = float("-inf")
 

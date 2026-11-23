@@ -19,6 +19,12 @@ CONTROL_COMMANDS = frozenset({"stopMonitor", "cancelRehearsal", "systemResumed",
 # A cold station cache can require a slow download. Queue these lookups apart
 # from ordinary commands so waiting searches cannot block settings or history.
 STATION_COMMANDS = frozenset({"searchStations", "refreshStations"})
+# Backups merge the same presets, favorites and recent routes that these commands
+# read or write. Process them in input order so an earlier write cannot undo an import.
+TRIP_BUNDLE_COMMANDS = frozenset({
+    "loadTripPresets", "saveTripPreset", "deleteTripPreset", "loadTripChoices",
+    "saveTrainFavorites", "saveConfig", "exportTripBundle", "importTripBundle",
+})
 
 
 def configure_stdio() -> None:
@@ -40,10 +46,12 @@ class RailWatchRuntime:
         self._output_closed = False
         self._maintenance_guard = threading.Lock()
         self._active_commands = 0
+        self._pending_trip_bundle_commands = 0
         self._clearing_data = False
         self.writer = writer or self._stdout_writer
         self.bridge = bridge or RailWatchBridge(event_callback=self.emit_event)
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="railwatch-cmd")
+        self._trip_bundle_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-trip-bundle")
         self._station_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-stations")
         self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-control")
         self._shutdown_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="railwatch-shutdown")
@@ -80,10 +88,21 @@ class RailWatchRuntime:
                 or not isinstance(command, str) or not 0 < len(command) <= 80
                 or not isinstance(payload, dict)):
             return self._protocol_error(request_id)
+        if command in TRIP_BUNDLE_COMMANDS:
+            # Count queued requests as well so clearing data cannot overtake them.
+            with self._maintenance_guard:
+                future = self._trip_bundle_executor.submit(self._run_command, request_id, command, payload)
+                self._pending_trip_bundle_commands += 1
+            future.add_done_callback(self._trip_bundle_command_finished)
+            return future
         executor = (self._control_executor if command in CONTROL_COMMANDS else
                     self._shutdown_executor if command in ("prepareShutdown", "taskActivity") else
                     self._station_executor if command in STATION_COMMANDS else self._executor)
         return executor.submit(self._run_command, request_id, command, payload)
+
+    def _trip_bundle_command_finished(self, _future: Future) -> None:
+        with self._maintenance_guard:
+            self._pending_trip_bundle_commands -= 1
 
     def _run_command(self, request_id, command: str, payload: dict) -> None:
         try:
@@ -106,7 +125,7 @@ class RailWatchRuntime:
         with self._maintenance_guard:
             if self._clearing_data:
                 raise RuntimeError("正在清除本地数据，请等待清理完成。")
-            if clearing and self._active_commands:
+            if clearing and (self._active_commands or self._pending_trip_bundle_commands):
                 raise RuntimeError("其他操作尚未结束，尚未清除数据，请稍后重试。")
             self._active_commands += 1
             if clearing:
@@ -202,6 +221,7 @@ class RailWatchRuntime:
         self._control_executor.shutdown(wait=True)
         self._shutdown_executor.shutdown(wait=True)
         self._station_executor.shutdown(wait=True)
+        self._trip_bundle_executor.shutdown(wait=True)
         self._executor.shutdown(wait=True)
 
     def close_output(self, timeout: float = 2.0) -> None:

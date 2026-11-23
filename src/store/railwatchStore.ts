@@ -143,6 +143,10 @@ export type RailWatchStore = {
   config: RailWatchConfig;
   activeTripPresetId: string | null;
   setActiveTripPreset: (id: string | null) => void;
+  tripBundleImporting: boolean;
+  tripPresetsVersion: number;
+  beginTripBundleImport: () => void;
+  finishTripBundleImport: (imported: boolean) => void;
   savedConfig: RailWatchConfig | null;
   savedAt: number | null;
   configSaveError: string | null;
@@ -279,6 +283,13 @@ export function createRailWatchStore() {
     config: defaultConfig,
     activeTripPresetId: null,
     setActiveTripPreset: id => set({ activeTripPresetId: id }),
+    tripBundleImporting: false,
+    tripPresetsVersion: 0,
+    beginTripBundleImport: () => set({ tripBundleImporting: true }),
+    finishTripBundleImport: imported => set(state => ({
+      tripBundleImporting: false,
+      ...(imported ? { activeTripPresetId: null, tripPresetsVersion: state.tripPresetsVersion + 1 } : {}),
+    })),
     savedConfig: null,
     savedAt: null,
     configSaveError: null,

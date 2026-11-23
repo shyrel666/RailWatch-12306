@@ -266,15 +266,18 @@ export function TripSetupPage({
   const [choices, setChoices] = useState<TripChoices>({ recent_routes: [], favorites: [] });
   const [trainNotice, setTrainNotice] = useState("");
   const [stationRevision, setStationRevision] = useState(0);
+  const tripBundleImporting = useRailWatchStore(state => state.tripBundleImporting);
+  const tripPresetsVersion = useRailWatchStore(state => state.tripPresetsVersion);
 
   useEffect(() => {
+    if (tripBundleImporting) return;
     let current = true;
     void runCommand<TripChoices>("loadTripChoices").then(result => {
       if (!current) return;
       if (result && Array.isArray(result.recent_routes) && Array.isArray(result.favorites)) setChoices(result);
     });
     return () => { current = false; };
-  }, [runCommand]);
+  }, [runCommand, tripPresetsVersion, tripBundleImporting]);
 
   const update = (patch: Partial<RailWatchConfig>) => setConfig(patch);
   const today = useBeijingToday();

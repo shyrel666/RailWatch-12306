@@ -20,7 +20,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/dashboard-v1.0.1.png" alt="RailWatch v1.0.1 仪表盘：当前行程、下一步与购票日历（演示数据）" width="100%">
+  <img src="docs/images/dashboard-v1.1.0.png" alt="RailWatch v1.1.0 仪表盘：当前行程、下一步与购票日历（演示数据）" width="100%">
 </p>
 
 把行程填好，剩下的交给 RailWatch：它在起售时刻准点查询，有票自动提交，无票自动候补，拿到订单号后持续跟踪状态，需要你付款时第一时间提醒。登录和支付始终在 12306 官方页面完成，所有数据只保存在你的电脑上。
@@ -80,15 +80,15 @@
 <table>
   <tr>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/trip-setup-v1.0.1.png"><img src="docs/images/trip-setup-v1.0.1.png" alt="行程设置" width="100%"></a>
+      <a href="docs/images/trip-setup-v1.1.0.png"><img src="docs/images/trip-setup-v1.1.0.png" alt="行程设置" width="100%"></a>
       <br><sub><b>行程设置</b> · 路线、席别、乘客与策略</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/monitor-v1.0.1.png"><img src="docs/images/monitor-v1.0.1.png" alt="购票监控（深色主题）" width="100%"></a>
+      <a href="docs/images/monitor-v1.1.0.png"><img src="docs/images/monitor-v1.1.0.png" alt="购票监控（深色主题）" width="100%"></a>
       <br><sub><b>购票监控</b> · 实时查询结果（深色主题）</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <a href="docs/images/order-center-v1.0.1.png"><img src="docs/images/order-center-v1.0.1.png" alt="订单中心" width="100%"></a>
+      <a href="docs/images/order-center-v1.1.0.png"><img src="docs/images/order-center-v1.1.0.png" alt="订单中心" width="100%"></a>
       <br><sub><b>订单中心</b> · 订单状态与候补详情</sub>
     </td>
   </tr>
