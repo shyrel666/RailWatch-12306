@@ -202,6 +202,20 @@ class IdlePolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 save_ui_preferences(temp, {"idle_keep_alive": "no"})
 
+    def test_maintenance_sleep_defaults_off_and_loads_only_real_booleans(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertFalse(load_ui_preferences(temp)["maintenance_sleep"])
+            path = os.path.join(temp, "ui_preferences.json")
+            for invalid in ("true", 1, None, []):
+                with self.subTest(invalid=invalid):
+                    with open(path, "w", encoding="utf-8") as handle:
+                        json.dump({"maintenance_sleep": invalid}, handle)
+                    self.assertFalse(load_ui_preferences(temp)["maintenance_sleep"])
+                    with self.assertRaisesRegex(ValueError, "夜间维护休眠必须为布尔值。"):
+                        save_ui_preferences(temp, {"maintenance_sleep": invalid})
+            self.assertTrue(save_ui_preferences(temp, {"maintenance_sleep": True})["maintenance_sleep"])
+            self.assertFalse(save_ui_preferences(temp, {"maintenance_sleep": False})["maintenance_sleep"])
+
     def test_policy_ranges(self):
         self.assertEqual(validate_idle_policies(dict(IDLE_POLICIES)), IDLE_POLICIES)
         for key, value in (("login_keep_alive_seconds", 60), ("sale_reminder_lead_minutes", 2.5), ("max_sale_reminders", 0)):

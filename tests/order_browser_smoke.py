@@ -47,7 +47,9 @@ class OrderBrowserTests(unittest.TestCase):
     def test_waitlist_checkout_binds_only_via_order_list_and_preserves_payment_tab(self):
         self.driver.get((Path(__file__).parent / "fixtures/lineUp_payConfirm.html").resolve().as_uri())
         selected = replace(self.intent, kind="alternate")
-        self.assertTrue(self.page.snapshot()["alternateCheckout"])
+        checkout = self.page.snapshot()
+        self.assertTrue(checkout["alternateCheckout"])
+        self.assertEqual(checkout["payment_countdown_seconds"], 19 * 60 + 12)
         self.assertEqual(self.page.result(selected).status, "unknown")
         original_tab, original_tabs = self.driver.current_window_handle, self.driver.window_handles
         native_get = self.driver.get
@@ -60,6 +62,8 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual(self.driver.current_window_handle, original_tab)
         self.assertEqual(self.driver.window_handles, original_tabs)
         self.assertTrue(self.page.snapshot()["alternateCheckout"])
+        self.assertAlmostEqual(result.review["payment_deadline_at"] - result.review["payment_countdown_observed_at"],
+                               36 * 60 + 58)
         self.assertEqual(self.js("return window.orderActions"), 0)
 
     def test_waitlist_checkout_with_wrong_official_order_remains_unresolved(self):
@@ -92,7 +96,28 @@ class OrderBrowserTests(unittest.TestCase):
         self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
         self.assertTrue(result.evidence["matched"])
         self.assertEqual(result.evidence["state"], "待支付")
+        self.assertEqual(result.review, {"ticket_price": "661.0", "seat_assignments": ["09车02A号"]})
         self.assertEqual(self.js("return window.orderActions"), 0)
+
+    def test_payment_metadata_stays_in_its_order_card_and_seat_column(self):
+        self.load_unpaid_card()
+        self.js("""
+          const first=document.querySelector('.order-item-bd tr');
+          const second=first.cloneNode(true);
+          first.cells[0].rowSpan=2;
+          second.cells[0].remove();
+          second.cells[0].append('88车02B号');
+          second.cells[1].lastElementChild.innerText='09车02B号';
+          first.after(second);
+          document.querySelector('.order-item').insertAdjacentHTML('afterend',
+            '<div class="order-item"><a>继续支付（5分09秒）</a></div>');
+        """)
+        original, other = self.page.snapshot()["orders"]
+        self.assertEqual(original["seat_assignments"], ["09车02A号", "09车02B号"])
+        self.assertEqual(original["ticket_price"], "661.0")
+        self.assertIsNone(original["payment_countdown_seconds"])
+        self.assertEqual(other["payment_countdown_seconds"], 309)
+        self.assertEqual(other["seat_assignments"], [])
 
     def test_unpaid_card_still_requires_exact_saved_trip_and_order_identity(self):
         self.load_unpaid_card()
@@ -307,13 +332,14 @@ class OrderBrowserTests(unittest.TestCase):
               fixture.confirmClicks++;
               el('dialog').classList.add('hidden');
               el('regular').classList.add('hidden');
-              el('records').innerHTML='<p>订单号：E123456</p><div id="show_title_ticket">2026-09-10（周四）G101次北京站（09:29开）—上海站（19:00到）</div><table><thead><tr><th>姓名</th><th>席别</th></tr></thead><tbody id="show_ticket_message"><tr><td>张三</td><td>二等座</td></tr></tbody></table><a id="payButton">网上支付</a>';
+              el('records').innerHTML='<p>订单号：E123456</p><div id="show_title_ticket">2026-09-10（周四）G101次北京站（09:29开）—上海站（19:00到）</div><table><thead><tr><th>姓名</th><th>席别</th></tr></thead><tbody id="show_ticket_message"><tr><td>张三</td><td>二等座</td></tr></tbody></table><a id="payButton">网上支付（3分05秒）</a>';
             };
           };
         """)
         self.page.reconcile = Mock()
         result = self.page.regular(self.driver.find_element("id", "book"), self.intent)
         self.assertEqual((result.status,result.order_id), ("pending_payment","E123456"))
+        self.assertAlmostEqual(result.review["payment_deadline_at"] - result.review["payment_countdown_observed_at"], 185)
         self.page.reconcile.assert_not_called()
         for change in (replace(self.intent, seat="一等座"), replace(self.intent, passengers=("李四",)), replace(self.intent, date="2026-09-11"), replace(self.intent, train_code="G102")):
             self.assertEqual(self.page.result(change).status, "unknown")

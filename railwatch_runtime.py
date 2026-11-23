@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from typing import Callable, Optional
 
 from railwatch_bridge import RailWatchBridge, dumps_json
+from railwatch_preferences import validate_maintenance_sleep
 
 
 # These commands signal cancellation without browser/network work. Keep them
@@ -138,6 +139,11 @@ class RailWatchRuntime:
             "stationSaleTimes": lambda: self.bridge.station_sale_times(payload.get("station"), payload.get("force", False)),
             "loadTripChoices": lambda: self.bridge.load_trip_choices(),
             "saveTrainFavorites": lambda: self.bridge.save_train_favorites(payload.get("from_station"), payload.get("to_station"), payload.get("trains")),
+            "loadTripPresets": lambda: self.bridge.load_trip_presets(),
+            "saveTripPreset": lambda: self.bridge.save_trip_preset(payload.get("name"), payload.get("config"), payload.get("preset_id")),
+            "deleteTripPreset": lambda: self.bridge.delete_trip_preset(payload.get("preset_id")),
+            "exportTripBundle": lambda: self.bridge.export_trip_bundle(),
+            "importTripBundle": lambda: self.bridge.import_trip_bundle(payload.get("bundle")),
             "saleReminders": lambda: self.bridge.list_sale_reminders(),
             "addSaleReminder": lambda: self.bridge.add_sale_reminder(payload.get("from_station"), payload.get("to_station"), payload.get("date")),
             "removeSaleReminder": lambda: self.bridge.remove_sale_reminder(payload.get("id")),
@@ -162,6 +168,7 @@ class RailWatchRuntime:
                 expected_dates=payload.get("expected_dates"),
             ),
             "continueOrder": lambda: self.bridge.continue_order(payload.get("intent_id"), payload.get("alternate_deadline")),
+            "focusBrowser": lambda: self.bridge.focus_browser(),
             "orderHistory": lambda: self.bridge.order_history(payload.get("limit", 20), payload.get("cursor"), payload.get("status")),
             "orderDetail": lambda: self.bridge.order_detail(payload.get("intent_id")),
             "dismissOrder": lambda: self.bridge.dismiss_order(str(payload.get("intent_id", "")), confirmed=payload.get("confirmed") is True),
@@ -180,6 +187,8 @@ class RailWatchRuntime:
                 payload.get("notification_settings"),
                 **{key: payload[key] for key in ("close_to_tray", "auto_rehearsal", "idle_keep_alive",
                                                   "sale_reminder_lead_minutes") if key in payload},
+                **({"maintenance_sleep": validate_maintenance_sleep(payload["maintenance_sleep"])}
+                   if "maintenance_sleep" in payload else {}),
             ),
             "notificationStatus": lambda: self.bridge.notification_status(),
             "testNotification": lambda: self.bridge.test_notification(),

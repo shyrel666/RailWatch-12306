@@ -85,6 +85,18 @@ export const railwatchApi = {
     }
     return window.railwatch.openExternal(url);
   },
+  openDataDir() {
+    if (!window.railwatch?.openDataDir) return Promise.reject(new Error("请在最新版桌面应用中打开数据目录。"));
+    return window.railwatch.openDataDir();
+  },
+  exportTripBundle() {
+    if (!window.railwatch?.exportTripBundle) return Promise.reject(new Error("请在最新版桌面应用中导出备份。"));
+    return window.railwatch.exportTripBundle();
+  },
+  importTripBundle() {
+    if (!window.railwatch?.importTripBundle) return Promise.reject(new Error("请在最新版桌面应用中导入备份。"));
+    return window.railwatch.importTripBundle();
+  },
   getAppInfo() {
     if (!window.railwatch || typeof window.railwatch.getAppInfo !== "function") {
       return Promise.reject(new Error(missingElectronMessage));

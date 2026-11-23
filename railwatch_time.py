@@ -184,9 +184,12 @@ def resolve_optional_beijing_timestamp(value: object, field_label: str = "时间
 
 def maintenance_resume_timestamp(now_ts: float) -> Optional[float]:
     now = beijing_now(now_ts)
-    if 1 <= now.hour < 5:
-        return now.replace(hour=5, minute=0, second=0, microsecond=0).timestamp()
-    return None
+    weekday, hour = now.weekday(), now.hour
+    if weekday == 1 and hour == 23 and now.minute >= 30:
+        now += timedelta(days=1)
+    elif not (1 <= hour < 5 or (weekday == 2 and hour < 5)):
+        return None
+    return now.replace(hour=5, minute=0, second=0, microsecond=0).timestamp()
 
 
 def resolve_sale_timestamp(config):

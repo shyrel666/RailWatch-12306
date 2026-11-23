@@ -5,6 +5,7 @@ import {
   Bell,
   CalendarClock,
   Check,
+  ClipboardList,
   Cpu,
   Database,
   Download,
@@ -15,6 +16,7 @@ import {
   LogIn,
   Monitor,
   MonitorX,
+  Moon,
   Palette,
   PanelBottomClose,
   SlidersHorizontal,
@@ -30,8 +32,7 @@ import { formatDataDirFreeSpace } from "../lib/formatSystemStatus";
 import { themeOptions } from "../lib/theme";
 import type { CommandRunner } from "./componentTypes";
 import { ThemeContext } from "./ThemeControl";
-import type { RailWatchStatus } from "../types";
-import type { RailWatchPreferences } from "../types";
+import type { RailWatchPreferences, RailWatchStatus, RuntimeInfo } from "../types";
 import { railwatchApi } from "../lib/railwatchApi";
 import { NotificationSettingsPanel } from "./NotificationSettingsPanel";
 import { SettingRow, SettingsSection } from "./SettingsPrimitives";
@@ -134,6 +135,86 @@ function useActiveSection(navRef: RefObject<HTMLElement | null>, suspended = fal
   return [active, select] as const;
 }
 
+function localDataError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  return error.message.replace(/^Error invoking remote method ['"]railwatch:(?:open-data-dir|export-trip-bundle|import-trip-bundle)['"]:\s*(?:Error:\s*)?/, "") || fallback;
+}
+
+function LocalDataSettings({ runtime }: { runtime: RuntimeInfo }) {
+  const [operation, setOperation] = useState<"open" | "export" | "import" | null>(null);
+  const [feedback, setFeedback] = useState<{ message: string; error?: boolean } | null>(null);
+
+  const openDataDir = async () => {
+    setOperation("open");
+    setFeedback(null);
+    try {
+      const result = await railwatchApi.openDataDir();
+      if (!result.ok) throw new Error(result.error || "无法打开数据目录，请重试。");
+      setFeedback({ message: "已打开数据目录。" });
+    } catch (error) {
+      setFeedback({ message: localDataError(error, "无法打开数据目录，请重试。"), error: true });
+    } finally {
+      setOperation(null);
+    }
+  };
+
+  const transferBackup = async (action: "export" | "import") => {
+    const label = action === "export" ? "导出" : "导入";
+    setOperation(action);
+    setFeedback(null);
+    try {
+      const result = await (action === "export" ? railwatchApi.exportTripBundle() : railwatchApi.importTripBundle());
+      setFeedback({ message: "cancelled" in result ? `已取消${label}备份。` : `备份${label}成功。` });
+    } catch (error) {
+      setFeedback({ message: localDataError(error, `备份${label}失败，请重试。`), error: true });
+    } finally {
+      setOperation(null);
+    }
+  };
+
+  return (
+    <SettingsSection id="settings-data" icon={HardDrive} title="本地数据" description="所有配置与记录只保存在这台电脑。">
+      <div className="data-grid">
+        <div className="data-tile">
+          <div className="data-tile-head">
+            <span><FolderOpen size={14} aria-hidden="true" />数据目录</span>
+            <div className="button-row">
+              <span className={"status-badge " + (runtime.data_dir_writable ? "green" : "amber")}>
+                {runtime.data_dir_writable ? "可读写" : "不可写"}
+              </span>
+              <Button size="small" disabled={operation !== null} loading={operation === "open"} onClick={() => void openDataDir()}>
+                打开目录
+              </Button>
+            </div>
+          </div>
+          <p className="path-text mono">{runtime.data_dir || "正在加载…"}</p>
+        </div>
+        <div className="data-tile">
+          <div className="data-tile-head">
+            <span><Database size={14} aria-hidden="true" />磁盘可用</span>
+          </div>
+          <strong>{formatDataDirFreeSpace(runtime.data_dir_free_bytes)}</strong>
+        </div>
+      </div>
+      <SettingRow icon={ClipboardList} title="方案与收藏备份" control={
+        <div className="button-row">
+          <Button disabled={operation !== null} loading={operation === "export"} onClick={() => void transferBackup("export")}>
+            导出脱敏备份
+          </Button>
+          <Button disabled={operation !== null} loading={operation === "import"} onClick={() => void transferBackup("import")}>
+            导入备份
+          </Button>
+        </div>
+      }>
+        <p>备份包含行程方案、路线收藏和最近路线。导入会合并到本地数据。</p>
+      </SettingRow>
+      {feedback && <p role={feedback.error ? "alert" : "status"} className={feedback.error ? "settings-error" : "settings-notice"}>
+        {feedback.message}
+      </p>}
+    </SettingsSection>
+  );
+}
+
 export function SettingsPage({
   busy,
   runCommand,
@@ -158,6 +239,8 @@ export function SettingsPage({
   const [closeToTray, setCloseToTray] = useState(false);
   const [idleKeepAlive, setIdleKeepAlive] = useState(false);
   const [idleSaving, setIdleSaving] = useState(false);
+  const [maintenanceSleep, setMaintenanceSleep] = useState(false);
+  const [maintenanceSleepSaving, setMaintenanceSleepSaving] = useState(false);
   const [saleReminderLead, setSaleReminderLead] = useState(IDLE_POLICY.sale_reminder_lead_minutes);
   const [saleReminderSaving, setSaleReminderSaving] = useState(false);
   const [traySaving, setTraySaving] = useState(false);
@@ -183,6 +266,7 @@ export function SettingsPage({
         setCloseToTray(value.close_to_tray === true);
         setAutoRehearsal(value.auto_rehearsal === true);
         setIdleKeepAlive(value.idle_keep_alive === true);
+        setMaintenanceSleep(value.maintenance_sleep === true);
         setSaleReminderLead(value.sale_reminder_lead_minutes ?? IDLE_POLICY.sale_reminder_lead_minutes);
         setTrayReady(true);
       }
@@ -220,6 +304,19 @@ export function SettingsPage({
       setTrayError("起售提醒提前时间未保存，请重试。");
     } finally {
       setSaleReminderSaving(false);
+    }
+  };
+  const saveMaintenanceSleep = async (next: boolean) => {
+    setMaintenanceSleepSaving(true);
+    setTrayError("");
+    try {
+      const saved = await railwatchApi.command<RailWatchPreferences>("savePreferences", { maintenance_sleep: next });
+      if (saved.maintenance_sleep !== next) throw new Error("夜间维护休眠偏好未保存");
+      setMaintenanceSleep(next);
+    } catch {
+      setTrayError("夜间维护休眠偏好未保存，请重试。");
+    } finally {
+      setMaintenanceSleepSaving(false);
     }
   };
   const checkLogin = async () => {
@@ -421,7 +518,7 @@ export function SettingsPage({
         <SettingsSection id="settings-appearance" icon={Palette} title="外观" description="选择界面配色，切换后立即生效。">
           <ThemePicker />
         </SettingsSection>
-        <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式、开售前检查、登录保持与起售提醒。">
+        <SettingsSection id="settings-behavior" icon={SlidersHorizontal} title="运行偏好" description="窗口关闭方式、开售前检查、登录保持、维护休眠与起售提醒。">
           <SettingRow
             icon={PanelBottomClose}
             title={isMac ? "关闭到菜单栏" : "关闭到托盘"}
@@ -461,6 +558,13 @@ export function SettingsPage({
           >
             <p>未在监控时，受控浏览器开着就每 {Math.round(IDLE_POLICY.login_keep_alive_seconds / 60)} 分钟检查一次登录状态，只检查登录、不查余票；已确认的登录失效时按通知设置提醒。</p>
           </SettingRow>
+          <SettingRow icon={Moon} title="夜间维护休眠" control={
+            <Switch aria-label="夜间维护休眠" aria-describedby="settings-maintenance-sleep-help" checked={maintenanceSleep}
+              disabled={!trayReady || maintenanceSleepSaving} loading={maintenanceSleepSaving}
+              onChange={next => void saveMaintenanceSleep(next)} />
+          }>
+            <p id="settings-maintenance-sleep-help">监控期间在 12306 夜间维护时段（常规 01:00–05:00，周二 23:30 起）自动暂停查询，05:00 恢复（北京时间）。</p>
+          </SettingRow>
           <SettingRow icon={Bell} title="起售提醒提前时间" control={
             <select aria-label="起售提醒提前时间" className="compact-select" value={saleReminderLead}
               disabled={!trayReady || saleReminderSaving}
@@ -476,25 +580,7 @@ export function SettingsPage({
           {trayError && <p role="alert" className="settings-error">{trayError}</p>}
         </SettingsSection>
         <NotificationSettingsPanel isMac={isMac} />
-        <SettingsSection id="settings-data" icon={HardDrive} title="本地数据" description="所有配置与记录只保存在这台电脑。">
-          <div className="data-grid">
-            <div className="data-tile">
-              <div className="data-tile-head">
-                <span><FolderOpen size={14} aria-hidden="true" />数据目录</span>
-                <span className={"status-badge " + (runtime.data_dir_writable ? "green" : "amber")}>
-                  {runtime.data_dir_writable ? "可读写" : "不可写"}
-                </span>
-              </div>
-              <p className="path-text mono">{runtime.data_dir || "正在加载…"}</p>
-            </div>
-            <div className="data-tile">
-              <div className="data-tile-head">
-                <span><Database size={14} aria-hidden="true" />磁盘可用</span>
-              </div>
-              <strong>{formatDataDirFreeSpace(runtime.data_dir_free_bytes)}</strong>
-            </div>
-          </div>
-        </SettingsSection>
+        <LocalDataSettings runtime={runtime} />
         <SettingsSection id="settings-maintenance" className="maintenance" icon={Wrench} title="维护操作" description="结束浏览器会话，或清理这台电脑上的数据。">
           <SettingRow
             icon={MonitorX}

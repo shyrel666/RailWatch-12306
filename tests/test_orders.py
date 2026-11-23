@@ -47,6 +47,91 @@ class OrderEvidenceTests(unittest.TestCase):
         self.assertFalse(report["checks"]["乘车人回读一致"])
         self.assertEqual(report["selector_counts"]["checked_labels"], 1)
 
+    def test_matched_order_exposes_time_price_and_bounded_seat_assignments(self):
+        snap = snapshot()
+        assignments = [f"09车{i:02d}A号" for i in range(1, 22)]
+        snap["orders"][0].update(payment_countdown_seconds=185, ticket_price="661.0",
+                                 seat_assignments=["二等座", *assignments])
+        page = OrderPage(Mock())
+        page.snapshot = lambda: snap
+        with patch("railwatch_order_page.time.time", return_value=1000.5):
+            result = page.result(intent(), known_id="E123456")
+        self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+        self.assertEqual(result.review, {"payment_deadline_at": 1185.5,
+            "payment_countdown_observed_at": result.evidence["observed_at"], "ticket_price": "661.0",
+            "seat_assignments": assignments[:20]})
+
+    def test_countdown_price_and_seat_fields_do_not_satisfy_order_identity(self):
+        base = snapshot()
+        record = {**base["orders"][0], "payment_countdown_seconds": 30,
+                  "ticket_price": "661.0", "seat_assignments": ["09车02A号"]}
+        page = OrderPage(Mock())
+        for changes in ({"order_id": ""}, {"order_id": "E999999"}, {"state_conflict": True},
+                        {"passengers": ["李四"]}, {"text": record["text"].replace("G101", "G102")}):
+            with self.subTest(changes=changes):
+                page.snapshot = lambda: {**base, "orders": [{**record, **changes}]}
+                result = page.result(intent(), submitted=True, known_id="E123456")
+                self.assertEqual(result.status, "unknown")
+                self.assertFalse(result.no_order)
+                self.assertEqual(result.review, {})
+
+    def test_invalid_metadata_does_not_supply_a_deadline_or_change_a_matched_result(self):
+        snap = snapshot()
+        page = OrderPage(Mock())
+        page.snapshot = lambda: snap
+        for countdown in (None, -1, True, 1.5, "20", 2 ** 53):
+            with self.subTest(countdown=countdown):
+                snap["orders"][0].update(payment_countdown_seconds=countdown, ticket_price="661.0元",
+                                         seat_assignments=["二等座", 9, None])
+                result = page.result(intent())
+                self.assertEqual(result.status, "pending_payment")
+                self.assertEqual(result.review, {})
+
+        snap["orders"][0]["payment_countdown_seconds"] = 0
+        result = page.result(intent())
+        self.assertEqual(result.review["payment_deadline_at"], result.evidence["observed_at"])
+
+    def test_alternate_card_retains_review_fields_with_its_countdown(self):
+        snap = snapshot()
+        snap["orders"][0].update(kind="alternate", success_rate="40%", prepay_amount="661.0",
+                                 payment_countdown_seconds=70)
+        page = OrderPage(Mock())
+        page.snapshot = lambda: snap
+        with patch("railwatch_order_page.time.time", return_value=1000):
+            result = page.result(intent("alternate"))
+        self.assertEqual(result.review, {"source": "official_page", "observed_at": 1000,
+            "success_rate": 40.0, "success_rate_status": "available", "success_rate_observed_at": 1000,
+            "prepay_amount": "661.0", "amount_observed_at": 1000,
+            "payment_deadline_at": 1070, "payment_countdown_observed_at": 1000})
+
+    def test_alternate_checkout_deadline_stays_at_read_time_and_requires_a_match(self):
+        page = OrderPage(Mock())
+        page.snapshot = lambda: {"alternateCheckout": True, "payment_countdown_seconds": 120}
+        page.driver.execute_script.return_value = {"amount": "661.0", "rate": "40"}
+        selected = intent("alternate")
+        for matched, card_countdown in ((False, False), (True, False), (True, True)):
+            with self.subTest(matched=matched, card_countdown=card_countdown):
+                clock = [1000]
+
+                def probe(*_args):
+                    clock[0] = 1020
+                    review = {"payment_deadline_at": 1110, "payment_countdown_observed_at": 1020} if card_countdown else {}
+                    return OrderResult("pending_payment" if matched else "unknown", order_id="E123456" if matched else "",
+                                       evidence={"matched": matched}, review=review)
+
+                page._probe_order_tab = Mock(side_effect=probe)
+                with patch("railwatch_order_page.time.time", side_effect=lambda: clock[0]):
+                    result = page.probe_submitted_alternate(selected)
+                page._probe_order_tab.assert_called_once_with(selected, "")
+                if not matched:
+                    self.assertEqual((result.status, result.order_id, result.review), ("unknown", "", {}))
+                    continue
+                self.assertEqual((result.status, result.order_id), ("pending_payment", "E123456"))
+                self.assertEqual(result.review["payment_deadline_at"], 1110 if card_countdown else 1120)
+                self.assertEqual(result.review["payment_countdown_observed_at"], 1020 if card_countdown else 1000)
+                self.assertEqual(result.review["prepay_amount"], "661.0")
+                self.assertEqual(result.review["success_rate"], 40.0)
+
     def test_priced_seat_labels_preserve_exact_class(self):
         for value in ('二等座（927.0元）', '二等座 (￥927.00元)', '二等座（¥927元）', '二等座'):
             self.assertEqual(seat_label(value), '二等座')
@@ -270,6 +355,12 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): restarted.begin("second", intent(), CONFIG)
         restarted.record(original, OrderResult("pending_payment", order_id="E123456", evidence={"matched": True}))
         with self.assertRaises(RuntimeError): restarted.begin("second", intent(), CONFIG)
+
+    def test_order_snapshot_excludes_runtime_maintenance_preference(self):
+        working_config = {**CONFIG, "maintenance_sleep": True}
+        self.journal.begin("first", intent(), working_config)
+        self.assertEqual(self.journal.pending()["config"], CONFIG)
+        self.assertTrue(working_config["maintenance_sleep"])
 
     def test_unknown_sold_out_keeps_ownership_and_verified_rejection_releases_it(self):
         original = intent()

@@ -52,7 +52,6 @@ TRIP_FIELD_KEYS = (
     "date_strategy",
     "date_scan_budget_seconds",
     "smart_rate",
-    "maintenance_sleep",
     "timer_enabled",
     "prefill_enabled",
     "target_time",
@@ -112,7 +111,6 @@ def default_config(
         "date_strategy": DATE_STRATEGIES["default"],
         "date_scan_budget_seconds": DATE_STRATEGIES["scan_budget_seconds"],
         "smart_rate": True,
-        "maintenance_sleep": False,
         "timer_enabled": False,
         "target_time": target_time,
         "sale_at": "",
@@ -253,7 +251,6 @@ def _normalize_trip(raw_trip: Mapping[str, Any], defaults: Mapping[str, Any]) ->
     trip["auto_alternate"] = _to_bool(trip.get("auto_alternate"))
     trip["keep_alive"] = _to_bool(trip.get("keep_alive"))
     trip["smart_rate"] = _to_bool(trip.get("smart_rate"))
-    trip["maintenance_sleep"] = _to_bool(trip.get("maintenance_sleep"))
     trip["timer_enabled"] = _to_bool(trip.get("timer_enabled"))
     trip["prefill_enabled"] = _to_bool(trip.get("prefill_enabled", ORDER_POLICIES["prefill_enabled"]))
     normalize_strategy(trip, raw_trip)
@@ -278,6 +275,7 @@ def normalize_query_jobs(raw_config: Mapping[str, Any], defaults: Mapping[str, A
 def validate_config(raw_config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     base = default_config()
     incoming = dict(raw_config or {})
+    incoming.pop("maintenance_sleep", None)
     base.update(incoming)
     jobs = normalize_query_jobs(incoming, base)
     primary = jobs[0]
@@ -479,7 +477,15 @@ def validate_trip_draft(payload: object) -> dict:
         normalize_windows(config["alternate_new_train_windows"])
     if "custom_dates" in config and not all(isinstance(value, str) for value in config["custom_dates"]):
         raise ValueError("草稿字段类型无效：custom_dates")
-    return deepcopy(payload)
+    draft = deepcopy(payload)
+    trip = draft["config"]
+    trip.pop("maintenance_sleep", None)
+    jobs = trip.get("query_jobs")
+    if isinstance(jobs, list):
+        for job in jobs:
+            if isinstance(job, dict):
+                job.pop("maintenance_sleep", None)
+    return draft
 
 
 def parse_passenger_names(value: str) -> List[str]:

@@ -217,8 +217,15 @@ def load_ui_preferences(data_dir: str) -> dict:
             "auto_rehearsal": data.get("auto_rehearsal") is True,
             # Off unless turned on, like other new features: it probes the 12306 login in the background.
             "idle_keep_alive": data.get("idle_keep_alive") is True,
+            "maintenance_sleep": data.get("maintenance_sleep") is True,
             "sale_reminder_lead_minutes": lead,
         }
+
+
+def validate_maintenance_sleep(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("夜间维护休眠必须为布尔值。")
+    return value
 
 
 def validate_sale_reminder_lead_minutes(value: object) -> int:
@@ -229,7 +236,7 @@ def validate_sale_reminder_lead_minutes(value: object) -> int:
 
 def save_ui_preferences(data_dir: str, patch: dict) -> dict:
     if not isinstance(patch, dict) or set(patch) - {
-        "theme", "close_to_tray", "auto_rehearsal", "idle_keep_alive", "sale_reminder_lead_minutes",
+        "theme", "close_to_tray", "auto_rehearsal", "idle_keep_alive", "maintenance_sleep", "sale_reminder_lead_minutes",
     }:
         raise ValueError("界面偏好更新字段无效。")
     if "theme" in patch and patch["theme"] not in ("system", "light", "dark"):
@@ -240,6 +247,8 @@ def save_ui_preferences(data_dir: str, patch: dict) -> dict:
         raise ValueError("自动彩排必须为布尔值。")
     if "idle_keep_alive" in patch and not isinstance(patch["idle_keep_alive"], bool):
         raise ValueError("空闲保持登录必须为布尔值。")
+    if "maintenance_sleep" in patch:
+        validate_maintenance_sleep(patch["maintenance_sleep"])
     if "sale_reminder_lead_minutes" in patch:
         validate_sale_reminder_lead_minutes(patch["sale_reminder_lead_minutes"])
     with PREFERENCES_LOCK:

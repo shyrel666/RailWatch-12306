@@ -90,6 +90,44 @@ test("a configured channel loads folded and one missing its key loads open", asy
   expect(screen.getByRole("checkbox", { name: "待支付 · ntfy" })).toHaveProperty("checked", false);
 });
 
+test.each([
+  ["dingtalk", "钉钉机器人", "钉钉 Webhook", "dingtalk_webhook_url", "加签密钥（可选）"],
+  ["feishu", "飞书机器人", "飞书 Webhook", "feishu_webhook_url", "签名密钥（可选）"],
+  ["pushplus", "PushPlus", "PushPlus Token", "pushplus_token", "推送通道（默认 wechat）"],
+  ["custom_webhook", "自定义 Webhook", "自定义 Webhook 地址", "custom_webhook_url", "Bearer 令牌（可选）"],
+])("the %s channel uses the existing fold, required-setup, and partial save flow", async (id, label, required, key, optional) => {
+  const command = mockSoundPreferences();
+  const input = id === "pushplus" ? "test-token" : "https://example.invalid/robot";
+  render(<NotificationSettingsPanel />);
+  const expand = await screen.findByRole("button", { name: `${label}设置` });
+  expect(expand.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByText("SMTP SSL（465）/ STARTTLS（587）")).toBeTruthy();
+  await userEvent.click(screen.getByRole("switch", { name: label }));
+  expect(expand.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByText("已开启，还有必填项未填写")).toBeTruthy();
+  expect(screen.getByLabelText(optional)).toBeTruthy();
+  const field = screen.getByLabelText(required);
+  expect(field).toHaveProperty("type", "password");
+  await userEvent.type(field, input);
+  expect(screen.queryByText("已开启，还有必填项未填写")).toBeNull();
+  expect(screen.getByRole("checkbox", { name: `待支付 · ${label}` })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "保存通知设置" }));
+  await waitFor(() => expect(command).toHaveBeenCalledWith("savePreferences", {
+    notification_settings: { [`${id}_enabled`]: true, [key]: input },
+  }));
+  await waitFor(() => expect(field).toHaveProperty("value", ""));
+});
+
+test("new enabled channels only open by default when setup is incomplete", async () => {
+  vi.spyOn(railwatchApi, "command").mockImplementation(async name => (name === "loadPreferences" ? {
+    notification_settings: { dingtalk_enabled: true, dingtalk_webhook_url_configured: true,
+      feishu_enabled: true, feishu_webhook_url_configured: false },
+  } : {}) as never);
+  render(<NotificationSettingsPanel />);
+  expect((await screen.findByRole("button", { name: "钉钉机器人设置" })).getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByRole("button", { name: "飞书机器人设置" }).getAttribute("aria-expanded")).toBe("true");
+});
+
 function mockSoundPreferences() {
   let settings: Record<string, unknown> = {
     desktop_urgent: true, sound_loop: true, window_attention: true,

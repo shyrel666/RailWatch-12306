@@ -1,8 +1,11 @@
+import tempfile
 import unittest
 from datetime import datetime
 from unittest.mock import Mock, patch
 
 from gui_12306_0 import QueryConfig, TicketMonitor
+from railwatch_bridge import RailWatchBridge
+from railwatch_config_contract import validate_config
 from railwatch_time import MONITOR_AUTO_STOP_MESSAGE, MONITOR_AUTO_STOP_TITLE
 
 
@@ -72,6 +75,25 @@ class MonitorScheduleTests(unittest.TestCase):
         monitor.prepare.assert_not_called()
         monitor._run_single_loop.assert_not_called()
 
+    def test_tuesday_maintenance_waits_across_midnight_until_auto_stop(self):
+        self.now = self.timestamp("23:59:35")
+        monitor = self.monitor(maintenance_sleep=True, auto_stop_at="2026-11-25T00:00:40+08:00")
+
+        self.run_monitor(monitor)
+
+        self.assertEqual(self.sleeps, [30, 30, 5])
+        self.tick.assert_called_once_with(
+            status="waiting", next_query_at=datetime.fromisoformat("2026-11-25T05:00:00+08:00").timestamp(),
+            message="12306 夜间维护休眠中，05:00 恢复",
+        )
+        self.assertEqual(self.logs.count(
+            "当前处于 12306 夜间维护时段（常规 01:00–05:00，周二 23:30 起），监控已暂停，将在 05:00 自动恢复。"
+        ), 1)
+        self.assertNotIn("12306 维护时段结束，恢复余票监控。", self.logs)
+        self.notify.assert_called_once_with(MONITOR_AUTO_STOP_TITLE, MONITOR_AUTO_STOP_MESSAGE)
+        monitor.prepare.assert_not_called()
+        monitor._run_single_loop.assert_not_called()
+
     def test_maintenance_sleep_honors_cancellation(self):
         monitor = self.monitor(maintenance_sleep=True)
 
@@ -128,8 +150,12 @@ class MonitorScheduleTests(unittest.TestCase):
         monitor.prepare.assert_not_called()
         monitor._run_single_loop.assert_not_called()
 
-    def test_old_config_queries_during_maintenance_hours_by_default(self):
-        config = QueryConfig.from_dict({"date": "2026-11-25"}).to_dict()
+    def test_trip_config_without_maintenance_policy_still_builds_and_queries(self):
+        trip = validate_config({"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-11-25"})
+        self.assertNotIn("maintenance_sleep", trip)
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = RailWatchBridge(directory)
+            config = bridge._make_query_config(trip).to_dict()
         self.assertFalse(config["maintenance_sleep"])
         self.assertEqual(config["auto_stop_at"], "")
         self.assertEqual(config["custom_dates"], [])

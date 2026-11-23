@@ -22,6 +22,22 @@
     "ntfy": {"label": "ntfy", "fields": {
       "ntfy_topic_url": {"label": "ntfy 主题地址", "type": "url", "secret": true, "required": true},
       "ntfy_token": {"label": "ntfy 访问令牌（可选）", "secret": true}
+    }},
+    "dingtalk": {"label": "钉钉机器人", "fields": {
+      "dingtalk_webhook_url": {"label": "钉钉 Webhook", "type": "url", "secret": true, "required": true},
+      "dingtalk_secret": {"label": "加签密钥（可选）", "secret": true}
+    }},
+    "feishu": {"label": "飞书机器人", "fields": {
+      "feishu_webhook_url": {"label": "飞书 Webhook", "type": "url", "secret": true, "required": true},
+      "feishu_secret": {"label": "签名密钥（可选）", "secret": true}
+    }},
+    "pushplus": {"label": "PushPlus", "fields": {
+      "pushplus_token": {"label": "PushPlus Token", "secret": true, "required": true},
+      "pushplus_channel": {"label": "推送通道（默认 wechat）", "default": "wechat"}
+    }},
+    "custom_webhook": {"label": "自定义 Webhook", "fields": {
+      "custom_webhook_url": {"label": "自定义 Webhook 地址", "type": "url", "secret": true, "required": true},
+      "custom_webhook_token": {"label": "Bearer 令牌（可选）", "secret": true}
     }}
   }
 }

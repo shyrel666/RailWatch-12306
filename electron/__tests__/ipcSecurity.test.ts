@@ -17,6 +17,9 @@ describe("ipcSecurity", () => {
     expect(isRailWatchCommand("checkLogin")).toBe(true);
     expect(isRailWatchCommand("stationSaleTimes")).toBe(true);
     expect(isRailWatchCommand("clearLocalData")).toBe(true);
+    for (const command of ["loadTripPresets", "saveTripPreset", "deleteTripPreset", "exportTripBundle", "importTripBundle"]) {
+      expect(isRailWatchCommand(command)).toBe(true);
+    }
     expect(isRailWatchCommand("shell")).toBe(false);
   });
 
@@ -65,6 +68,11 @@ describe("ipcSecurity", () => {
     expect(getCommandConfirmation("startMonitor", { confirmed: true, config: { auto_submit: false, auto_alternate: false } })).toMatchObject({ title: "核对本次监控" });
   });
 
+  test("allows the trusted renderer to focus the existing browser without confirmation", () => {
+    expect(isRailWatchCommand("focusBrowser")).toBe(true);
+    expect(getCommandConfirmation("focusBrowser", {})).toBeNull();
+  });
+
   test("allows export paths only after the save dialog granted them", () => {
     const grants = new Set<string>();
     const chosenPath = path.join("C:", "Users", "test", "events.txt");
@@ -81,20 +89,23 @@ describe("ipcSecurity", () => {
   });
 
   test("summarizes scheduled maintenance and auto-stop only when configured", () => {
-    const autoStopAt = "2026-11-24T04:30:00+08:00";
+    const autoStopAt = "2026-11-25T00:30:00+08:00";
     const combined = getCommandConfirmation("startMonitor", {
-      config: { maintenance_sleep: true, auto_stop_at: autoStopAt },
-    })?.message;
-    expect(combined).toContain("夜间维护休眠：01:00–05:00 自动暂停，05:00 恢复（北京时间）");
+      config: { maintenance_sleep: false, auto_stop_at: autoStopAt },
+    }, { maintenanceSleep: true })?.message;
+    expect(combined).toContain("夜间维护休眠：常规 01:00–05:00（周二 23:30 起）自动暂停，05:00 恢复（北京时间）");
     expect(combined).toContain(`自动停止时间（北京时间）：${autoStopAt}`);
 
     const onlyAutoStop = getCommandConfirmation("startMonitor", { auto_stop_at: autoStopAt })?.message;
     expect(onlyAutoStop).toContain(autoStopAt);
     expect(onlyAutoStop).not.toContain("夜间维护休眠");
 
-    const disabled = getCommandConfirmation("startMonitor", { config: { maintenance_sleep: false, auto_stop_at: "" } })?.message;
+    const disabled = getCommandConfirmation("startMonitor", { config: { maintenance_sleep: true, auto_stop_at: "" } },
+      { maintenanceSleep: false })?.message;
     expect(disabled).not.toContain("夜间维护休眠");
     expect(disabled).not.toContain("自动停止时间");
+    expect(getCommandConfirmation("startMonitor", { maintenance_sleep: true, maintenanceSleep: true })?.message)
+      .not.toContain("夜间维护休眠");
   });
 });
 

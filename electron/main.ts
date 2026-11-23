@@ -9,6 +9,8 @@ import {
   trayIconFilename,
   usesTrayMenuOnly,
 } from "./appDataPaths";
+import { constants } from "node:fs";
+import { open, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { listExportDirectory, listExportRoots, validateLogExport } from "./exportDialog";
 import {
@@ -59,6 +61,9 @@ const pendingDialogPresentation: ConfirmationRequestPayload[] = [];
 let runtimeContinuityUnknown = false;
 let lastStatus = "空闲";
 let alertPreferences: AlertPreferences = { desktop_urgent: true, sound_loop: true, window_attention: true };
+let maintenanceSleep = false;
+let runtimePreferencesLoaded = false;
+let pendingPreferencesLoad: Promise<void> | null = null;
 const urgentEventIds = new Map<string, number>();
 
 function shouldShowUrgentEvent(id: unknown): boolean {
@@ -141,10 +146,22 @@ function syncNativeTheme(rawTheme: unknown, immediateTheme = true): void {
 }
 
 function applyRuntimePreferences(payload: unknown, immediateTheme = true): void {
+  if (!isRecord(payload)) return;
+  maintenanceSleep = payload.maintenance_sleep === true;
+  runtimePreferencesLoaded = true;
   applyAlertPreferences(payload);
-  if (isRecord(payload) && "theme" in payload) {
+  if ("theme" in payload) {
     syncNativeTheme(payload.theme, immediateTheme);
   }
+}
+
+function loadInitialRuntimePreferences(): Promise<void> {
+  if (runtimePreferencesLoaded) return Promise.resolve();
+  pendingPreferencesLoad ??= pythonRuntime.request("loadPreferences").then((prefs) => {
+    // A preference save or reset may have supplied a newer snapshot while this read was in flight.
+    if (!runtimePreferencesLoaded) applyRuntimePreferences(prefs, false);
+  }).catch(() => undefined).finally(() => { pendingPreferencesLoad = null; });
+  return pendingPreferencesLoad;
 }
 
 function getWorkAreaDisplays(): { displays: Rect[]; primaryWorkArea: Rect } {
@@ -635,7 +652,7 @@ app.whenReady().then(() => {
   powerMonitor.on("resume", () => { void pythonRuntime.request("systemResumed").catch(() => undefined); });
   registerAlertIpcHandlers(isTrustedSender);
   createWindow();
-  void pythonRuntime.request("loadPreferences").then((prefs) => applyRuntimePreferences(prefs, false)).catch(() => undefined);
+  void loadInitialRuntimePreferences();
   initializeAutoUpdater();
 
   app.on("activate", () => {
@@ -691,6 +708,9 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
   if (!isRailWatchCommand(command)) {
     throw new Error(`Unsupported RailWatch command: ${command}`);
   }
+  if (command === "exportTripBundle" || command === "importTripBundle") {
+    throw new Error("请通过备份文件对话框操作。");
+  }
   if (command === "retryRuntime") {
     pythonRuntime.retry();
     return { ok: true };
@@ -699,9 +719,14 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
   if (!isExportPathAllowed(command, normalizedPayload, grantedExportPaths)) {
     throw new Error("Export path was not granted by the save dialog.");
   }
-  const confirmation = getCommandConfirmation(command, normalizedPayload);
-  const requestPayload = { ...normalizedPayload };
   const confirmationGeneration = draftGeneration;
+  if (command === "startMonitor" && !runtimePreferencesLoaded) {
+    await loadInitialRuntimePreferences();
+    if (quitAllowed) throw new Error("应用正在退出。");
+    if (installPending) throw new Error("正在启动更新安装程序，请稍候。");
+  }
+  const confirmation = getCommandConfirmation(command, normalizedPayload, { maintenanceSleep });
+  const requestPayload = { ...normalizedPayload };
   if (confirmation) {
     const accepted = await confirmationBridge.request(confirmation);
     if (!accepted) {
@@ -719,6 +744,8 @@ ipcMain.handle("railwatch:command", async (event, command: string, payload: Reco
   if (command === "loadTripState") await flushStagedDraft();
   const result = await pythonRuntime.request(command, requestPayload);
   if (command === "clearLocalData" && isRecord(result) && result.cleared === true) {
+    maintenanceSleep = false;
+    runtimePreferencesLoaded = true;
     stagedDraft = null;
     draftGeneration++;
     cleanupUrgentAlert();
@@ -837,6 +864,101 @@ ipcMain.handle("railwatch:install-update", async (event) => {
   } finally {
     installPending = false;
   }
+});
+
+const TRIP_BUNDLE_FILTER = [{ name: "JSON 备份文件", extensions: ["json"] }];
+const MAX_TRIP_BUNDLE_BYTES = 1024 * 1024;
+
+function assertJsonBackupPath(filePath: string): void {
+  if (!path.isAbsolute(filePath) || path.extname(filePath).toLowerCase() !== ".json") {
+    throw new Error("请选择 .json 备份文件。");
+  }
+}
+
+async function readTripBundle(filePath: string): Promise<Record<string, unknown>> {
+  assertJsonBackupPath(filePath);
+  const invalidFile = "备份须为大小不超过 1 MB 的 JSON 文件。";
+  if (!(await stat(filePath)).isFile()) throw new Error(invalidFile);
+  const file = await open(filePath, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.size > MAX_TRIP_BUNDLE_BYTES) throw new Error(invalidFile);
+
+    // Bound the read even if the file grows after stat.
+    const data = Buffer.alloc(info.size + 1);
+    let size = 0;
+    while (size < data.length) {
+      const { bytesRead } = await file.read(data, size, data.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size !== info.size) throw new Error("备份文件已发生变化，请重新选择。");
+    let bundle: unknown;
+    try {
+      bundle = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data.subarray(0, size)));
+    } catch {
+      throw new Error("备份文件须为有效的 UTF-8 JSON。");
+    }
+    if (!isRecord(bundle)) throw new Error("备份文件须包含一个 JSON 对象。");
+    return bundle;
+  } finally {
+    await file.close();
+  }
+}
+
+ipcMain.handle("railwatch:open-data-dir", async (event) => {
+  assertTrustedSender(event.senderFrame?.url);
+  const unavailable = { ok: false, error: "应用正在退出或安装更新。" };
+  if (quitAllowed || installPending) return unavailable;
+  try {
+    const { data_dir: dataDir } = await pythonRuntime.request<{ data_dir?: string }>("getRuntimeInfo", { probe: false });
+    if (quitAllowed || installPending) return unavailable;
+    if (typeof dataDir !== "string" || !dataDir.trim() || !path.isAbsolute(dataDir)) {
+      return { ok: false, error: "后台未提供有效的数据目录。" };
+    }
+    const error = await shell.openPath(dataDir);
+    return error ? { ok: false, error } : { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("railwatch:export-trip-bundle", async (event) => {
+  assertTrustedSender(event.senderFrame?.url);
+  const window = mainWindow;
+  if (quitAllowed || installPending || !window || window.isDestroyed()) throw new Error("应用窗口不可用。");
+  const bundle = await pythonRuntime.request("exportTripBundle");
+  if (!isRecord(bundle)) throw new Error("后台未返回有效的行程备份。");
+  if (quitAllowed || installPending || window.isDestroyed()) return { cancelled: true };
+
+  const { canceled, filePath } = await dialog.showSaveDialog(window, {
+    title: "导出脱敏备份", defaultPath: "railwatch-trip-backup.json", filters: TRIP_BUNDLE_FILTER,
+    properties: ["showOverwriteConfirmation"],
+  });
+  if (canceled || !filePath || quitAllowed || installPending || window.isDestroyed()) return { cancelled: true };
+  assertJsonBackupPath(filePath);
+  await writeFile(filePath, JSON.stringify(bundle, null, 2) + "\n", "utf8");
+  return { ok: true };
+});
+
+ipcMain.handle("railwatch:import-trip-bundle", async (event) => {
+  assertTrustedSender(event.senderFrame?.url);
+  const window = mainWindow;
+  if (quitAllowed || installPending || !window || window.isDestroyed()) throw new Error("应用窗口不可用。");
+  const { canceled, filePaths } = await dialog.showOpenDialog(window, {
+    title: "选择行程备份", properties: ["openFile"], filters: TRIP_BUNDLE_FILTER,
+  });
+  if (canceled || !filePaths[0] || quitAllowed || installPending || window.isDestroyed()) return { cancelled: true };
+  const bundle = await readTripBundle(filePaths[0]);
+  if (quitAllowed || installPending || window.isDestroyed()) return { cancelled: true };
+  const accepted = await confirmationBridge.request({
+    title: "导入方案与收藏备份",
+    message: "仅合并行程方案与路线收藏。备份不含乘车人与密钥，导入方案的自动提交与自动候补默认关闭。",
+    okText: "导入备份",
+  });
+  if (!accepted || quitAllowed || installPending || window.isDestroyed()) return { cancelled: true };
+  await pythonRuntime.request("importTripBundle", { bundle });
+  return { ok: true };
 });
 
 ipcMain.handle("railwatch:export-locations", async (event, defaultPath?: unknown) => {

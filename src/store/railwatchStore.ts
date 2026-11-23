@@ -107,7 +107,6 @@ export const defaultConfig: RailWatchConfig = {
   date_range: "单日",
   custom_dates: [],
   smart_rate: true,
-  maintenance_sleep: false,
   timer_enabled: false,
   target_time: "00:00:00",
   sale_at: "",
@@ -142,6 +141,8 @@ export type RailWatchStore = {
   runtime: RuntimeInfo;
   status: RailWatchStatus;
   config: RailWatchConfig;
+  activeTripPresetId: string | null;
+  setActiveTripPreset: (id: string | null) => void;
   savedConfig: RailWatchConfig | null;
   savedAt: number | null;
   configSaveError: string | null;
@@ -276,6 +277,8 @@ export function createRailWatchStore() {
     runtime: defaultRuntimeInfo,
     status: defaultStatus,
     config: defaultConfig,
+    activeTripPresetId: null,
+    setActiveTripPreset: id => set({ activeTripPresetId: id }),
     savedConfig: null,
     savedAt: null,
     configSaveError: null,
@@ -290,6 +293,7 @@ export function createRailWatchStore() {
     initializeTrip: (config, savedAt, draft) => set(state => {
       const preserveEdits = !state.tripInitialized && state.editRevision > 0;
       return { config: mergeTripConfig({ ...defaultConfig, ...config }, preserveEdits ? state.pendingTripEdits : {}),
+      activeTripPresetId: null,
       savedConfig: { ...defaultConfig, ...config }, savedAt, configSaveError: null, draftRead: draft, tripInitialized: true,
       pendingTripEdits: {}, editRevision: preserveEdits ? state.editRevision : 0,
       draftRevision: draft.status === "available" ? draft.draft.revision : 0,
@@ -300,7 +304,7 @@ export function createRailWatchStore() {
       const draft = get().draftRead;
       if (draft.status !== "available") return;
       get().setConfig({ ...draft.draft.config });
-      set({ draftRead: { status: "missing", draft: null, warning: null } });
+      set({ activeTripPresetId: null, draftRead: { status: "missing", draft: null, warning: null } });
     },
     dismissDraft: () => set({ draftRead: { status: "missing", draft: null, warning: null } }),
     markConfigSaved: (config, at) => set({ savedConfig: { ...config }, savedAt: at, configSaveError: null }),

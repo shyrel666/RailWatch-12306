@@ -40,6 +40,7 @@ EVENT_LABELS = {"submitting": "订单意图已在本地保存", "regular_submit"
                 "alternate_submit": "已点击候补订单提交", "resume_claimed": "开始恢复原订单",
                 "resume_released": "原订单恢复已结束", "dismissed": "用户结束本地核对；官方订单未取消",
                 "order_result": "订单页面核对结果", "pending_payment": "官方订单待支付",
+                "payment_urgent": "已触发待支付临期提醒",
                 "order_timing": "下单分步耗时",
                 "prefill_armed": "官方购票信息预填已就绪",
                 "prefill_fallback": "官方预填已回退常规查询",
@@ -357,12 +358,14 @@ class OrderJournal:
 
     def begin(self, run_id, intent, config, found=None):
         """Claim submission with one commit: telemetry, intent, submitting and the hit marker."""
+        order_config = dict(config)
+        order_config.pop("maintenance_sleep", None)
         with self._ordered_transaction() as db:
             if db.execute("SELECT 1 FROM orders WHERE unresolved=1").fetchone():
                 raise RuntimeError("存在未核对或待支付的订单，请先继续处理，禁止重复提交。")
             db.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?)", (
                 intent.intent_id, run_id, json.dumps(asdict(intent), ensure_ascii=False),
-                json.dumps(config, ensure_ascii=False), json.dumps(OrderResult("submitting").payload()), 1, time.time()))
+                json.dumps(order_config, ensure_ascii=False), json.dumps(OrderResult("submitting").payload()), 1, time.time()))
             self._insert_event(db, run_id, intent.intent_id, "submitting")
             if found:
                 self._insert_event(db, run_id, intent.intent_id, found)
@@ -599,6 +602,24 @@ class OrderJournal:
             return None
         return dict(intent=json.loads(row[0]), config=json.loads(row[1]), result=json.loads(row[2]),
                     run_id=row[3], updated_at=row[4])
+
+    def pending_payment_since(self, intent_id):
+        with self.connection() as db:
+            return db.execute("SELECT MIN(at) FROM order_events WHERE intent_id=? AND stage='order_result' "
+                              "AND json_extract(detail,'$.official')=1 AND json_extract(detail,'$.status')='pending_payment'",
+                              (intent_id,)).fetchone()[0]
+
+    def claim_payment_urgent(self, intent_id, order_id):
+        """Claim a reminder once while the bound order is still pending payment."""
+        with self.connection() as db:
+            return db.execute("INSERT INTO order_events(run_id,intent_id,stage,at,monotonic,detail) "
+                              "SELECT run_id,intent_id,'payment_urgent',?,?,'{}' FROM orders "
+                              "WHERE intent_id=? AND unresolved=1 AND json_extract(result,'$.order_id')=? "
+                              "AND json_extract(result,'$.evidence.matched')=1 "
+                              "AND json_extract(result,'$.status')='pending_payment' "
+                              "AND NOT EXISTS (SELECT 1 FROM order_events "
+                              "WHERE intent_id=orders.intent_id AND stage='payment_urgent')",
+                              (time.time(), time.monotonic(), intent_id, order_id)).rowcount == 1
 
     def refresh_review(self, intent, result):
         """Refresh presentation evidence without inventing a status transition."""

@@ -66,7 +66,7 @@ class NotificationTests(unittest.TestCase):
         response.read.return_value = json.dumps({"code": 1, "error": "secret-key"}).encode()
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
-        with patch("railwatch_notify.urllib.request.urlopen", return_value=response):
+        with patch("railwatch_notify._PUSH_OPENER.open", return_value=response):
             self.assertFalse(service._send_server_chan("test", "test", service.settings))
         self.assertNotIn("secret-key", " ".join(logs))
 

@@ -1,5 +1,6 @@
 import { RehearsalPanel } from "./RehearsalPanel";
 import { AlternateReview } from "./AlternateReview";
+import { PaymentMeta } from "./PaymentMeta";
 import { useState } from "react";
 import { Alert, Button } from "antd";
 import { useClock } from "../lib/useClock";
@@ -220,6 +221,8 @@ export function MonitorPage({
     setStartError("");
     await runCommand("startMonitor", { config: snapshot, expected_dates: dates });
   };
+  const focusBrowserAction = <Button size="small" loading={busy === "focusBrowser"}
+    onClick={() => void runCommand("focusBrowser")}>切到受控浏览器</Button>;
 
   return (
     <div className="signal-tower">
@@ -313,9 +316,11 @@ export function MonitorPage({
                     ? "请在官方页面完成支付；候补预付款支付后才生效。"
                     : "状态以匹配的官方订单证据为准。")}
               </p>
+              <PaymentMeta review={order.review} pendingPayment={order.status === "pending_payment"} />
               {order.intent?.kind === "alternate" ? <AlternateReview review={order.review} deadline={order.intent.deadline} windows={order.intent.new_train_windows} /> : null}
               {unresolvedOrder ? (
                 <div className="st-command-actions">
+                {["pending_payment", "verification", "unknown"].includes(order.status) ? focusBrowserAction : null}
                 <Button
                   disabled={status.monitoring || busy !== null}
                   loading={busy === "continueOrder"}
@@ -346,7 +351,10 @@ export function MonitorPage({
           showIcon
           closable
           message={lastHumanAction.title}
-          description={lastHumanAction.message}
+          description={<>
+            <p>{lastHumanAction.message}</p>
+            <div className="st-command-actions">{focusBrowserAction}</div>
+          </>}
           onClose={clearHumanAction}
         />
       ) : null}

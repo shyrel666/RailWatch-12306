@@ -81,7 +81,7 @@ describe("MonitorPage", () => {
     ["12306 夜间维护休眠中，05:00 恢复", "夜间维护休眠", "12306 夜间维护休眠中，05:00 恢复", "距恢复监控"],
     ["等待自动停止时间", "等待自动停止", "监控将在定时开始查询前停止", "距自动停止"],
   ])("%s shows its own countdown with a scheduled sale time", (status_message, heading, message, caption) => {
-    const config = { ...defaultConfig, timer_enabled: true, maintenance_sleep: true,
+    const config = { ...defaultConfig, timer_enabled: true,
       sale_at: new Date(Date.now() + 60_000).toISOString() };
     railwatchStore.setState({ config, status: { ...defaultStatus, monitoring: true, current_config: config,
       status_message,
@@ -304,6 +304,36 @@ describe("MonitorPage", () => {
 
     expect(railwatchStore.getState().lastHumanAction).toBeNull();
     expect(screen.queryByText("候补需要人工核验，请在浏览器中完成。")).toBeNull();
+  });
+
+  test("pending orders show payment evidence and can focus the browser during monitoring", async () => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({ status: { ...defaultStatus, monitoring: true, order: {
+      status: "pending_payment", order_id: "E123456", review: {
+        payment_deadline_at: Date.now() / 1000 + 240, ticket_price: "661.0", seat_assignments: ["09车02A号"],
+      },
+    } } });
+    render(<MonitorPage busy="continueOrder" runCommand={runCommand} />);
+    const order = within(document.getElementById("monitor-attention")!);
+    expect(order.getByRole("timer")).toBeTruthy();
+    expect(order.getByText("¥661.0")).toBeTruthy();
+    expect(order.getByText("09车02A号")).toBeTruthy();
+    expect(runCommand).not.toHaveBeenCalled();
+    await userEvent.click(order.getByRole("button", { name: "切到受控浏览器" }));
+    expect(runCommand).toHaveBeenCalledExactlyOnceWith("focusBrowser");
+  });
+
+  test.each(["verification", "unknown"])("offers the browser in the %s order and human handoff alerts", async status => {
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    railwatchStore.setState({
+      status: { ...defaultStatus, order: { status } },
+      lastHumanAction: { title: "需要人工操作", message: "请核对官方页面。" },
+    });
+    render(<MonitorPage busy={null} runCommand={runCommand} />);
+    for (const id of ["monitor-attention", "monitor-human"]) {
+      await userEvent.click(within(document.getElementById(id)!).getByRole("button", { name: "切到受控浏览器" }));
+    }
+    expect(vi.mocked(runCommand).mock.calls).toEqual([["focusBrowser"], ["focusBrowser"]]);
   });
 
   test("shows the backend loop count as the query count", () => {

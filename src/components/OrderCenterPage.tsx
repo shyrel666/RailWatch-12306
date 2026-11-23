@@ -1,4 +1,5 @@
 import { AlternateReview } from "./AlternateReview";
+import { PaymentMeta } from "./PaymentMeta";
 import { canonicalDeadline } from "../lib/alternateOptions";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Drawer, Select } from "antd";
@@ -94,12 +95,15 @@ function officialSummary(item: OrderHistorySummary, short = false) {
   return `${statusLabel(item.official_status, item.kind)} · 核对于 ${short ? shortTime(item.official_verified_at) : time(item.official_verified_at)}`;
 }
 
+const pendingPayment = (item: OrderHistorySummary) =>
+  item.status === "pending_payment" || item.official_status === "pending_payment";
+
 // What the user still has to do in the official site, if anything. A final
 // official status is newer evidence than an unresolved local result, and a
 // dismissed record only keeps its last official observation, which may be stale.
 function nextStep(item: OrderHistorySummary): string | null {
   if (item.status === "dismissed" || (item.official_status && finalOfficial.has(item.official_status))) return null;
-  if (item.status === "pending_payment" || item.official_status === "pending_payment") return item.kind === "alternate"
+  if (pendingPayment(item)) return item.kind === "alternate"
     ? "请立即在 12306 官方页面完成预付款，支付后候补才生效" : "请尽快在 12306 官方页面完成支付";
   if (item.status === "verification") return "请在官方页面完成核验";
   if (item.status === "unknown") return "请在官方页面核对订单结果";
@@ -185,6 +189,7 @@ function OrderTicket({ item, group, actions, today }: { item: OrderHistorySummar
         <span>{kindLabel(item)}</span>
         {item.order_id ? <span>单号 <span className="mono">{item.order_id}</span></span> : null}
       </div>
+      <PaymentMeta review={item.review} pendingPayment={Boolean(step) && pendingPayment(item)} />
       {item.kind === "alternate" ? <AlternateReview review={item.review} deadline={item.deadline} windows={item.new_train_windows} /> : null}
       {item.choices && item.choices.length > 1 ? <ChoiceList choices={item.choices} /> : null}
       <CheckFacts item={item} />
@@ -218,6 +223,7 @@ function OrderRow({ item, actions }: { item: OrderHistorySummary; actions: React
         : `本地记录 · ${shortTime(item.updated_at)}`}</small>
     </span>
     <div className="order-row-actions">{actions}</div>
+    <PaymentMeta review={item.review} />
   </article>;
 }
 
@@ -310,8 +316,11 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
   };
   const filterBy = (value: string | null) => { setStatusFilter(value); setCursor(null); };
   const canReview = (item: OrderHistorySummary) => item.recovery_required && !monitoring && activity?.state !== "busy";
+  const focusBrowserAction = <Button size="small" loading={busy === "focusBrowser"}
+    onClick={() => void runCommand("focusBrowser")}>切到受控浏览器</Button>;
 
   const cardActions = (item: OrderHistorySummary, compact = false) => <>
+    {nextStep(item) ? focusBrowserAction : null}
     {item.observing ? <Button size="small" loading={pending === "stop:" + item.intent_id}
       onClick={() => perform("stop:" + item.intent_id, "stopMonitor")}>停止本地核对</Button> : null}
     {canReview(item) ? <Button size="small" type="primary" loading={pending === "continue:" + item.intent_id}
@@ -323,7 +332,10 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
   const grouped = groups.map(group => ({ ...group, items: page.items.filter(item => orderGroup(item) === group.id) }))
     .filter(group => group.items.length);
   const attention = grouped.find(group => group.id === "attention")?.items.length ?? 0;
-  const summary = detail?.summary;
+  const openedSummary = detail?.summary;
+  const latestSummary = openedSummary && page.items.find(item => item.intent_id === openedSummary.intent_id
+    && item.updated_at > openedSummary.updated_at);
+  const summary = latestSummary ?? openedSummary;
   const detailStep = summary ? nextStep(summary) : null;
 
   return <div className="order-center">
@@ -375,10 +387,12 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
           <span>{summary.from_station} → {summary.to_station}</span></span>
         <StatusBadge status={summary.status} kind={summary.kind} />
       </span> : null}
-      footer={summary && canReview(summary) ? <div className="order-drawer-actions">
-        <Button type="primary" loading={pending === "continue:" + summary.intent_id}
+      footer={summary && (detailStep || canReview(summary)) ? <div className="order-drawer-actions">
+        {detailStep ? focusBrowserAction : null}
+        {canReview(summary) ? <Button type="primary" loading={pending === "continue:" + summary.intent_id}
           onClick={() => perform("continue:" + summary.intent_id, "continueOrder", { intent_id: summary.intent_id })}>继续处理／核对</Button>
-        {["unknown", "verification"].includes(summary.status) ? <Button loading={pending === "dismiss:" + summary.intent_id}
+          : null}
+        {canReview(summary) && ["unknown", "verification"].includes(summary.status) ? <Button loading={pending === "dismiss:" + summary.intent_id}
           onClick={() => perform("dismiss:" + summary.intent_id, "dismissOrder", { intent_id: summary.intent_id })}>
           结束本地核对（不取消官方订单）</Button> : null}
       </div> : null}
@@ -396,6 +410,7 @@ export function OrderCenterPage({ runCommand, busy }: { runCommand: CommandRunne
             {summary.last_check_status ? ` · ${checkResult(summary.last_check_status)}` : ""}</dd></div>
         </dl>
         {detailStep ? <p className="order-callout wait"><ArrowRight size={14} aria-hidden="true" />{detailStep}</p> : null}
+        <PaymentMeta review={summary.review} pendingPayment={Boolean(detailStep) && pendingPayment(summary)} />
         {summary.kind === "alternate" ? <div className="order-detail-block">
           <h3>候补条件</h3>
           <AlternateReview review={summary.review} deadline={summary.deadline} windows={summary.new_train_windows} />

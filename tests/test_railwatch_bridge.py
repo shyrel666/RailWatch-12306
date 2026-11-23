@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
 from scripts.keychain_isolation import isolate_system_keychain
@@ -501,6 +502,50 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "监控运行中"):
             bridge.close_browser(confirmed=True)
 
+    def test_focus_browser_command_can_run_during_order_observation(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_runtime import RailWatchRuntime
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        runtime = RailWatchRuntime(bridge=bridge)
+        self.addCleanup(runtime.shutdown)
+        bridge.is_monitoring = True
+        bridge._observing_intent_id = "pending-order"
+        bridge.driver = Mock(current_window_handle="order-tab")
+        with ThreadPoolExecutor(max_workers=1) as pool, bridge._driver_lock:
+            result = pool.submit(runtime._dispatch, "focusBrowser", {}).result(timeout=3)
+        self.assertEqual(result, {"focused": True})
+        bridge.driver.switch_to.window.assert_called_once_with("order-tab")
+        bridge.driver.execute_cdp_cmd.assert_called_once_with("Page.bringToFront", {})
+        bridge.driver.execute_script.assert_not_called()
+        self.assertTrue(bridge.is_monitoring)
+        self.assertEqual(bridge._observing_intent_id, "pending-order")
+
+    def test_focus_browser_falls_back_to_window_focus(self):
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        bridge.driver = Mock(current_window_handle="verification-tab")
+        bridge.driver.execute_cdp_cmd.side_effect = RuntimeError("unsupported CDP command")
+        self.assertEqual(bridge.focus_browser(), {"focused": True})
+        bridge.driver.switch_to.window.assert_called_once_with("verification-tab")
+        bridge.driver.execute_script.assert_called_once_with("window.focus();")
+
+    def test_focus_browser_reports_missing_and_disconnected_sessions(self):
+        from railwatch_bridge import RailWatchBridge
+        from selenium.common.exceptions import InvalidSessionIdException
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        message = "受控浏览器未打开，请先在系统设置中打开登录页。"
+        with self.assertRaisesRegex(RuntimeError, message):
+            bridge.focus_browser()
+        bridge.driver = Mock(current_window_handle="disconnected-tab")
+        bridge.driver.execute_cdp_cmd.side_effect = InvalidSessionIdException("driver-internal-details")
+        with self.assertRaisesRegex(RuntimeError, message) as caught:
+            bridge.focus_browser()
+        bridge.driver.execute_script.assert_not_called()
+        self.assertNotIn("driver-internal-details", str(caught.exception))
+
     def test_wait_for_target_time_sends_keep_alive_when_enabled(self):
         from railwatch_bridge import RailWatchBridge
         with tempfile.TemporaryDirectory() as tmp:
@@ -585,6 +630,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
 
         events = []
         bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
+        bridge.save_preferences(maintenance_sleep=True)
         bridge.is_monitoring = True
         task = bridge._task
         start = dt.datetime.fromisoformat("2026-06-10T02:00:00+08:00")
@@ -611,7 +657,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
         bridge._send_keep_alive = record("login", "ok")
         bridge._existing_trip_blocks = record("existing_order", True)
         with patch("railwatch_bridge.time.time", lambda: wall), patch("railwatch_bridge.time.monotonic", lambda: wall):
-            bridge._monitor_worker({"auto_submit": True, "maintenance_sleep": True})
+            bridge._monitor_worker({"auto_submit": True, "maintenance_sleep": False})
 
         self.assertTrue(wait_calls)
         self.assertTrue(all(0 < seconds <= 30 for seconds, _ in wait_calls))
@@ -633,6 +679,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
             with self.subTest(cancel=cancel):
                 events = []
                 bridge = RailWatchBridge(data_dir=temp_data_dir(self), event_callback=events.append)
+                bridge.save_preferences(maintenance_sleep=True)
                 bridge.is_monitoring = True
                 task = bridge._task
                 wall = start.timestamp()
@@ -648,8 +695,7 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                 task.cancel.wait = wait
                 with patch("railwatch_bridge.time.time", lambda: wall), patch("railwatch_bridge.time.monotonic", lambda: wall), \
                         patch.object(bridge, "_ensure_driver") as ensure:
-                    bridge._monitor_worker({"auto_submit": True, "maintenance_sleep": True,
-                                            "auto_stop_at": stop.isoformat()})
+                    bridge._monitor_worker({"auto_submit": True, "auto_stop_at": stop.isoformat()})
 
                 ensure.assert_not_called()
                 self.assertEqual(wait_calls, [30.0] if cancel else [30.0, 15.0])
@@ -657,6 +703,61 @@ class RailWatchBridgeContractTests(unittest.TestCase):
                                  0 if cancel else 1)
                 self.assertEqual([event["payload"]["priority"] for event in events if event["event"] == "notify"],
                                  [] if cancel else ["notice"])
+
+    def test_monitor_default_ignores_legacy_maintenance_setting(self):
+        from railwatch_bridge import RailWatchBridge
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        bridge.is_monitoring = True
+        now = dt.datetime.fromisoformat("2026-06-10T02:00:00+08:00").timestamp()
+        bridge._ensure_driver = Mock()
+        bridge._make_param_filler = Mock()
+        bridge._prepare_query_page = Mock(return_value=False)
+        with patch("railwatch_bridge.time.time", return_value=now), patch.object(bridge, "_wait_until_wall_time") as wait:
+            bridge._monitor_worker({"maintenance_sleep": True})
+
+        bridge._ensure_driver.assert_called_once()
+        wait.assert_not_called()
+        self.assertNotIn("maintenance_sleep", bridge._task.config)
+
+    def test_monitor_freezes_global_maintenance_for_timer_prefill_and_polling(self):
+        from railwatch_bridge import RailWatchBridge
+        from railwatch_preferences import load_ui_preferences, save_ui_preferences
+
+        bridge = RailWatchBridge(data_dir=temp_data_dir(self))
+        bridge.save_preferences(maintenance_sleep=True)
+        bridge.is_monitoring = True
+        now = dt.datetime.fromisoformat("2026-11-24T23:29:00+08:00").timestamp()
+        trip = {"date": "2026-11-26", "timer_enabled": True, "sale_at": "2026-11-24T23:35:00+08:00"}
+
+        def launch():
+            save_ui_preferences(bridge.data_dir, {"maintenance_sleep": False})
+            return Mock()
+
+        bridge._ensure_driver = Mock(side_effect=launch)
+        bridge._make_param_filler = Mock()
+        bridge._prepare_query_page = Mock(return_value=True)
+        bridge._existing_trip_blocks = Mock(return_value=False)
+        bridge._wait_for_target_time = Mock(return_value=True)
+        monitor = Mock()
+        with (
+            patch("railwatch_bridge.time.time", return_value=now),
+            patch("railwatch_bridge.load_ui_preferences", wraps=load_ui_preferences) as load,
+            patch("railwatch_bridge.TicketMonitor", return_value=monitor) as create,
+            patch("railwatch_bridge.prefill_eligible_reason", return_value=None),
+            patch("railwatch_bridge.PrefillAdapter") as prefill,
+        ):
+            bridge._monitor_worker(trip)
+
+        load.assert_called_once_with(bridge.data_dir)
+        self.assertFalse(load_ui_preferences(bridge.data_dir)["maintenance_sleep"])
+        self.assertNotIn("maintenance_sleep", trip)
+        self.assertNotIn("maintenance_sleep", bridge._task.config)
+        self.assertIs(create.call_args.args[1]["maintenance_sleep"], True)
+        self.assertIs(bridge._wait_for_target_time.call_args.args[0]["maintenance_sleep"], True)
+        prefill.assert_not_called()
+        monitor.wait_for_monitoring_window.assert_called_once()
+        monitor.run.assert_called_once()
 
     def test_monitor_date_window_preserves_custom_date_order(self):
         from railwatch_bridge import RailWatchBridge

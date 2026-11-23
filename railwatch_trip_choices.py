@@ -14,7 +14,7 @@ MAX_ROUTES = 8
 MAX_FAVORITES = 20
 
 
-def _route(from_station: object, to_station: object) -> dict:
+def normalize_trip_route(from_station: object, to_station: object) -> dict:
     if not all(isinstance(value, str) and 1 <= len(value.strip()) <= 40
                for value in (from_station, to_station)):
         raise ValueError("路线站名无效。")
@@ -24,13 +24,21 @@ def _route(from_station: object, to_station: object) -> dict:
     return {"from_station": origin, "to_station": destination}
 
 
+def normalize_favorite_trains(trains: object) -> list[str]:
+    if not isinstance(trains, list) or len(trains) > MAX_FAVORITES or any(
+        not isinstance(code, str) or not TRAIN_CODE.fullmatch(code) for code in trains
+    ):
+        raise ValueError("收藏车次无效或超过上限。")
+    return list(dict.fromkeys(code.upper() for code in trains))
+
+
 def _read(data_dir: str) -> dict:
     try:
         with open(os.path.join(data_dir, FILE_NAME), encoding="utf-8") as handle:
             payload = json.load(handle)
         if isinstance(payload, dict) and payload.get("schema_version") == 1:
             return payload
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RecursionError):
         pass
     return {"schema_version": 1, "recent_routes": [], "favorites": []}
 
@@ -39,20 +47,22 @@ def load_trip_choices(data_dir: str) -> dict:
     with PREFERENCES_LOCK:
         data = _read(data_dir)
         routes = []
-        for item in data.get("recent_routes", []):
+        recent_routes = data.get("recent_routes")
+        for item in recent_routes if isinstance(recent_routes, list) else []:
             try:
                 if isinstance(item, dict):
-                    route = _route(item.get("from_station"), item.get("to_station"))
+                    route = normalize_trip_route(item.get("from_station"), item.get("to_station"))
                     if route not in routes:
                         routes.append(route)
             except ValueError:
                 continue
         favorites = []
-        for item in data.get("favorites", []):
+        saved_favorites = data.get("favorites")
+        for item in saved_favorites if isinstance(saved_favorites, list) else []:
             try:
                 if not isinstance(item, dict):
                     continue
-                route = _route(item.get("from_station"), item.get("to_station"))
+                route = normalize_trip_route(item.get("from_station"), item.get("to_station"))
                 codes = item.get("trains")
                 if not isinstance(codes, list):
                     continue
@@ -64,7 +74,7 @@ def load_trip_choices(data_dir: str) -> dict:
 
 
 def remember_route(data_dir: str, from_station: object, to_station: object) -> dict:
-    route = _route(from_station, to_station)
+    route = normalize_trip_route(from_station, to_station)
     with PREFERENCES_LOCK:
         current = load_trip_choices(data_dir)
         routes = [route, *[item for item in current["recent_routes"] if item != route]][:MAX_ROUTES]
@@ -74,12 +84,8 @@ def remember_route(data_dir: str, from_station: object, to_station: object) -> d
 
 
 def save_train_favorites(data_dir: str, from_station: object, to_station: object, trains: object) -> dict:
-    route = _route(from_station, to_station)
-    if not isinstance(trains, list) or len(trains) > MAX_FAVORITES or any(
-        not isinstance(code, str) or not TRAIN_CODE.fullmatch(code) for code in trains
-    ):
-        raise ValueError("收藏车次无效或超过上限。")
-    unique = list(dict.fromkeys(code.upper() for code in trains))
+    route = normalize_trip_route(from_station, to_station)
+    unique = normalize_favorite_trains(trains)
     with PREFERENCES_LOCK:
         current = load_trip_choices(data_dir)
         favorites = [item for item in current["favorites"] if

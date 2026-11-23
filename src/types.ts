@@ -44,7 +44,6 @@ export type RailWatchConfig = {
   date_strategy?: "round_robin" | "preferred_date" | "inventory_first";
   date_scan_budget_seconds?: number;
   smart_rate: boolean;
-  maintenance_sleep?: boolean;
   timer_enabled: boolean;
   prefill_enabled?: boolean;
   target_time: string;
@@ -89,6 +88,7 @@ export type RailWatchPreferences = {
   close_to_tray: boolean;
   auto_rehearsal?: boolean;
   idle_keep_alive?: boolean;
+  maintenance_sleep?: boolean;
   sale_reminder_lead_minutes?: number;
   notification_settings: NotificationSettings;
 };
@@ -99,6 +99,7 @@ export type PreferencesPatch = {
   close_to_tray?: boolean;
   auto_rehearsal?: boolean;
   idle_keep_alive?: boolean;
+  maintenance_sleep?: boolean;
   sale_reminder_lead_minutes?: number;
   notification_settings?: NotificationSettingsPatch;
 };
@@ -143,6 +144,8 @@ export type StationSaleTimes = {
 export type TripRoute = { from_station: string; to_station: string };
 export type TrainFavorite = TripRoute & { trains: string[] };
 export type TripChoices = { recent_routes: TripRoute[]; favorites: TrainFavorite[] };
+export type TripPreset = { id: string; name: string; config: Partial<RailWatchConfig> };
+export type TripPresetsResult = { items: TripPreset[]; saved_id?: string };
 export type PassengerCandidate = {
   name: string; ticket_type: "adult" | "student" | "child" | "unknown"; identity_hint: string; ambiguous: boolean;
   /** The official list showed no type (always the account holder), so adult is assumed. */
@@ -239,6 +242,10 @@ export type AlternateReview = {
   success_rate_observed_at?: number | null;
   prepay_amount?: string;
   amount_observed_at?: number;
+  payment_deadline_at?: number;
+  payment_countdown_observed_at?: number;
+  ticket_price?: string;
+  seat_assignments?: string[];
   standing?: string;
   quiet_car?: boolean;
   new_train_windows?: NewTrainWindow[];

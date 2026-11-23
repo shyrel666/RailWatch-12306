@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hmac
 import json
 import smtplib
 import ssl
@@ -31,17 +33,31 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
 _PUSH_OPENER = urllib.request.build_opener(_RefuseRedirect)
 
 
-def _post_json(url: str, payload: dict, headers: Optional[Mapping[str, str]] = None) -> dict:
-  request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                   headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
+def _open_push_request(request: urllib.request.Request):
+  if not https_url(request.full_url):
+    raise ValueError("通知接口必须使用 HTTPS。")
   try:
-    opened = _PUSH_OPENER.open(request, timeout=8)
+    return _PUSH_OPENER.open(request, timeout=8)
   except urllib.error.HTTPError as exc:
     exc.close()
     raise
-  with opened as response:
+
+
+def _json_post_request(url: str, payload: dict, headers: Optional[Mapping[str, str]] = None) -> urllib.request.Request:
+  return urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
+
+
+def _post_json(url: str, payload: dict, headers: Optional[Mapping[str, str]] = None) -> dict:
+  with _open_push_request(_json_post_request(url, payload, headers)) as response:
     body = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
   return body if isinstance(body, dict) else {}
+
+
+def _post_json_status(url: str, payload: dict, headers: Optional[Mapping[str, str]] = None) -> int:
+  # Custom receivers may return an empty body or any content type.
+  with _open_push_request(_json_post_request(url, payload, headers)) as response:
+    return response.status
 
 
 class NotificationService:
@@ -183,14 +199,14 @@ class NotificationService:
     return results
 
   def _send_server_chan(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
-    key = str(settings.get("server_chan_key", "")).strip()
+    key = str(settings.get("server_chan_key") or "").strip()
     if not key:
       return False
     payload = urllib.parse.urlencode({"text": title, "desp": message}).encode("utf-8")
-    url = f"https://sctapi.ftqq.com/{key}.send"
+    url = f"https://sctapi.ftqq.com/{urllib.parse.quote(key, safe='')}.send"
     try:
       request = urllib.request.Request(url, data=payload, method="POST")
-      with urllib.request.urlopen(request, timeout=8) as response:
+      with _open_push_request(request) as response:
         body = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
       ok = body.get("code") in (0, "0")
       if ok:
@@ -198,12 +214,12 @@ class NotificationService:
       else:
         self.log("Server酱通知失败，请检查渠道配置。")
       return bool(ok)
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError):
       self.log("Server酱通知异常，请检查网络或渠道配置。")
       return False
 
   def _send_wecom_webhook(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
-    url = str(settings.get("wecom_webhook_url", "")).strip()
+    url = https_url(settings.get("wecom_webhook_url"))
     if not url:
       return False
     payload = {
@@ -211,21 +227,14 @@ class NotificationService:
       "text": {"content": f"{title}\n{message}"},
     }
     try:
-      request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-      )
-      with urllib.request.urlopen(request, timeout=8) as response:
-        body = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+      body = _post_json(url, payload)
       ok = body.get("errcode") == 0
       if ok:
         self.log("企业微信 webhook 通知已发送。")
       else:
         self.log("企业微信 webhook 通知失败，请检查渠道配置。")
       return bool(ok)
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError):
       self.log("企业微信 webhook 通知异常，请检查网络或渠道配置。")
       return False
 
@@ -243,12 +252,20 @@ class NotificationService:
     mime["To"] = recipient
     try:
       context = ssl.create_default_context()
-      with smtplib.SMTP_SSL(host, port, context=context, timeout=10) as smtp:
+      if port == 587:
+        connection = smtplib.SMTP(host, port, timeout=10)
+      else:
+        connection = smtplib.SMTP_SSL(host, port, context=context, timeout=10)
+      with connection as smtp:
+        if port == 587:
+          smtp.ehlo()
+          smtp.starttls(context=context)
+          smtp.ehlo()
         smtp.login(user, password)
         smtp.sendmail(user, [recipient], mime.as_string())
       self.log(f"邮件通知已发送至 {redact_sensitive_text(recipient)}。")
       return True
-    except (smtplib.SMTPException, OSError) as exc:
+    except (smtplib.SMTPException, OSError):
       self.log("邮件通知异常，请检查 SMTP 配置与网络。")
       return False
 
@@ -287,6 +304,77 @@ class NotificationService:
       return ok
     except (urllib.error.URLError, OSError, ValueError):
       self.log("ntfy 通知异常，请检查网络或渠道配置。")
+      return False
+
+  def _send_dingtalk(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
+    url = https_url(settings.get("dingtalk_webhook_url"))
+    if not url:
+      return False
+    secret = str(settings.get("dingtalk_secret") or "").strip()
+    if secret:
+      timestamp = str(int(time.time() * 1000))
+      signed = hmac.digest(secret.encode("utf-8"), f"{timestamp}\n{secret}".encode("utf-8"), "sha256")
+      parts = urllib.parse.urlsplit(url)
+      query = [(key, value) for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+               if key not in ("timestamp", "sign")]
+      query.extend([("timestamp", timestamp), ("sign", base64.b64encode(signed).decode("ascii"))])
+      url = parts._replace(query=urllib.parse.urlencode(query)).geturl()
+    payload = {"msgtype": "text", "text": {"content": f"{title}\n{message}"}}
+    try:
+      ok = _post_json(url, payload).get("errcode") == 0
+      self.log("钉钉通知已发送。" if ok else "钉钉通知失败，请检查渠道配置。")
+      return ok
+    except (OSError, ValueError):
+      self.log("钉钉通知异常，请检查网络或渠道配置。")
+      return False
+
+  def _send_feishu(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
+    url = https_url(settings.get("feishu_webhook_url"))
+    if not url:
+      return False
+    payload = {"msg_type": "text", "content": {"text": f"{title}\n{message}"}}
+    secret = str(settings.get("feishu_secret") or "").strip()
+    if secret:
+      timestamp = str(int(time.time()))
+      # Feishu uses the timestamp and secret as the HMAC key and an empty message.
+      signed = hmac.digest(f"{timestamp}\n{secret}".encode("utf-8"), b"", "sha256")
+      payload.update(timestamp=timestamp, sign=base64.b64encode(signed).decode("ascii"))
+    try:
+      body = _post_json(url, payload)
+      ok = body.get("code", body.get("StatusCode")) == 0
+      self.log("飞书通知已发送。" if ok else "飞书通知失败，请检查渠道配置。")
+      return ok
+    except (OSError, ValueError):
+      self.log("飞书通知异常，请检查网络或渠道配置。")
+      return False
+
+  def _send_pushplus(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
+    token = str(settings.get("pushplus_token") or "").strip()
+    if not token:
+      return False
+    channel = str(settings.get("pushplus_channel") or "").strip() or NOTIFICATION_FIELDS["pushplus_channel"]["default"]
+    payload = {"token": token, "title": title, "content": message, "channel": channel, "template": "txt"}
+    try:
+      ok = _post_json("https://www.pushplus.plus/send", payload).get("code") == 200
+      self.log("PushPlus 已受理通知。" if ok else "PushPlus 通知失败，请检查渠道配置。")
+      return ok
+    except (OSError, ValueError):
+      self.log("PushPlus 通知异常，请检查网络或渠道配置。")
+      return False
+
+  def _send_custom_webhook(self, title: str, message: str, settings: dict, urgent: bool = False) -> bool:
+    url = https_url(settings.get("custom_webhook_url"))
+    if not url:
+      return False
+    token = str(settings.get("custom_webhook_token") or "").strip()
+    payload = {"source": "RailWatch", "title": title, "message": message, "urgent": urgent, "sent_at": time.time()}
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    try:
+      ok = 200 <= _post_json_status(url, payload, headers) < 300
+      self.log("自定义 Webhook 通知已发送。" if ok else "自定义 Webhook 通知失败，请检查渠道配置。")
+      return ok
+    except (OSError, ValueError):
+      self.log("自定义 Webhook 通知异常，请检查网络或渠道配置。")
       return False
 
 

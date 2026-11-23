@@ -31,10 +31,11 @@ import {
   todayIso,
   useBeijingToday,
 } from "../lib/tripDate";
-import type { PassengerCandidates, RailWatchConfig, StationSearchResult, StationSuggestion, TripChoices } from "../types";
+import type { PassengerCandidates, RailWatchConfig, StationSearchResult, StationSuggestion, TripChoices, TripPreset } from "../types";
 import type { CommandRunner, ConfirmDialog } from "./componentTypes";
 import { PreferenceSection } from "./PreferenceSection";
 import { TimerSettings } from "./TimerSettings";
+import { TripPresetBar } from "./TripPresetBar";
 import { Hint } from "./DisplayPrimitives";
 import {
   PRIORITIES, REQUEST_MODES, delayPreview, isStrategyCustomized, modeDefaults,
@@ -238,6 +239,7 @@ export function TripSetupPage({
 }) {
   const config = useRailWatchStore((state) => state.config);
   const setConfig = useRailWatchStore((state) => state.setConfig);
+  const setActiveTripPreset = useRailWatchStore(state => state.setActiveTripPreset);
   const savedConfig = useRailWatchStore(state => state.savedConfig);
   const tripInitialized = useRailWatchStore(state => state.tripInitialized);
   const savedAt = useRailWatchStore(state => state.savedAt);
@@ -268,7 +270,8 @@ export function TripSetupPage({
   useEffect(() => {
     let current = true;
     void runCommand<TripChoices>("loadTripChoices").then(result => {
-      if (current && result && Array.isArray(result.recent_routes) && Array.isArray(result.favorites)) setChoices(result);
+      if (!current) return;
+      if (result && Array.isArray(result.recent_routes) && Array.isArray(result.favorites)) setChoices(result);
     });
     return () => { current = false; };
   }, [runCommand]);
@@ -331,6 +334,13 @@ export function TripSetupPage({
 
   const swapStations = () => {
     setRoute(config.to_station_cn, config.from_station_cn);
+  };
+
+  const applyPreset = (preset: TripPreset) => {
+    setConfig(preset.config);
+    setActiveTripPreset(preset.id);
+    setTrainNotice("");
+    setPassengerCandidates(null);
   };
 
   const toggleSeat = (seat: string) => {
@@ -416,6 +426,8 @@ export function TripSetupPage({
     const loaded = await runCommand<RailWatchConfig>("loadConfig");
     if (loaded) {
       setConfig(loaded);
+      setActiveTripPreset(null);
+      setTrainNotice("");
       markConfigSaved(loaded, savedAt ?? Date.now() / 1000);
     }
   };
@@ -453,15 +465,19 @@ export function TripSetupPage({
             {configSaveError ? <span role="alert">保存失败：{configSaveError}</span> : null}
             {draftError ? <span role="alert">草稿保存失败：{draftError}</span> : null}
           </div>
-          <Button
-            className="trip-load-button"
-            icon={<FolderOpen size={15} />}
-            loading={busy === "loadConfig"}
-            disabled={!tripInitialized}
-            onClick={() => void loadConfig()}
-          >
-            恢复上次保存
-          </Button>
+          <div className="trip-head-actions">
+            <TripPresetBar config={config} confirm={confirm} runCommand={runCommand}
+              onApply={applyPreset} disabled={!tripInitialized} />
+            <Button
+              className="trip-load-button"
+              icon={<FolderOpen size={15} />}
+              loading={busy === "loadConfig"}
+              disabled={!tripInitialized}
+              onClick={() => void loadConfig()}
+            >
+              恢复上次保存
+            </Button>
+          </div>
         </header>
         {draftRead.status === "available" ? <div className="trip-draft-recovery" role="group" aria-label="恢复行程草稿">
           <span>发现未保存的草稿 · <span className="mono">{formatSavedAt(draftRead.draft.saved_at)}</span></span>
@@ -828,15 +844,6 @@ export function TripSetupPage({
                     checked={config.smart_rate}
                     onChange={(checked) => update({ smart_rate: checked })}
                   />
-                </span>
-                <span className="switch-row trip-maintenance-switch">
-                  <span className="trip-maintenance-label">
-                    <span className="switch-row-label">夜间维护休眠</span>
-                    <small id="trip-maintenance-help">01:00–05:00 自动暂停，05:00 恢复</small>
-                  </span>
-                  <Switch aria-label="夜间维护休眠" aria-describedby="trip-maintenance-help"
-                    checked={config.maintenance_sleep ?? false}
-                    onChange={checked => update({ maintenance_sleep: checked })} />
                 </span>
               </div>
             </PreferenceSection>

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -52,9 +54,17 @@ from railwatch_preferences import (
     save_trip_draft,
     unprotect_local_secret,
     uses_system_keychain,
+    validate_maintenance_sleep,
     validate_sale_reminder_lead_minutes,
 )
 from railwatch_trip_choices import load_trip_choices, remember_route, save_train_favorites
+from railwatch_trip_presets import (
+    delete_trip_preset,
+    export_sanitized_bundle,
+    import_sanitized_bundle,
+    load_trip_presets,
+    save_trip_preset,
+)
 from railwatch_train_schedules import TrainSchedules
 from railwatch_sale_reminders import SaleReminders
 from railwatch_policies import IDLE_POLICIES, QUERY_STRATEGIES
@@ -145,6 +155,9 @@ CHROMEDRIVER_MIRROR_HINT = (
 )
 # Local observation budget, not an official payment deadline.
 ORDER_OBSERVATION_SECONDS = 600
+PAYMENT_URGENT_SECONDS = 300
+REGULAR_PAYMENT_URGENT_FALLBACK_SECONDS = 300
+ALTERNATE_PAYMENT_URGENT_FALLBACK_SECONDS = 720
 MONITOR_HEARTBEAT_TIMEOUT_SECONDS = 180.0
 IDLE_TICK_SECONDS = 15.0
 _PREFERENCE_UNSET = object()
@@ -740,6 +753,21 @@ class RailWatchBridge:
 
     def save_train_favorites(self, from_station: str, to_station: str, trains: list) -> dict:
         return save_train_favorites(self.data_dir, from_station, to_station, trains)
+
+    def load_trip_presets(self) -> dict:
+        return load_trip_presets(self.data_dir)
+
+    def save_trip_preset(self, name, config, preset_id=None) -> dict:
+        return save_trip_preset(self.data_dir, name, config, preset_id)
+
+    def delete_trip_preset(self, preset_id) -> dict:
+        return delete_trip_preset(self.data_dir, preset_id)
+
+    def export_trip_bundle(self) -> dict:
+        return export_sanitized_bundle(self.data_dir)
+
+    def import_trip_bundle(self, bundle) -> dict:
+        return import_sanitized_bundle(self.data_dir, bundle)
 
     def _official_sale_at(self, station, travel_date, now) -> Optional[float]:
         from railwatch_sale_times import official_sale_at
@@ -1602,12 +1630,42 @@ class RailWatchBridge:
             return self._observe_continuously(task, driver, intent, previous)
         return self._observe_order_legacy(task, driver, intent, previous)
 
+    def _maybe_remind_pending_payment(self, intent, result, elapsed):
+        is_alternate = intent.kind == "alternate"
+        fallback_seconds = ALTERNATE_PAYMENT_URGENT_FALLBACK_SECONDS if is_alternate else REGULAR_PAYMENT_URGENT_FALLBACK_SECONDS
+        deadline = result.review.get("payment_deadline_at")
+        if type(deadline) is int or type(deadline) is float and math.isfinite(deadline):
+            now = time.time()
+            if not now < deadline <= now + PAYMENT_URGENT_SECONDS:
+                return False
+            timing = f"预计剩余 {math.ceil((deadline - now) / 60)} 分钟。"
+        elif elapsed >= fallback_seconds:
+            timing = f"已待支付 {int(elapsed // 60)} 分钟，剩余分钟数请以官方支付页面为准。"
+        else:
+            return False
+        try:
+            claimed = self.order_journal.claim_payment_urgent(intent.intent_id, result.order_id)
+        except sqlite3.Error:
+            self.log("待支付临期提醒暂未发送，稍后重试。", "WARN")
+            return False
+        if claimed:
+            title = "待支付即将超时"
+            destination = "候补订单" if is_alternate else "未完成订单"
+            message = f"{order_push_summary(intent)}。{timing}请尽快在 12306 官方页面或手机 12306 App 的{destination}中完成支付。"
+            event_id = f"order:{intent.intent_id}:payment_urgent"
+            self.emit("notify", {"title": title, "message": message, "priority": "urgent", "event_id": event_id})
+            self._notify_async(title, message, event_type="payment", event_key=event_id)
+        return True
+
     def _observe_continuously(self, task, driver, intent, previous):
         from railwatch_policies import ORDER_POLICIES
         interval = max(ORDER_POLICIES["min_watch_interval_seconds"], min(ORDER_POLICIES["max_watch_interval_seconds"],
                        float(task.config.get("order_watch_interval_seconds", ORDER_POLICIES["order_watch_interval_seconds"]))))
         page = OrderPage(driver, task.cancel.is_set, lambda seconds: self._task_wait(task, seconds), log=self.log)
         started = time.monotonic()
+        pending_since = self.order_journal.pending_payment_since(intent.intent_id) if previous.status == "pending_payment" else None
+        pending_age = max(0, time.time() - pending_since) if pending_since is not None else 0
+        reminder_checked = False
         next_probe = started + interval
         self._observing_intent_id = intent.intent_id
         self._order_check_failures = 0
@@ -1615,6 +1673,8 @@ class RailWatchBridge:
             while not task.cancel.is_set():
                 now = time.monotonic()
                 pending = previous.status == "pending_payment"
+                if pending and not reminder_checked:
+                    reminder_checked = self._maybe_remind_pending_payment(intent, previous, pending_age + now - started)
                 cadence = 1 if now - started < 10 else 5 if now - started < 60 else 15
                 delay = min(cadence, max(0, next_probe - now)) if pending else max(0, next_probe - now)
                 self._order_next_check_at = time.time() + delay
@@ -1654,10 +1714,15 @@ class RailWatchBridge:
                     result = self.order_journal.record(intent, result)
                     self.order_journal.mark(task.run_id, result.status, intent.intent_id)
                     self._handle_order(intent, result)
-                elif probe and intent.kind == "alternate" and result.review:
-                    result = self.order_journal.refresh_review(intent, result)
-                    self.state = replace(self.state, order={**self.state.order, "review": result.review, "updated_at": time.time()})
-                    self.emit_state()
+                elif result.order_id != previous.order_id or result.evidence.get("matched") is not True:
+                    continue
+                else:
+                    refresh_review = probe and bool(result.review)
+                    result = replace(result, review={**previous.review, **result.review})
+                    if refresh_review:
+                        result = self.order_journal.refresh_review(intent, result)
+                        self.state = replace(self.state, order={**self.state.order, "review": result.review, "updated_at": time.time()})
+                        self.emit_state()
                 previous = result
                 if result.status in ("unknown", "verification"):
                     self._handle_human_action({"message": result.reason or "请在官方页面核对原订单后继续。"})
@@ -1758,6 +1823,26 @@ class RailWatchBridge:
         if self.is_monitoring:
             self._handle_human_action({"message": "电脑已从休眠恢复，请核对时间、登录及订单状态后继续。"})
         return self.emit_state()
+
+    def focus_browser(self) -> dict:
+        driver = self.driver
+        message = "受控浏览器未打开，请先在系统设置中打开登录页。"
+        if driver is None:
+            raise RuntimeError(message)
+        try:
+            handle = driver.current_window_handle
+            if not handle:
+                raise RuntimeError(message)
+            driver.switch_to.window(handle)
+            try:
+                driver.execute_cdp_cmd("Page.bringToFront", {})
+            except Exception as exc:
+                if is_session_lost(exc):
+                    raise
+                driver.execute_script("window.focus();")
+        except (Exception, TaskCancelled):
+            raise RuntimeError(message) from None
+        return {"focused": True}
 
     @idle_browser_command
     def close_browser(self, confirmed: bool = False) -> dict:
@@ -1886,8 +1971,11 @@ class RailWatchBridge:
     def save_preferences(self, theme: Optional[str] = None, notification_settings: Optional[dict] = None,
                          close_to_tray: Optional[bool] = None, auto_rehearsal: Optional[bool] = None,
                          idle_keep_alive: Optional[bool] = None,
-                         sale_reminder_lead_minutes: object = _PREFERENCE_UNSET) -> dict:
+                         sale_reminder_lead_minutes: object = _PREFERENCE_UNSET,
+                         maintenance_sleep: Optional[bool] = None) -> dict:
         ui_patch = {}
+        if maintenance_sleep is not None:
+            ui_patch["maintenance_sleep"] = validate_maintenance_sleep(maintenance_sleep)
         if sale_reminder_lead_minutes is not _PREFERENCE_UNSET:
             ui_patch["sale_reminder_lead_minutes"] = validate_sale_reminder_lead_minutes(sale_reminder_lead_minutes)
         if idle_keep_alive is not None:
@@ -2158,6 +2246,8 @@ class RailWatchBridge:
         return ""
 
     def _monitor_worker(self, config: dict, task=None) -> None:
+        config = dict(config)
+        config.pop("maintenance_sleep", None)  # Ignore pre-migration trip fields.
         task = task or self._task or MonitorTask(config)
         if self._task is not None and task is not self._task:
             return
@@ -2175,13 +2265,13 @@ class RailWatchBridge:
             if config.get("timer_enabled") and task.target_timestamp is None:
                 task.target_timestamp = resolve_sale_timestamp(config)
             auto_stop_ts = resolve_optional_beijing_timestamp(config.get("auto_stop_at"), "自动停止时间")
-            maintenance_sleep = config.get("maintenance_sleep", False)
+            maintenance_sleep = bool(load_ui_preferences(self.data_dir)["maintenance_sleep"])
             now = time.time()
             if task.cancel.is_set() or self._auto_stop_monitor_if_due(auto_stop_ts, now):
                 return
             resume_ts = maintenance_resume_timestamp(now) if maintenance_sleep else None
             if resume_ts is not None:
-                self.log("当前处于 12306 夜间维护时段（01:00–05:00），监控已暂停，将在 05:00 自动恢复。")
+                self.log("当前处于 12306 夜间维护时段（常规 01:00–05:00，周二 23:30 起），监控已暂停，将在 05:00 自动恢复。")
                 self._transition(task, "waiting", next_query_at=resume_ts, message="12306 夜间维护休眠中，05:00 恢复")
                 wait_until = min(resume_ts, auto_stop_ts) if auto_stop_ts is not None else resume_ts
                 now = self._wait_until_wall_time(task, wait_until)
@@ -2222,6 +2312,7 @@ class RailWatchBridge:
                         return
                     if self.driver is not driver:
                         raise RuntimeError("彩排后浏览器已失效，请重新打开登录页。")
+                config = {**config, "maintenance_sleep": maintenance_sleep}
                 with guard_browser(driver, task, lambda: self._transition(task)):
                     driver.set_page_load_timeout(30)
                     driver.set_script_timeout(3)
@@ -2972,7 +3063,7 @@ $targets.Count
             date_strategy=config["date_strategy"],
             date_scan_budget_seconds=config["date_scan_budget_seconds"],
             smart_rate=config["smart_rate"],
-            maintenance_sleep=config["maintenance_sleep"],
+            maintenance_sleep=bool(config.get("maintenance_sleep", False)),
             timer_enabled=config["timer_enabled"],
             prefill_enabled=config.get("prefill_enabled", True),
             target_time=config["target_time"],

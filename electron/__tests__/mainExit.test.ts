@@ -21,7 +21,7 @@ const harness = vi.hoisted(() => ({
   setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn(), setAppUserModelId: vi.fn(),
   windowOptions: undefined as any, updaterOptions: undefined as any, autoUpdater: {} as Record<string, unknown>,
   previewSound: vi.fn(), stopPreview: vi.fn(), updateSound: vi.fn(), validateSound: vi.fn(),
-  openAudio: vi.fn(), prepareAudio: vi.fn(), storeAudio: vi.fn(),
+  openDialog: vi.fn(), saveDialog: vi.fn(), openPath: vi.fn(), prepareAudio: vi.fn(), storeAudio: vi.fn(),
   clearStorageData: vi.fn(async () => undefined),
   clearCache: vi.fn(async () => undefined),
   userDataDir: "",
@@ -77,7 +77,7 @@ vi.mock("electron", () => ({
     getPrimaryDisplay: () => ({ workArea: harness.primaryWorkArea }),
     getAllDisplays: () => harness.allWorkAreas.map((workArea) => ({ workArea })),
   },
-  dialog: { showMessageBox: harness.loadErrorDialog, showOpenDialog: harness.openAudio },
+  dialog: { showMessageBox: harness.loadErrorDialog, showOpenDialog: harness.openDialog, showSaveDialog: harness.saveDialog },
   Tray: class {
     icon: unknown;
     on = vi.fn();
@@ -89,7 +89,7 @@ vi.mock("electron", () => ({
       harness.trayInstances.push(this);
     }
   },
-  powerMonitor: { on: vi.fn() }, powerSaveBlocker: {}, shell: {},
+  powerMonitor: { on: vi.fn() }, powerSaveBlocker: {}, shell: { openPath: harness.openPath },
   session: { defaultSession: { clearStorageData: harness.clearStorageData, clearCache: harness.clearCache } },
 }));
 vi.mock("electron-updater", () => ({ autoUpdater: harness.autoUpdater }));
@@ -149,7 +149,9 @@ beforeEach(async () => {
   harness.loadErrorDialog.mockResolvedValue({ response: 1 });
   harness.updateState.mockReturnValue({ phase: "downloaded" });
   harness.installUpdate.mockResolvedValue(true);
-  harness.openAudio.mockResolvedValue({ canceled: true, filePaths: [] });
+  harness.openDialog.mockResolvedValue({ canceled: true, filePaths: [] });
+  harness.saveDialog.mockResolvedValue({ canceled: true });
+  harness.openPath.mockResolvedValue("");
   harness.previewSound.mockResolvedValue({ duration_ms: 220 });
   harness.clearStorageData.mockResolvedValue(undefined);
   harness.clearCache.mockResolvedValue(undefined);
@@ -203,7 +205,7 @@ test("custom audio is decoded before storing and a decoder error never imports t
   harness.ready!();
   const event = { senderFrame: { url: harness.rendererUrl } };
   const asset = { file: "a".repeat(64) + ".wav", name: "提示音.wav", audio: "base64-audio", data: Buffer.from("fixture") };
-  harness.openAudio.mockResolvedValue({ canceled: false, filePaths: ["C:/Audio/提示音.wav"] });
+  harness.openDialog.mockResolvedValue({ canceled: false, filePaths: ["C:/Audio/提示音.wav"] });
   harness.prepareAudio.mockResolvedValue(asset);
   const importSound = harness.ipcHandlers.get("railwatch:import-alert-sound")!;
   await expect(importSound(event)).resolves.toEqual({ file: asset.file, name: asset.name });
@@ -213,6 +215,141 @@ test("custom audio is decoded before storing and a decoder error never imports t
   harness.validateSound.mockRejectedValue(new Error("音频无效"));
   await expect(importSound(event)).rejects.toThrow("音频无效");
   expect(harness.storeAudio).not.toHaveBeenCalled();
+});
+
+test("opens only the absolute data directory supplied by the runtime", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const openDataDir = harness.ipcHandlers.get("railwatch:open-data-dir")!;
+  const dataDir = path.resolve("trusted-data");
+  harness.request.mockImplementation(async command => command === "getRuntimeInfo" ? { data_dir: dataDir } : {});
+
+  await expect(openDataDir({ senderFrame: { url: "https://untrusted.example" } }, path.resolve("other")))
+    .rejects.toThrow("untrusted");
+  expect(harness.request).not.toHaveBeenCalledWith("getRuntimeInfo", expect.anything());
+  expect(harness.openPath).not.toHaveBeenCalled();
+
+  await expect(openDataDir(event, path.resolve("other"))).resolves.toEqual({ ok: true });
+  expect(harness.request).toHaveBeenCalledWith("getRuntimeInfo", { probe: false });
+  expect(harness.openPath).toHaveBeenCalledExactlyOnceWith(dataDir);
+  harness.openPath.mockResolvedValueOnce("无法打开目录");
+  await expect(openDataDir(event)).resolves.toEqual({ ok: false, error: "无法打开目录" });
+  harness.request.mockResolvedValueOnce({ data_dir: "relative-path" });
+  await expect(openDataDir(event)).resolves.toMatchObject({ ok: false });
+  expect(harness.openPath).toHaveBeenCalledTimes(2);
+});
+
+test("trip backup IPC rejects untrusted senders and requires dedicated handlers", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  for (const channel of ["railwatch:export-trip-bundle", "railwatch:import-trip-bundle"]) {
+    const handler = harness.ipcHandlers.get(channel)!;
+    await expect(handler({ senderFrame: { url: "https://untrusted.example" } })).rejects.toThrow("untrusted");
+    await expect(handler({})).rejects.toThrow("untrusted");
+  }
+  const command = harness.ipcHandlers.get("railwatch:command")!;
+  for (const name of ["exportTripBundle", "importTripBundle"]) {
+    await expect(command(event, name, { confirmed: true, bundle: {} })).rejects.toThrow("备份文件对话框");
+    expect(harness.request).not.toHaveBeenCalledWith(name, expect.anything());
+    expect(harness.request).not.toHaveBeenCalledWith(name);
+  }
+  await command(event, "loadTripPresets");
+  expect(harness.request).toHaveBeenCalledWith("loadTripPresets", {});
+  expect(harness.confirmDialog).not.toHaveBeenCalled();
+  expect(harness.openDialog).not.toHaveBeenCalled();
+  expect(harness.saveDialog).not.toHaveBeenCalled();
+});
+
+test("trip backup export writes formatted UTF-8 only to the chosen JSON path", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const exportBundle = harness.ipcHandlers.get("railwatch:export-trip-bundle")!;
+  const root = mkdtempSync(path.join(os.tmpdir(), "railwatch-export-trip-bundle-"));
+  const selected = path.join(root, "备份.json");
+  const untrusted = path.join(root, "other.json");
+  const bundle = { schema_version: 1, presets: [{ name: "往返" }], favorites: [], recent_routes: [] };
+  harness.request.mockImplementation(async command => command === "exportTripBundle" ? bundle : {});
+  try {
+    await expect(exportBundle(event, untrusted)).resolves.toEqual({ cancelled: true });
+    expect(existsSync(untrusted)).toBe(false);
+    expect(harness.saveDialog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      filters: [{ name: "JSON 备份文件", extensions: ["json"] }],
+      properties: ["showOverwriteConfirmation"],
+    }));
+
+    harness.saveDialog.mockResolvedValueOnce({ canceled: false, filePath: selected });
+    await expect(exportBundle(event, untrusted)).resolves.toEqual({ ok: true });
+    expect(readFileSync(selected, "utf8")).toBe(JSON.stringify(bundle, null, 2) + String.fromCharCode(10));
+    expect(existsSync(untrusted)).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trip backup import reads only the chosen file and requires themed confirmation", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const importBundle = harness.ipcHandlers.get("railwatch:import-trip-bundle")!;
+  const root = mkdtempSync(path.join(os.tmpdir(), "railwatch-import-trip-bundle-"));
+  const selected = path.join(root, "备份.json");
+  const bundle = { schema_version: 1, presets: [{ name: "返程" }], favorites: [], recent_routes: [] };
+  try {
+    await expect(importBundle(event, { filePaths: [selected], confirmed: true })).resolves.toEqual({ cancelled: true });
+    expect(harness.confirmDialog).not.toHaveBeenCalled();
+
+    const sizeLimit = 1024 * 1024;
+    const encoded = Buffer.from(JSON.stringify(bundle), "utf8");
+    writeFileSync(selected, Buffer.concat([encoded, Buffer.alloc(sizeLimit - encoded.length, 0x20)]));
+    harness.openDialog.mockResolvedValue({ canceled: false, filePaths: [selected] });
+    await expect(importBundle(event, { confirmed: true, bundle: {} })).resolves.toEqual({ cancelled: true });
+    expect(harness.request).not.toHaveBeenCalledWith("importTripBundle", expect.anything());
+    expect(harness.openDialog).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      properties: ["openFile"], filters: [{ name: "JSON 备份文件", extensions: ["json"] }],
+    }));
+    expect(harness.confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringMatching(/仅合并行程方案与路线收藏.*不含乘车人与密钥.*自动提交与自动候补默认关闭/),
+    }));
+
+    harness.confirmDialog.mockImplementationOnce(async () => {
+      expect(harness.request).not.toHaveBeenCalledWith("importTripBundle", expect.anything());
+      return true;
+    });
+    await expect(importBundle(event, { bundle: {} })).resolves.toEqual({ ok: true });
+    expect(harness.request).toHaveBeenCalledWith("importTripBundle", { bundle });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("invalid and oversized trip backup files never reach confirmation or Python", async () => {
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const importBundle = harness.ipcHandlers.get("railwatch:import-trip-bundle")!;
+  const root = mkdtempSync(path.join(os.tmpdir(), "railwatch-invalid-trip-bundle-"));
+  try {
+    const dir = path.join(root, "directory.json");
+    mkdirSync(dir);
+    harness.openDialog.mockResolvedValueOnce({ canceled: false, filePaths: [dir] });
+    await expect(importBundle(event)).rejects.toThrow("1 MB");
+    const invalid = [
+      { name: "large.json", data: Buffer.alloc(1024 * 1024 + 1), error: "1 MB" },
+      { name: "incomplete.json", data: "{", error: "UTF-8 JSON" },
+      { name: "invalid-encoding.json", data: Buffer.from([0x22, 0xff, 0x22]), error: "UTF-8 JSON" },
+      { name: "array.json", data: "[]", error: "JSON 对象" },
+      { name: "null.json", data: "null", error: "JSON 对象" },
+      { name: "other.txt", data: "{}", error: ".json" },
+    ];
+    for (const { name, data, error } of invalid) {
+      const filePath = path.join(root, name);
+      writeFileSync(filePath, data);
+      harness.openDialog.mockResolvedValueOnce({ canceled: false, filePaths: [filePath] });
+      await expect(importBundle(event)).rejects.toThrow(error);
+    }
+    expect(harness.confirmDialog).not.toHaveBeenCalled();
+    expect(harness.request).not.toHaveBeenCalledWith("importTripBundle", expect.anything());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("update installation keeps the runtime alive until launch acknowledgement", async () => {
@@ -358,10 +495,85 @@ test("draft edits during main-process confirmation prevent startup", async () =>
   let accept!: (accepted: boolean) => void;
   harness.confirmDialog.mockImplementation(() => new Promise(resolve => { accept = resolve; }));
   const pending = harness.ipcHandlers.get("railwatch:command")!(event, "startMonitor", { config: { train_code: "G101" } });
+  await vi.waitFor(() => expect(harness.confirmDialog).toHaveBeenCalled());
   harness.ipcListeners.get("railwatch:stage-draft")!(event, { revision: 1, config: { train_code: "G102" } });
   accept(true);
   await expect(pending).rejects.toThrow("配置发生变化");
   expect(harness.request).not.toHaveBeenCalledWith("startMonitor", expect.anything());
+});
+
+test("startMonitor waits for in-flight startup preferences and reuses the loaded maintenance choice", async () => {
+  let resolvePreferences!: (value: Record<string, unknown>) => void;
+  harness.request.mockImplementationOnce(() => new Promise(resolve => { resolvePreferences = resolve; }));
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const invoke = harness.ipcHandlers.get("railwatch:command")!;
+  const start = invoke(event, "startMonitor", { config: { maintenance_sleep: false } });
+  expect(harness.request.mock.calls.map(([name]) => name)).toEqual(["loadPreferences"]);
+  expect(harness.confirmDialog).not.toHaveBeenCalled();
+
+  resolvePreferences({ maintenance_sleep: true });
+  await expect(start).resolves.toEqual({ cancelled: true });
+  expect(harness.confirmDialog).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining("夜间维护休眠") }));
+  await invoke(event, "startMonitor", {});
+  expect(harness.request.mock.calls.map(([name]) => name)).toEqual(["loadPreferences"]);
+  expect(harness.confirmDialog).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining("夜间维护休眠") }));
+});
+
+test("startMonitor lazily retries unavailable preferences and ignores a forged renderer choice on fallback", async () => {
+  harness.request.mockRejectedValueOnce(new Error("startup preferences unavailable"));
+  harness.ready!();
+  await new Promise(resolve => setImmediate(resolve));
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const invoke = harness.ipcHandlers.get("railwatch:command")!;
+  const payload = { config: { maintenance_sleep: true }, maintenanceSleep: true };
+
+  harness.request.mockRejectedValueOnce(new Error("lazy preferences unavailable"));
+  await expect(invoke(event, "startMonitor", payload)).resolves.toEqual({ cancelled: true });
+  expect(harness.request.mock.calls.map(([name]) => name)).toEqual(["loadPreferences", "loadPreferences"]);
+  expect(harness.confirmDialog.mock.lastCall?.[0].message).not.toContain("夜间维护休眠");
+
+  harness.request.mockResolvedValueOnce({ maintenance_sleep: true });
+  await invoke(event, "startMonitor", {});
+  expect(harness.request.mock.calls.map(([name]) => name)).toEqual(["loadPreferences", "loadPreferences", "loadPreferences"]);
+  expect(harness.confirmDialog).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining("夜间维护休眠") }));
+});
+
+test("maintenance confirmation follows full preference responses and rejects truthy non-booleans", async () => {
+  let resolveStartup!: (value: Record<string, unknown>) => void;
+  harness.request.mockImplementationOnce(() => new Promise(resolve => { resolveStartup = resolve; }));
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const invoke = harness.ipcHandlers.get("railwatch:command")!;
+
+  harness.request.mockResolvedValueOnce({ maintenance_sleep: true });
+  await invoke(event, "savePreferences", { maintenance_sleep: true });
+  resolveStartup({ maintenance_sleep: false });
+  await new Promise(resolve => setImmediate(resolve));
+  await invoke(event, "startMonitor", { config: { maintenance_sleep: false } });
+  expect(harness.confirmDialog).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining("夜间维护休眠") }));
+
+  harness.request.mockResolvedValueOnce({ maintenance_sleep: "true" });
+  await invoke(event, "loadPreferences");
+  await invoke(event, "startMonitor", { config: { maintenance_sleep: true } });
+  expect(harness.confirmDialog.mock.lastCall?.[0].message).not.toContain("夜间维护休眠");
+  expect(harness.request.mock.calls.map(([name]) => name)).toEqual(["loadPreferences", "savePreferences", "loadPreferences"]);
+});
+
+test("a successful local-data reset clears the cached maintenance choice even if its preference refresh fails", async () => {
+  harness.request.mockResolvedValueOnce({ maintenance_sleep: true });
+  harness.ready!();
+  const event = { senderFrame: { url: harness.rendererUrl } };
+  const invoke = harness.ipcHandlers.get("railwatch:command")!;
+  await invoke(event, "startMonitor", {});
+  expect(harness.confirmDialog).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining("夜间维护休眠") }));
+
+  harness.confirmDialog.mockResolvedValueOnce(true);
+  harness.request.mockResolvedValueOnce({ cleared: true }).mockRejectedValueOnce(new Error("refresh unavailable"));
+  await expect(invoke(event, "clearLocalData")).resolves.toEqual({ cleared: true });
+  await invoke(event, "startMonitor", { config: { maintenance_sleep: true } });
+  expect(harness.confirmDialog.mock.lastCall?.[0].message).not.toContain("夜间维护休眠");
+  expect(harness.request.mock.calls.map(([name]) => name)).toEqual(["loadPreferences", "clearLocalData", "loadPreferences"]);
 });
 
 test("a packaged window ignores the inherited development URL for loading and IPC", async () => {

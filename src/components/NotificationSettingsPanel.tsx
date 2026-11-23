@@ -1,6 +1,6 @@
 import { Button, Input, InputNumber, Select, Switch } from "antd";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AppWindow, AudioLines, Bell, BellDot, BellRing, Check, ChevronDown, FolderOpen, Mail, MessageSquare, MonitorDot, Music2, Play, Send, Siren, Smartphone, Square, Volume2, type LucideIcon } from "lucide-react";
+import { AppWindow, AudioLines, Bell, BellDot, BellRing, Check, ChevronDown, FolderOpen, Mail, MessageSquare, MonitorDot, Music2, Play, Send, Siren, Smartphone, Square, Volume2, Webhook, type LucideIcon } from "lucide-react";
 import {
   NOTIFICATION_CHANNELS as channels, NOTIFICATION_REQUIRED_FIELDS, isNotificationSecretField, notificationChannelLabel,
   notificationFieldLabel, type NotificationChannelId as Channel, type NotificationSecretField as SecretField,
@@ -270,7 +270,7 @@ export function NotificationSettingsPanel({ isMac = false }: { isMac?: boolean }
     <h3 className="settings-subhead">外部渠道</h3>
     <div className="channel-list">
       {channelCard("server_chan", Send, "推送到微信", secret("server_chan_key"))}
-      {channelCard("email", Mail, "SMTP SSL 发信", <>
+      {channelCard("email", Mail, "SMTP SSL（465）/ STARTTLS（587）", <>
         {text("email_smtp_host", "smtp.example.com", "channel-field host")}
         <label className="channel-field narrow"><span>{notificationFieldLabel("email_smtp_port")}</span>
           <InputNumber aria-label={notificationFieldLabel("email_smtp_port")} min={1} max={65535} value={value("email_smtp_port") || 465} onChange={(next) => { if (next !== null) change("email_smtp_port", next); }} /></label>
@@ -288,6 +288,22 @@ export function NotificationSettingsPanel({ isMac = false }: { isMac?: boolean }
       {channelCard("ntfy", BellDot, "Android 强提醒，紧急事件最高优先级", <>
         {secret("ntfy_topic_url", "https://ntfy.sh/你的主题名", "channel-field")}
         {secret("ntfy_token", "输入密钥", "channel-field")}
+      </>)}
+      {channelCard("dingtalk", MessageSquare, "推送到钉钉群", <>
+        {secret("dingtalk_webhook_url", "输入 HTTPS Webhook 地址")}
+        {secret("dingtalk_secret")}
+      </>)}
+      {channelCard("feishu", MessageSquare, "推送到飞书群", <>
+        {secret("feishu_webhook_url", "输入 HTTPS Webhook 地址")}
+        {secret("feishu_secret")}
+      </>)}
+      {channelCard("pushplus", Send, "推送到指定通道", <>
+        {secret("pushplus_token", "输入 Token", "channel-field")}
+        {text("pushplus_channel", "wechat")}
+      </>)}
+      {channelCard("custom_webhook", Webhook, "向 HTTPS 地址发送 JSON", <>
+        {secret("custom_webhook_url", "输入 HTTPS Webhook 地址")}
+        {secret("custom_webhook_token", "输入 Bearer 令牌")}
       </>)}
     </div>
     <div className="settings-subhead-row"><h3 className="settings-subhead">推送事件</h3><span className="subtle-label">已开启的渠道各推送哪些事件</span></div>

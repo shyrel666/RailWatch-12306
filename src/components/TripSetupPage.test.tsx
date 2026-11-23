@@ -14,6 +14,7 @@ import {
 } from "../store/railwatchStore";
 import { TripSetupPage } from "./TripSetupPage";
 import type { CommandRunner, ConfirmDialog } from "./componentTypes";
+import type { RailWatchConfig, TripPreset } from "../types";
 import readinessCases from "../../tests/fixtures/automation-readiness-cases.json";
 
 afterEach(cleanup);
@@ -23,6 +24,7 @@ function resetStore() {
     runtime: { ...defaultRuntimeInfo, state: { ...defaultStatus } },
     status: { ...defaultStatus, query_ready: true },
     config: { ...defaultConfig, train_code: "" },
+    activeTripPresetId: null,
     savedConfig: null,
     savedAt: null,
     configSaveError: null,
@@ -172,16 +174,192 @@ test("custom dates can be added, reordered and removed within the five-date limi
   expect(runCommand.mock.calls.some(([command]) => command === "startMonitor")).toBe(false);
 });
 
-test("maintenance sleep is off by default and can be changed independently", async () => {
+test("the trip query strategy keeps its own controls and excludes the global maintenance preference", async () => {
   resetStore();
   const user = userEvent.setup();
   render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={vi.fn(async () => undefined)} />);
   await user.click(screen.getByRole("heading", { name: "查询策略" }));
-  const toggle = screen.getByRole("switch", { name: "夜间维护休眠" });
-  expect(toggle.getAttribute("aria-checked")).toBe("false");
-  expect(screen.getByText("01:00–05:00 自动暂停，05:00 恢复")).toBeTruthy();
-  await user.click(toggle);
-  expect(railwatchStore.getState().config).toMatchObject({ maintenance_sleep: true, timer_enabled: false, auto_stop_at: "" });
+  expect(screen.getByRole("switch", { name: "保持会话" })).toBeTruthy();
+  expect(screen.getByRole("switch", { name: "智能轮询" })).toBeTruthy();
+  expect(screen.queryByRole("switch", { name: "夜间维护休眠" })).toBeNull();
+  expect(railwatchStore.getState().config).not.toHaveProperty("maintenance_sleep");
+});
+
+async function openTripPresets(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await user.click(await screen.findByRole("button", { name }));
+  return within(await screen.findByRole("dialog", { name: "行程方案" }));
+}
+
+test("loads a preset into the draft and closes, then updates and saves a copy in the reopened dialog", async () => {
+  resetStore();
+  const date = isoDaysFromToday(2);
+  const formal = { ...defaultConfig, date, train_code: "G1" };
+  railwatchStore.setState({ config: formal, savedConfig: formal });
+  let items: TripPreset[] = [{ id: "work", name: "通勤", config: { ...formal, train_code: "G9", auto_submit: true } }];
+  const runCommand = vi.fn(async (command: string, payload?: Record<string, unknown>) => {
+    if (command === "loadTripPresets") return { items };
+    if (command === "saveTripPreset") {
+      const id = (payload!.preset_id as string | undefined) ?? "copy";
+      const preset = { id, name: payload!.name as string, config: payload!.config as RailWatchConfig };
+      items = [...items.filter(item => item.id !== id), preset];
+      return { items, saved_id: id };
+    }
+  });
+  const user = userEvent.setup();
+  const mount = () => render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={runCommand as CommandRunner} />);
+  let view = mount();
+  const presets = await openTripPresets(user, "行程方案 (1)");
+  expect(railwatchStore.getState().config).toBe(formal);
+  await user.click(presets.getByRole("button", { name: "通勤" }));
+  expect(screen.queryByRole("dialog", { name: "行程方案" })).toBeNull();
+  expect(screen.getByRole("button", { name: "方案：通勤" }).getAttribute("aria-expanded")).toBe("false");
+  expect(railwatchStore.getState().config).toMatchObject({ train_code: "G9", auto_submit: true });
+  expect(railwatchStore.getState().savedConfig).toBe(formal);
+  expect(railwatchStore.getState().draftSaveState).toBe("editing");
+  fireEvent.change(screen.getByLabelText("车次"), { target: { value: "G11" } });
+  view.unmount();
+  view = mount();
+  const reopened = await openTripPresets(user, "方案：通勤");
+  await user.click(reopened.getByRole("button", { name: "更新当前方案" }));
+  expect(runCommand).toHaveBeenCalledWith("saveTripPreset", {
+    name: "通勤", preset_id: "work", config: expect.objectContaining({ train_code: "G11" }),
+  }, expect.any(String));
+  expect(screen.getByRole("dialog", { name: "行程方案" })).toBeTruthy();
+  await user.click(reopened.getByRole("button", { name: "另存为新方案" }));
+  const input = reopened.getByLabelText<HTMLInputElement>("方案名称");
+  expect(input.value).toBe(`北京→上海 ${date.slice(5)}`);
+  await user.clear(input);
+  expect(reopened.getByRole<HTMLButtonElement>("button", { name: "保存方案" }).disabled).toBe(true);
+  await user.type(input, "周末出行");
+  await user.click(reopened.getByRole("button", { name: "保存方案" }));
+  expect(runCommand).toHaveBeenCalledWith("saveTripPreset", {
+    name: "周末出行", config: expect.objectContaining({ train_code: "G11" }),
+  }, expect.any(String));
+  expect(await reopened.findByRole("button", { name: "周末出行" })).toBeTruthy();
+  expect(reopened.getByRole("button", { name: "通勤" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "方案：周末出行" }).getAttribute("aria-expanded")).toBe("true");
+  expect(runCommand.mock.calls.some(([command]) => ["startMonitor", "analyzeQuery", "saveConfig"].includes(command))).toBe(false);
+  view.unmount();
+});
+
+test("creates a preset from an empty response and keeps the name on save failure", async () => {
+  resetStore();
+  const runCommand = vi.fn(async (command: string) => command === "saveTripPreset" ? undefined : {});
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={runCommand as CommandRunner} />);
+  const presets = await openTripPresets(user, "行程方案");
+  await user.click(presets.getByRole("button", { name: "存为方案" }));
+  const input = presets.getByLabelText<HTMLInputElement>("方案名称");
+  fireEvent.change(input, { target: { value: "行".repeat(41) } });
+  expect(presets.getByRole<HTMLButtonElement>("button", { name: "保存方案" }).disabled).toBe(true);
+  fireEvent.change(input, { target: { value: "新方案" } });
+  await user.click(presets.getByRole("button", { name: "保存方案" }));
+  expect(input.value).toBe("新方案");
+  expect(presets.getByRole<HTMLButtonElement>("button", { name: "保存方案" }).disabled).toBe(false);
+  expect(runCommand.mock.calls.filter(([command]) => command === "saveTripPreset")).toHaveLength(1);
+});
+
+test("an empty preset list explains why to save a trip", async () => {
+  resetStore();
+  const runCommand = vi.fn(async (command: string) => command === "loadTripPresets" ? { items: [] } : undefined);
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={runCommand as CommandRunner} />);
+  const presets = await openTripPresets(userEvent.setup(), "行程方案");
+  expect(await presets.findByText("暂无已保存方案，可将当前配置存为方案以便快速切换。")).toBeTruthy();
+  expect(presets.getByRole("button", { name: "存为方案" })).toBeTruthy();
+});
+
+test("the top-bar preset dialog lists all 20 trips with route and date descriptions", async () => {
+  resetStore();
+  const items: TripPreset[] = Array.from({ length: 20 }, (_, index) => ({
+    id: `preset-${index + 1}`, name: `测试方案 ${index + 1}`, config: {
+      train_code: `G${index + 1}`, from_station_cn: "天津西", to_station_cn: "大兴机场", date: "2026-11-26",
+    },
+  }));
+  const runCommand = vi.fn(async (command: string) => command === "loadTripPresets" ? { items } : undefined);
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={runCommand as CommandRunner} />);
+  const header = within(document.querySelector<HTMLElement>(".trip-setup-head")!);
+  const trigger = await header.findByRole("button", { name: "行程方案 (20)" });
+  expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByRole("dialog", { name: "行程方案" })).toBeNull();
+  await user.click(trigger);
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  const presets = within(screen.getByRole("dialog", { name: "行程方案" }));
+  expect(presets.getAllByRole("button", { name: /^测试方案 \d+$/ })).toHaveLength(20);
+  const last = presets.getByRole("button", { name: "测试方案 20" });
+  expect(last.textContent).toContain("天津西 → 大兴机场 · 11-26");
+  await user.click(last);
+  expect(screen.queryByRole("dialog", { name: "行程方案" })).toBeNull();
+  expect(railwatchStore.getState().config.train_code).toBe("G20");
+  expect(runCommand.mock.calls.some(([command]) => command === "startMonitor")).toBe(false);
+});
+
+test("the preset dialog closes on an outside click or Escape", async () => {
+  resetStore();
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={vi.fn(async () => undefined)} />);
+  const trigger = screen.getByRole("button", { name: "行程方案" });
+  await user.click(trigger);
+  expect(screen.getByRole("dialog", { name: "行程方案" })).toBeTruthy();
+  await user.click(screen.getByRole("heading", { name: "路线与乘客" }));
+  expect(screen.queryByRole("dialog", { name: "行程方案" })).toBeNull();
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  await user.click(trigger);
+  expect(screen.getByRole("dialog", { name: "行程方案" })).toBeTruthy();
+  const windowKeyDown = vi.fn();
+  window.addEventListener("keydown", windowKeyDown);
+  try {
+    await user.keyboard("{Escape}");
+    expect(windowKeyDown).not.toHaveBeenCalled();
+  } finally {
+    window.removeEventListener("keydown", windowKeyDown);
+  }
+  expect(screen.queryByRole("dialog", { name: "行程方案" })).toBeNull();
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(document.activeElement).toBe(trigger);
+});
+
+test("Escape cancels preset naming and keeps the dialog open without saving", async () => {
+  resetStore();
+  const runCommand = vi.fn(async (command: string) => command === "loadTripPresets" ? { items: [] } : undefined);
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={vi.fn(async () => true)} runCommand={runCommand as CommandRunner} />);
+  const presets = await openTripPresets(user, "行程方案");
+  await user.click(presets.getByRole("button", { name: "存为方案" }));
+  const input = presets.getByRole("textbox", { name: "方案名称" });
+  await user.clear(input);
+  await user.type(input, "取消的名称");
+  await user.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: "行程方案" })).toBeTruthy();
+  expect(presets.queryByRole("textbox", { name: "方案名称" })).toBeNull();
+  expect(presets.queryByRole("button", { name: "保存方案" })).toBeNull();
+  expect(runCommand.mock.calls.some(([command]) => command === "saveTripPreset")).toBe(false);
+});
+
+test("deleting a selected preset waits for confirmation and preserves the draft and open dialog", async () => {
+  resetStore();
+  const preset: TripPreset = { id: "family", name: "探亲", config: { train_code: "D3" } };
+  const confirm = vi.fn(async () => false).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  const runCommand = vi.fn(async (command: string, _payload?: Record<string, unknown>) => {
+    if (command === "loadTripPresets") return { items: [preset] };
+    if (command === "deleteTripPreset") return { items: [] };
+  });
+  const user = userEvent.setup();
+  render(<TripSetupPage busy={null} confirm={confirm} runCommand={runCommand as CommandRunner} />);
+  const initial = await openTripPresets(user, "行程方案 (1)");
+  await user.click(initial.getByRole("button", { name: "探亲" }));
+  const presets = await openTripPresets(user, "方案：探亲");
+  await user.click(presets.getByRole("button", { name: "删除方案 探亲" }));
+  expect(confirm).toHaveBeenCalledWith("删除行程方案", "确定删除「探亲」？");
+  expect(runCommand.mock.calls.some(([command]) => command === "deleteTripPreset")).toBe(false);
+  await user.click(presets.getByRole("button", { name: "删除方案 探亲" }));
+  expect(runCommand).toHaveBeenCalledWith("deleteTripPreset", { preset_id: "family" }, expect.any(String));
+  expect(presets.queryByRole("button", { name: "探亲" })).toBeNull();
+  expect(await presets.findByText("暂无已保存方案，可将当前配置存为方案以便快速切换。")).toBeTruthy();
+  expect(screen.getByRole("dialog", { name: "行程方案" })).toBeTruthy();
+  expect(railwatchStore.getState().config.train_code).toBe("D3");
+  expect(railwatchStore.getState().activeTripPresetId).toBeNull();
 });
 
 describe("TripSetupPage", () => {

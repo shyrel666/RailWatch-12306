@@ -13,6 +13,11 @@ export const RAILWATCH_COMMANDS = [
   "stationSaleTimes",
   "loadTripChoices",
   "saveTrainFavorites",
+  "loadTripPresets",
+  "saveTripPreset",
+  "deleteTripPreset",
+  "exportTripBundle",
+  "importTripBundle",
   "saleReminders",
   "addSaleReminder",
   "removeSaleReminder",
@@ -34,6 +39,7 @@ export const RAILWATCH_COMMANDS = [
   "stopMonitor",
   "taskActivity",
   "continueOrder",
+  "focusBrowser",
   "orderHistory",
   "orderDetail",
   "dismissOrder",
@@ -101,7 +107,8 @@ export function isAllowedExternalUrl(value: unknown): value is string {
   }
 }
 
-export function getCommandConfirmation(command: RailWatchCommandName, payload: Record<string, unknown>): ConfirmationPrompt | null {
+export function getCommandConfirmation(command: RailWatchCommandName, payload: Record<string, unknown>,
+  options?: { maintenanceSleep?: boolean }): ConfirmationPrompt | null {
   if (command === "clearRehearsalHistory") {
     return { title: "清除彩排记录", message: "清除全部本地彩排报告及其预测数据？清除后无法恢复，订单和实战复盘记录会保留。" };
   }
@@ -142,7 +149,7 @@ export function getCommandConfirmation(command: RailWatchCommandName, payload: R
         `席别优先顺序：${config.seat_keyword || "不限"}`,
         `乘客：${config.passengers || "未指定"}`,
         `起售时刻：${config.timer_enabled ? config.sale_at || "未设置" : "未启用定时"}`,
-        ...(config.maintenance_sleep === true ? ["夜间维护休眠：01:00–05:00 自动暂停，05:00 恢复（北京时间）"] : []),
+        ...(options?.maintenanceSleep === true ? ["夜间维护休眠：常规 01:00–05:00（周二 23:30 起）自动暂停，05:00 恢复（北京时间）"] : []),
         ...(typeof config.auto_stop_at === "string" && config.auto_stop_at.trim()
           ? [`自动停止时间（北京时间）：${config.auto_stop_at}`] : []),
         `自动提交：${config.auto_submit ? "开" : "关"}；自动候补：${config.auto_alternate ? "开" : "关"}`,

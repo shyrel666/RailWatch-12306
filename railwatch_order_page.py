@@ -50,6 +50,38 @@ const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).vi
 const txt = e => (e?.innerText || '').replace(/\s+/g,' ').trim();
 const all = (s,r=document) => [...r.querySelectorAll(s)].filter(visible);
 const val = (s,r=document) => {const e=r.querySelector(s);return e?.value || txt(e);};
+function paymentCountdown(root, buttons) {
+  const clocks=all('#J-payment-showTime,#J-lineUp-showTime',root);
+  for (const node of [...clocks,...buttons.filter(visible)]) {
+    const match=/(\d+)\s*分\s*(\d{1,2})\s*秒/.exec(txt(node));
+    if (!match) continue;
+    const seconds=Number(match[1])*60+Number(match[2]);
+    if (Number.isSafeInteger(seconds)) return seconds;
+  }
+  return null;
+}
+function seatCells(rows, seatIndex) {
+  if (seatIndex<0) return [];
+  const occupied=[], seats=[];
+  for (const row of rows) {
+    let col=0;
+    for (const cell of row.cells) {
+      while (occupied[col]>0) col++;
+      if (col===seatIndex && cell.matches('td') && visible(cell)) seats.push(cell);
+      for (let end=col+cell.colSpan; col<end; col++) occupied[col]=cell.rowSpan;
+    }
+    for (let i=0; i<occupied.length; i++) occupied[i]--;
+  }
+  return seats;
+}
+function regularPaymentMeta(root, cells) {
+  const ticketPrice=all('.txt-price',root).map(e=>/^(?:[¥￥]\s*)?(\d+(?:\.\d+)?)\s*元?$/.exec(txt(e))).find(Boolean);
+  const seatAssignments=cells.flatMap(cell=>cell.innerText.split('\n').map(value=>value.trim()));
+  return {
+    ticket_price:ticketPrice?.[1]||'',
+    seat_assignments:[...new Set(seatAssignments.filter(value=>/^\d+车/.test(value)))].slice(0,20)
+  };
+}
 function trainCodes(root) {
   // Keep every visible structured value, including conflicting attributes and
   // labels. Free text is checked separately in record_matches, never promoted
@@ -108,7 +140,8 @@ const orders=all('.order-item').filter(root=>!root.querySelector(':scope > .orde
  const orderId=ids.length&&ids.every(id=>/^[A-Za-z0-9]+$/.test(id))&&new Set(ids).size===1?ids[0]:'';
  const ticketStates=all('.ticket-status-name',root).map(txt);
  const state=ticketStates.length?ticketStates.join(' '):all('.order-item-hd .pull-right,.order-item-hd .txt-second,.order-status',root).map(txt).join(' ');
- const payment=all('a,button',root).some(e=>{
+ const buttons=all('a,button',root);
+ const payment=buttons.some(e=>{
    if (/^(去支付|立即支付|网上支付|继续支付|支付)$/.test(txt(e))) return true;
    // The official waitlist control includes a countdown. Scope this exception
    // to its own order card and control; never match arbitrary payment text.
@@ -123,7 +156,14 @@ const orders=all('.order-item').filter(root=>!root.querySelector(':scope > .orde
    const node=walker.currentNode;
    if(visible(node.parentElement) && !node.parentElement.closest('.order-item-hd,.order-item-ft')) body.push(node.textContent);
  }
- return {order_id:orderId,kind:header.includes('候补单号')?'alternate':'regular',
+ const kind=header.includes('候补单号')?'alternate':'regular';
+ const regularTable=kind==='regular' && root.querySelector('.order-item-bd .order-item-table');
+ const columns=regularTable ? [...regularTable.querySelectorAll(':scope > colgroup > col')] : [];
+ const seats=regularTable ? seatCells(all('tr',regularTable),columns.findIndex(e=>e.classList.contains('col-seat'))) : [];
+ const payButtons=buttons.filter(e=>/^(?:去支付|立即支付|网上支付|继续支付|支付)(?:$|[\s(（])/.test(txt(e)));
+ return {order_id:orderId,kind,
+   payment_countdown_seconds:paymentCountdown(root,payButtons),
+   ...(kind==='regular' ? regularPaymentMeta(root,seats) : {}),
    text:body.join(' ').replace(/\s+/g,' ').trim(),state,state_conflict:new Set(ticketStates).size>1,payment,passengers:passengers(root),
    train_codes:trainCodes(root), choices:all('.ticket-card-list .ticket-card,.ticket-card-list .ticket-card-queue',root).map(cardDetail),
    new_train_fulfilled:all('.success-temporary-train',root).some(e=>/临客.*兑现成功/.test(txt(e))),
@@ -139,7 +179,8 @@ const orders=all('.order-item').filter(root=>!root.querySelector(':scope > .orde
 const paymentTitle = document.querySelector('#show_title_ticket');
 const paymentRows = document.querySelector('#show_ticket_message');
 const paymentTable = paymentRows?.closest('table');
-if (!orders.length && visible(paymentTitle) && visible(paymentRows) && visible(document.querySelector('#payButton')) &&
+const paymentButton = document.querySelector('#payButton');
+if (!orders.length && visible(paymentTitle) && visible(paymentRows) && visible(paymentButton) &&
     !visible(document.querySelector('#show_title_ticket_fc'))) {
   const ids = [...new Set([...txt(document.body).matchAll(/订单号(?:码)?\s*[：:]\s*([A-Za-z0-9]+)/g)].map(m=>m[1]))];
   const headers = [...(paymentTable?.querySelectorAll('th') || [])].map(txt);
@@ -149,6 +190,8 @@ if (!orders.length && visible(paymentTitle) && visible(paymentRows) && visible(d
     order_id:ids[0], kind:'regular', checkout:true, text:txt(paymentTitle),
     state:'待支付', payment:true, passengers:passengers(paymentTable), seat_names:seats,
     train_codes:trainCodes(paymentTable),
+    payment_countdown_seconds:paymentCountdown(document,[paymentButton]),
+    ...regularPaymentMeta(paymentTable,seatCells(all('tr',paymentRows),seatIndex)),
   });
 }
 const dialogs=all('.dhtmlx_window_active,.layui-layer,.modal,[role="dialog"],.up-box').map(txt).filter(Boolean);
@@ -161,11 +204,14 @@ const officialProgress = all('#orderResultInfo_id .tit').some(e =>
 const queueFailed = all('.order-queue').some(e => /排队失败|排队已取消|排队超时/.test(txt(e)));
 const queueWaiting = !queueFailed && all('.order-queue').some(e =>
  /排队|处理中/.test(txt(e)) && !/失败|取消成功|已取消|超时|异常/.test(txt(e)));
-return {url:location.href, orders, dialogs, details,
- alternateCheckout:/(?:^|\/)lineUp_payConfirm\.html$/.test(location.pathname) &&
-   visible(document.querySelector('#J-payConfirm')) && visible(document.querySelector('#J-lineUp-toPay')) &&
+const alternatePayRoot=document.querySelector('#J-payConfirm');
+const alternatePayButton=document.querySelector('#J-lineUp-toPay');
+const alternateCheckout=/(?:^|\/)lineUp_payConfirm\.html$/.test(location.pathname) &&
+   visible(alternatePayRoot) && visible(alternatePayButton) &&
    visible(document.querySelector('#J-lineUp-cancel')) &&
-   /^\d+分\d{1,2}秒$/.test(txt(document.querySelector('#J-lineUp-showTime'))),
+   /^\d+分\d{1,2}秒$/.test(txt(document.querySelector('#J-lineUp-showTime')));
+return {url:location.href, orders, dialogs, details, alternateCheckout,
+ payment_countdown_seconds:alternateCheckout ? paymentCountdown(alternatePayRoot,[alternatePayButton]) : null,
  alternateCart:visible(document.querySelector('#hbSubmit')),
  quietCar:visible(document.querySelector('#content_defaultwarningAlert_id')) &&
    /静音车厢/.test(txt(document.querySelector('#content_defaultwarningAlert_id'))),
@@ -503,6 +549,23 @@ def record_matches(record, intent, *, known_id=""):
             and sorted(record.get("passengers", [])) == sorted(intent.passengers))
 
 
+def _payment_review(record, observed_at):
+    """Presentation metadata for a previously verified order."""
+    review = {}
+    countdown = record.get("payment_countdown_seconds")
+    if type(countdown) is int and 0 <= countdown < 2 ** 53:
+        review.update(payment_deadline_at=observed_at + countdown, payment_countdown_observed_at=observed_at)
+    price = record.get("ticket_price")
+    if isinstance(price, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", price):
+        review["ticket_price"] = price
+    seats = record.get("seat_assignments")
+    if isinstance(seats, list):
+        assignments = [seat for seat in seats if isinstance(seat, str) and re.match(r"^[0-9]+车", seat)][:20]
+        if assignments:
+            review["seat_assignments"] = assignments
+    return review
+
+
 class OrderPage:
     RESULT_UNKNOWN_TIMEOUT = 60.0
     RESULT_POLL_INTERVAL = 0.5
@@ -591,9 +654,12 @@ class OrderPage:
                 if stage != "pending_payment" and not known_id:
                     return OrderResult("unknown", "尚未取得本次提交的订单号，历史订单不能证明本次结果，请人工核对")
                 from railwatch_alternate_options import record_review
-                return OrderResult(stage, order_id=record["order_id"], review=record_review(record) if intent.kind == "alternate" else {}, evidence={
+                observed_at = time.time()
+                review = record_review(record) if intent.kind == "alternate" else {}
+                review.update(_payment_review(record, observed_at))
+                return OrderResult(stage, order_id=record["order_id"], review=review, evidence={
                     "matched": True, "url": snap.get("url", "").split("?")[0],
-                    "observed_at": time.time(), "state": state[:100],
+                    "observed_at": observed_at, "state": state[:100],
                     **({"fulfilled_choices": record.get("choices", [])} if stage == "fulfilled" and intent.kind == "alternate" else {})})
         if len(matching) == 1 and matching[0].get("state_conflict"):
             return OrderResult("unknown", "已匹配到订单，但订单内车票状态不一致（如部分退票或改签），请在官方订单详情人工核对",
@@ -1149,6 +1215,7 @@ class OrderPage:
         if (intent.kind != "alternate" or not snap.get("alternateCheckout") or snap.get("dialogs")
                 or snap.get("verification") or snap.get("processing")):
             return self._result_from_snapshot(snap, intent, submitted=True, known_id=known_id)
+        checkout_observed_at = time.time()
         checkout = self.driver.execute_script(r"""
           const text=e=>(e?.innerText||'').replace(/\s+/g,' ').trim();
           return {amount:text(document.querySelector('#J-payConfirm #detail_total')),
@@ -1159,8 +1226,9 @@ class OrderPage:
             from railwatch_alternate_options import record_review
             review = record_review({"prepay_amount": checkout.get("amount", ""),
                                     "success_rate": checkout.get("rate", "") + "%"})
-            # Prefer the matched card's rate when available; otherwise the
-            # checkout observation belongs to the just-matched pending order.
+            review.update(_payment_review(snap, checkout_observed_at))
+            # Prefer the matched card's payment metadata and rate when available.
+            # Checkout metadata only accompanies the resulting matched pending order.
             merged = {**review, **result.review}
             if result.review.get("success_rate") is None and review.get("success_rate") is not None:
                 merged.update({key: review[key] for key in ("success_rate", "success_rate_status", "success_rate_observed_at")})

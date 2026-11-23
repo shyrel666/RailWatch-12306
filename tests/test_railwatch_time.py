@@ -42,6 +42,21 @@ class MonitoringTimeTests(unittest.TestCase):
                 timestamp = datetime.fromisoformat(f"2026-11-24T{local_time}+08:00").timestamp()
                 self.assertEqual(maintenance_resume_timestamp(timestamp), expected)
 
+    def test_tuesday_extension_uses_wednesday_resume_across_midnight(self):
+        resume = datetime.fromisoformat("2026-11-25T05:00:00+08:00").timestamp()
+        for local_time, expected in (
+            ("2026-11-23T00:30:00", None),
+            ("2026-11-24T23:29:59", None),
+            ("2026-11-24T23:30:00", resume),
+            ("2026-11-25T00:00:00", resume),
+            ("2026-11-25T00:30:00", resume),
+            ("2026-11-25T04:59:59", resume),
+            ("2026-11-25T05:00:00", None),
+        ):
+            with self.subTest(local_time=local_time):
+                timestamp = datetime.fromisoformat(f"{local_time}+08:00").timestamp()
+                self.assertEqual(maintenance_resume_timestamp(timestamp), expected)
+
 
 class ServerTimeSyncTests(unittest.TestCase):
     def setUp(self):

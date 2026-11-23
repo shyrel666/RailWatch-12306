@@ -47,11 +47,58 @@ test("history distinguishes official status, local observation, and incomplete e
 });
 
 test("terminal history remains read only", async () => {
-  const terminal = { ...summary, status: "fulfilled", official_status: "fulfilled" as const, recovery_required: false };
+  const terminal = { ...summary, kind: "regular" as const, status: "fulfilled", official_status: "fulfilled" as const,
+    recovery_required: false, review: { payment_deadline_at: Date.now() / 1000 + 30, ticket_price: "229.5", seat_assignments: ["01车09F号"] } };
   const runCommand = vi.fn(async () => ({ items: [terminal], next_cursor: null })) as CommandRunner;
   render(<OrderCenterPage runCommand={runCommand} busy={null} />);
   expect((await screen.findAllByText(/购票成功/)).length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: /继续核对/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "切到受控浏览器" })).toBeNull();
+  expect(screen.queryByRole("timer")).toBeNull();
+  expect(screen.getByText("¥229.5")).toBeTruthy();
+  expect(screen.getByText("01车09F号")).toBeTruthy();
+});
+
+test("shows payment data and focuses the browser from the card and open detail while monitoring", async () => {
+  railwatchStore.setState({ status: { ...defaultStatus, monitoring: true } });
+  const item = { ...summary, kind: "regular" as const, status: "pending_payment",
+    official_status: "pending_payment" as const, observing: true, recovery_required: false,
+    review: { payment_deadline_at: Date.now() / 1000 + 180, ticket_price: "661.0", seat_assignments: ["09车02A号"] } };
+  const runCommand = vi.fn(async (command: string) => command === "orderHistory"
+    ? { items: [item], next_cursor: null } : command === "orderDetail"
+      ? { summary: item, events: [], history_complete: true } : undefined) as CommandRunner;
+  render(<OrderCenterPage runCommand={runCommand} busy={null} />);
+  const card = within(await screen.findByRole("article", { name: /^D21 / }));
+  expect(card.getByRole("timer")).toBeTruthy();
+  expect(card.getByText("¥661.0")).toBeTruthy();
+  expect(card.getByText("09车02A号")).toBeTruthy();
+  await userEvent.click(card.getByRole("button", { name: "切到受控浏览器" }));
+  await userEvent.click(card.getByRole("button", { name: "查看时间线" }));
+  const drawer = within(await screen.findByRole("dialog"));
+  expect(drawer.getByRole("timer")).toBeTruthy();
+  expect(drawer.getByText("¥661.0")).toBeTruthy();
+  expect(drawer.getByText("09车02A号")).toBeTruthy();
+  await userEvent.click(drawer.getByRole("button", { name: "切到受控浏览器" }));
+  expect(vi.mocked(runCommand).mock.calls.filter(([command]) => command === "focusBrowser")).toEqual([
+    ["focusBrowser"], ["focusBrowser"],
+  ]);
+  expect(drawer.getByText("处理时间线")).toBeTruthy();
+});
+
+test("a newer read refreshes payment evidence in an open order drawer", async () => {
+  const item = { ...summary, kind: "regular" as const, status: "pending_payment",
+    official_status: "pending_payment" as const };
+  let latest: OrderHistorySummary = item;
+  const runCommand = vi.fn(async (command: string) => command === "orderHistory"
+    ? { items: [latest], next_cursor: null } : command === "orderDetail"
+      ? { summary: item, events: [], history_complete: true } : undefined) as CommandRunner;
+  render(<OrderCenterPage runCommand={runCommand} busy={null} />);
+  await userEvent.click(await screen.findByRole("button", { name: "查看时间线" }));
+  const drawer = within(await screen.findByRole("dialog"));
+  expect(drawer.queryByRole("timer")).toBeNull();
+  latest = { ...item, updated_at: item.updated_at + 1, review: { payment_deadline_at: Date.now() / 1000 + 120 } };
+  act(() => railwatchStore.setState({ status: { ...defaultStatus, order: { status: "pending_payment", updated_at: latest.updated_at } } }));
+  expect(await drawer.findByRole("timer")).toBeTruthy();
 });
 
 test("multi-choice history exposes the saved set and stops only local observation", async () => {

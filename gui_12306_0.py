@@ -305,7 +305,9 @@ class ConfigManager:
         """保存配置"""
         try:
             with self._lock:
-                atomic_write_json(self.config_path, config.to_dict())
+                payload = config.to_dict()
+                payload.pop("maintenance_sleep", None)
+                atomic_write_json(self.config_path, payload)
             self.last_error = ""
             return True
         except Exception as exc:
@@ -322,6 +324,8 @@ class ConfigManager:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
             self.last_error = ""
+            if isinstance(data, dict):
+                data.pop("maintenance_sleep", None)
             return QueryConfig.from_dict(data)
         except Exception as exc:
             self.last_error = str(exc)
@@ -1053,7 +1057,7 @@ class TicketMonitor(BaseHandler):
         if resume_ts is None:
             return True
 
-        self.log("当前处于 12306 夜间维护时段（01:00–05:00），监控已暂停，将在 05:00 自动恢复。")
+        self.log("当前处于 12306 夜间维护时段（常规 01:00–05:00，周二 23:30 起），监控已暂停，将在 05:00 自动恢复。")
         self.tick(status="waiting", next_query_at=resume_ts, message="12306 夜间维护休眠中，05:00 恢复")
         sleep_until = min(resume_ts, self._auto_stop_ts) if self._auto_stop_ts is not None else resume_ts
         step = 30.0 if self._wait_callback else 0.2

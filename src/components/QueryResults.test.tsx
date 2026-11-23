@@ -6,6 +6,7 @@ import { QueryResults } from "./QueryResults";
 import { defaultStatus } from "../store/railwatchStore";
 import { queryConfig, querySnapshot, queryTime } from "../test/queryFixtures";
 import { queryRows, type QueryViews } from "../lib/queryResults";
+import type { StructuredQueryResultRow } from "../types";
 
 afterEach(cleanup);
 
@@ -119,4 +120,166 @@ test("cleared results cannot apply a previously selected train", async () => {
   rerender(<QueryResults {...props} rows={[]} views={{}} />);
   expect(screen.queryByRole("button", { name: /将选中车次加入行程/ })).toBeNull();
   expect(onSelectTrains).not.toHaveBeenCalled();
+});
+
+const available = { status: "available", count: 3, raw: "3" } as const;
+const alternate = { status: "alternate", count: null, raw: "候补" } as const;
+const unavailable = { status: "unavailable", count: 0, raw: "无" } as const;
+const baseRow = querySnapshot().rows[0];
+const filterRows: StructuredQueryResultRow[] = [
+  { ...baseRow, train: "K301", from_station: "北京西", departure_time: "23:00", arrival_time: "03:30", arrival_day_offset: 1,
+    seats: { "硬座": available } },
+  { ...baseRow, train: "G201", from_station: "北京南", departure_time: "07:02", arrival_time: "11:20", arrival_day_offset: 0,
+    seats: { "二等座": alternate, "商务座": available } },
+  { ...baseRow, train: "D301", from_station: "北京南", departure_time: "13:00", arrival_time: "15:00", arrival_day_offset: 0,
+    seats: { "二等座": unavailable, "商务座": available } },
+  { ...baseRow, train: "701", from_station: "北京西", departure_time: "18:00", arrival_time: "23:00", arrival_day_offset: null,
+    seats: {} },
+];
+
+function viewFor(rows: StructuredQueryResultRow[], conditions = querySnapshot().conditions) {
+  const result = querySnapshot({ rows, conditions });
+  return { owner: "run", latest: result, success: result };
+}
+
+function displayedTrains() {
+  return screen.queryAllByRole("rowheader").map(row => row.textContent);
+}
+
+test("combines train category, time, selected-seat availability and station filters, then resets the empty result", async () => {
+  const user = userEvent.setup();
+  show({ one: viewFor(filterRows) });
+  expect(displayedTrains()).toEqual(["K301", "G201", "D301", "701"]);
+  expect(screen.getByText("匹配 4 / 总计 4 趟")).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("车型"), "highspeed");
+  expect(displayedTrains()).toEqual(["G201", "D301"]);
+  await user.selectOptions(screen.getByLabelText("发车时段"), "morning");
+  expect(displayedTrains()).toEqual(["G201"]);
+  await user.selectOptions(screen.getByLabelText("余票状态"), "available");
+  expect(displayedTrains()).toEqual([]);
+  expect(screen.getByText("匹配 0 / 总计 4 趟")).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("余票状态"), "available_or_alternate");
+  expect(displayedTrains()).toEqual(["G201"]);
+  await user.selectOptions(screen.getByLabelText("出发站"), "北京西");
+  expect(displayedTrains()).toEqual([]);
+  expect(screen.getByText("匹配 0 / 总计 4 趟")).toBeTruthy();
+  expect(screen.getByText("没有符合筛选条件的车次。")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "重置筛选" }));
+  expect(displayedTrains()).toEqual(["K301", "G201", "D301", "701"]);
+  expect(screen.getByText("匹配 4 / 总计 4 趟")).toBeTruthy();
+});
+
+test("sorts rows by departure, arrival across midnight, and duration, and only shows calculable durations", async () => {
+  const user = userEvent.setup();
+  show({ one: viewFor(filterRows) });
+  const overnight = screen.getByRole("row", { name: /^K301 / });
+  const sameDay = screen.getByRole("row", { name: /^G201 / });
+  const unknownDay = screen.getByRole("row", { name: /^701 / });
+  expect(within(overnight).getByText("历时 4小时30分")).toBeTruthy();
+  expect(within(sameDay).getByText("历时 4小时18分")).toBeTruthy();
+  expect(within(unknownDay).getByText("到达日未知")).toBeTruthy();
+  expect(within(unknownDay).queryByText(/历时/)).toBeNull();
+  const sort = screen.getByLabelText("排序方式");
+  await user.selectOptions(sort, "departure");
+  expect(displayedTrains()).toEqual(["G201", "D301", "701", "K301"]);
+  await user.selectOptions(sort, "arrival");
+  expect(displayedTrains()).toEqual(["G201", "D301", "K301", "701"]);
+  await user.selectOptions(sort, "duration");
+  expect(displayedTrains()).toEqual(["D301", "G201", "K301", "701"]);
+  await user.selectOptions(sort, "default");
+  expect(displayedTrains()).toEqual(["K301", "G201", "D301", "701"]);
+});
+
+test("only lists a departure station filter when there are multiple stations", () => {
+  show({ one: viewFor(filterRows.filter(row => row.from_station === "北京南")) });
+  expect(screen.getByLabelText("车型")).toBeTruthy();
+  expect(screen.queryByLabelText("出发站")).toBeNull();
+});
+
+test("type filtering combines calibrated prefixes with confirmed seats on T and K trains", async () => {
+  const user = userEvent.setup();
+  const prefixes = ["X1", "G2", "D3", "C4", "S5", "Z6", "N7", "V8", "Y9", "L10", "011"];
+  const trains: StructuredQueryResultRow[] = [
+    ...prefixes.map(train => ({ ...baseRow, train, seats: {} })),
+    { ...baseRow, train: "T12", seats: {} },
+    { ...baseRow, train: "K13", seats: { 硬座: available, 二等座: alternate } },
+    { ...baseRow, train: "T14", seats: { 硬座: unavailable, 二等座: { status: "unknown", count: null, raw: "*" } } },
+    { ...baseRow, train: "K15", seats: { 硬卧: alternate, 二等座: { status: "not_applicable", count: null, raw: "不适用" } } },
+    { ...baseRow, train: "T16", seats: { 二等座: available } },
+    { ...baseRow, train: "K17", seats: {} },
+  ];
+  show({ one: viewFor(trains) });
+  const category = screen.getByLabelText("车型");
+  await user.selectOptions(category, "highspeed");
+  expect(displayedTrains()).toEqual(["X1", "G2", "D3", "C4", "S5", "T12", "K13", "T16", "K17"]);
+  await user.selectOptions(category, "normal");
+  expect(displayedTrains()).toEqual(["Z6", "N7", "V8", "T14", "K15"]);
+  await user.selectOptions(category, "other");
+  expect(displayedTrains()).toEqual(["Y9", "L10", "011"]);
+});
+
+test("a new query date clears selections and resets an unavailable departure station", async () => {
+  const user = userEvent.setup();
+  const onSelectTrains = vi.fn();
+  const props = { config: queryConfig, status: defaultStatus, now: queryTime, pending: false, error: null, activeQuery: null, onSelectTrains };
+  const { rerender } = render(<QueryResults {...props} views={{ one: viewFor(filterRows) }} rows={filterRows} editableRoute={queryConfig} />);
+  await user.selectOptions(screen.getByLabelText("出发站"), "北京南");
+  await user.click(screen.getByRole("button", { name: "全选当前筛选（2）" }));
+  expect(screen.getByRole("button", { name: "将选中车次加入行程（2）" })).toBeTruthy();
+
+  const date = "2026-09-23";
+  const conditions = { ...querySnapshot().conditions, date };
+  const nextRows = [{ ...filterRows[0], date }, { ...filterRows[1], date, from_station: "北京站" }];
+  const next = { ...props, editableRoute: { ...queryConfig, date } };
+  rerender(<QueryResults {...next} views={{ next: viewFor(nextRows, conditions) }} rows={nextRows} />);
+  expect(screen.getByLabelText("出发站")).toHaveProperty("value", "");
+  expect(displayedTrains()).toEqual(["K301", "G201"]);
+  expect(screen.queryByRole("checkbox", { checked: true })).toBeNull();
+  expect(screen.queryByRole("button", { name: /将选中车次加入行程/ })).toBeNull();
+
+  const returningRows = [...nextRows, { ...filterRows[2], date }];
+  rerender(<QueryResults {...next} views={{ next: viewFor(returningRows, conditions) }} rows={returningRows} />);
+  expect(screen.getByLabelText("出发站")).toHaveProperty("value", "");
+  expect(displayedTrains()).toEqual(["K301", "G201", "D301"]);
+});
+
+test("bulk selection deduplicates visible trains and preserves hidden choices when the visible selection is cleared", async () => {
+  const user = userEvent.setup();
+  const conditions = querySnapshot().conditions;
+  const onSelectTrains = vi.fn();
+  show({
+    one: viewFor(filterRows),
+    duplicate: viewFor([{ ...filterRows[1], date: "2026-09-23" }], { ...conditions, date: "2026-09-23" }),
+    other: viewFor([
+      { ...filterRows[1], train: "C333" },
+      { ...filterRows[2], from_station: "广州南" },
+    ], { ...conditions, from_station: "广州" }),
+  }, { editableRoute: queryConfig, onSelectTrains });
+  await user.click(screen.getByRole("checkbox", { name: /选择.*K301/ }));
+  await user.selectOptions(screen.getByLabelText("车型"), "highspeed");
+  expect(screen.getByText("C333")).toBeTruthy();
+  expect(screen.queryByRole("checkbox", { name: /选择.*C333/ })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "全选当前筛选（2）" }));
+  expect(screen.getAllByRole("checkbox", { checked: true })).toHaveLength(3);
+  expect(screen.getByRole("button", { name: "将选中车次加入行程（3）" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "取消全选" }));
+  expect(screen.queryByRole("checkbox", { checked: true })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "将选中车次加入行程（1）" }));
+  expect(onSelectTrains).toHaveBeenCalledExactlyOnceWith(["K301"]);
+  await user.click(screen.getByRole("button", { name: "全选当前筛选（2）" }));
+  await user.click(screen.getByRole("button", { name: "将选中车次加入行程（2）" }));
+  expect([...(onSelectTrains.mock.lastCall?.[0] ?? [])].sort()).toEqual(["D301", "G201"]);
+  await user.selectOptions(screen.getByLabelText("出发站"), "广州南");
+  expect(displayedTrains()).toEqual(["D301"]);
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  expect(screen.queryByRole("button", { name: /全选/ })).toBeNull();
+});
+
+test("the filter toolbar is unavailable for raw fallback rows or an empty structured result", () => {
+  const { unmount } = show({}, { rows: [{ train: "G1", raw: "张家界 无座 有" }] });
+  expect(screen.queryByLabelText("车型")).toBeNull();
+  unmount();
+  show({ one: viewFor([]) });
+  expect(screen.queryByLabelText("车型")).toBeNull();
+  expect(screen.getByText("上次成功查询未返回车次。")).toBeTruthy();
 });

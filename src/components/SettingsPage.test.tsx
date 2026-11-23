@@ -177,6 +177,61 @@ describe("SettingsPage", () => {
     expect(clearLocalData.closest(".maintenance")).toBeTruthy();
   });
 
+  test("opens the trusted data directory without sending the displayed path", async () => {
+    const open = vi.spyOn(railwatchApi, "openDataDir").mockResolvedValue({ ok: true });
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "打开目录" }));
+
+    expect(open).toHaveBeenCalledExactlyOnceWith();
+    expect((await screen.findByText("已打开数据目录。")).getAttribute("role")).toBe("status");
+  });
+
+  test("shows a reported directory open failure", async () => {
+    vi.spyOn(railwatchApi, "openDataDir").mockResolvedValue({ ok: false, error: "本地数据目录暂不可用。" });
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "打开目录" }));
+
+    expect((await screen.findByText("本地数据目录暂不可用。")).getAttribute("role")).toBe("alert");
+  });
+
+  test.each([
+    ["exportTripBundle", "导出脱敏备份", "备份导出成功。", "已取消导出备份。"],
+    ["importTripBundle", "导入备份", "备份导入成功。", "已取消导入备份。"],
+  ] as const)("reports success and cancellation from %s", async (method, buttonName, success, cancelled) => {
+    const transfer = vi.spyOn(railwatchApi, method).mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ cancelled: true });
+    const runCommand = vi.fn(async () => undefined) as CommandRunner;
+    render(<SettingsPage busy={null} runCommand={runCommand} />);
+    const button = screen.getByRole("button", { name: buttonName });
+
+    await userEvent.click(button);
+    expect(transfer).toHaveBeenCalledExactlyOnceWith();
+    expect((await screen.findByText(success)).getAttribute("role")).toBe("status");
+
+    await userEvent.click(button);
+    expect((await screen.findByText(cancelled)).getAttribute("role")).toBe("status");
+    expect(screen.queryByText(success)).toBeNull();
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  test("shows a rejected backup and keeps another file picker from opening before it finishes", async () => {
+    let rejectImport!: (error: Error) => void;
+    vi.spyOn(railwatchApi, "importTripBundle").mockReturnValue(new Promise((_, reject) => { rejectImport = reject; }));
+    const exportBackup = vi.spyOn(railwatchApi, "exportTripBundle");
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "导入备份" }));
+    const exportButton = screen.getByRole<HTMLButtonElement>("button", { name: "导出脱敏备份" });
+    expect(exportButton.disabled).toBe(true);
+    await userEvent.click(exportButton);
+    expect(exportBackup).not.toHaveBeenCalled();
+
+    act(() => rejectImport(new Error("Error invoking remote method 'railwatch:import-trip-bundle': Error: 备份文件须包含一个 JSON 对象。")));
+    expect((await screen.findByText("备份文件须包含一个 JSON 对象。")).getAttribute("role")).toBe("alert");
+    expect(exportButton.disabled).toBe(false);
+  });
+
   test("saves the tray preference as a patch", async () => {
     const command = vi.spyOn(railwatchApi, "command").mockImplementation(async (_name, payload = {}) => ({
       theme: "dark", close_to_tray: payload.close_to_tray === true,
@@ -243,6 +298,44 @@ describe("SettingsPage", () => {
     render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
     const toggle = screen.getByRole("switch", { name: "空闲时保持登录" });
     await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
+  test("loads the global maintenance preference and saves it between idle login and sale reminder settings", async () => {
+    const command = vi.spyOn(railwatchApi, "command").mockImplementation(async (name, payload = {}) => ({
+      theme: "light", close_to_tray: false, notification_settings: {},
+      maintenance_sleep: name === "savePreferences" ? payload.maintenance_sleep : true,
+    }) as never);
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const preferences = within(document.getElementById("settings-behavior")!);
+    const idle = preferences.getByRole("switch", { name: "空闲时保持登录" });
+    const toggle = preferences.getByRole("switch", { name: "夜间维护休眠" });
+    const reminder = preferences.getByRole("combobox", { name: "起售提醒提前时间" });
+    const row = toggle.closest(".setting-row");
+    expect(row?.previousElementSibling).toBe(idle.closest(".setting-row"));
+    expect(row?.nextElementSibling).toBe(reminder.closest(".setting-row"));
+    const help = preferences.getByText("监控期间在 12306 夜间维护时段（常规 01:00–05:00，周二 23:30 起）自动暂停查询，05:00 恢复（北京时间）。");
+    expect(toggle.getAttribute("aria-describedby")).toBe(help.id);
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+    await userEvent.click(toggle);
+    expect(command).toHaveBeenCalledWith("savePreferences", { maintenance_sleep: false });
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+    await userEvent.click(toggle);
+    expect(command).toHaveBeenCalledWith("savePreferences", { maintenance_sleep: true });
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+  });
+
+  test("defaults maintenance sleep off and keeps the previous choice when saving fails", async () => {
+    vi.spyOn(railwatchApi, "command").mockImplementation(async name => {
+      if (name === "savePreferences") throw new Error("save failed");
+      return { theme: "light", close_to_tray: false, notification_settings: {} } as never;
+    });
+    render(<SettingsPage busy={null} runCommand={vi.fn(async () => undefined) as CommandRunner} />);
+    const toggle = screen.getByRole("switch", { name: "夜间维护休眠" });
+    await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await userEvent.click(toggle);
+    expect((await screen.findByText("夜间维护休眠偏好未保存，请重试。")).getAttribute("role")).toBe("alert");
     expect(toggle.getAttribute("aria-checked")).toBe("false");
   });
 

@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld("railwatch", {
     ipcRenderer.on("railwatch:event", listener);
     return () => ipcRenderer.removeListener("railwatch:event", listener);
   },
+  openDataDir: () => ipcRenderer.invoke("railwatch:open-data-dir") as Promise<{ ok: boolean; error?: string }>,
+  exportTripBundle: () => ipcRenderer.invoke("railwatch:export-trip-bundle") as Promise<{ ok: true } | { cancelled: true }>,
+  importTripBundle: () => ipcRenderer.invoke("railwatch:import-trip-bundle") as Promise<{ ok: true } | { cancelled: true }>,
   getExportLocations: (defaultPath?: string) => ipcRenderer.invoke("railwatch:export-locations", defaultPath),
   listExportDirectory: (directory: string) => ipcRenderer.invoke("railwatch:export-directory", directory),
   prepareLogExport: (directory: string, fileName: string) => ipcRenderer.invoke("railwatch:prepare-log-export", directory, fileName),

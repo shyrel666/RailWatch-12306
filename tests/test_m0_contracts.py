@@ -101,6 +101,22 @@ class PreferencePatchTests(unittest.TestCase):
                 self.runtime._dispatch("savePreferences", payload)
         self.assertEqual(self.bridge.load_preferences()["theme"], "dark")
 
+    def test_maintenance_sleep_uses_only_global_preference_ipc(self):
+        self.assertFalse(self.runtime._dispatch("loadPreferences", {})["maintenance_sleep"])
+        self.assertTrue(self.request({"maintenance_sleep": True})["maintenance_sleep"])
+        self.assertTrue(self.request({"theme": "dark"})["maintenance_sleep"])
+        path = Path(self.directory.name, UI_PREFERENCES_FILE)
+        self.assertIs(json.loads(path.read_text(encoding="utf-8"))["maintenance_sleep"], True)
+
+        before = path.read_bytes()
+        for invalid in (None, "true", 1, 0, [], {}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "夜间维护休眠必须为布尔值。"):
+                self.runtime._dispatch("savePreferences", {"maintenance_sleep": invalid, "theme": "light"})
+        with self.assertRaisesRegex(ValueError, "夜间维护休眠必须为布尔值。"):
+            self.bridge.save_preferences(maintenance_sleep="true")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(self.request({"maintenance_sleep": False})["maintenance_sleep"])
+
     def test_sale_reminder_lead_round_trips_and_other_patches_preserve_it(self):
         for minutes in (5, 15, 120):
             with self.subTest(minutes=minutes):
@@ -217,7 +233,8 @@ class PreferencePatchTests(unittest.TestCase):
             theme.result(timeout=3)
             tray.result(timeout=3)
         self.assertEqual(load_ui_preferences(self.directory.name), {"theme": "dark", "close_to_tray": True, "auto_rehearsal": False,
-                                                                    "idle_keep_alive": False, "sale_reminder_lead_minutes": 30})
+                                                                    "idle_keep_alive": False, "maintenance_sleep": False,
+                                                                    "sale_reminder_lead_minutes": 30})
         self.assertTrue(json.loads(path.read_text(encoding="utf-8"))["future_ui"])
 
 
@@ -236,7 +253,8 @@ class DraftAndLegacyCompatibilityTests(unittest.TestCase):
         self.assertFalse(config["auto_alternate"])
         self.assertFalse(config["timer_enabled"])
         self.assertEqual(config["custom_dates"], [])
-        self.assertFalse(config["maintenance_sleep"])
+        self.assertNotIn("maintenance_sleep", config)
+        self.assertNotIn("maintenance_sleep", config["query_jobs"][0])
         self.assertEqual(config["auto_stop_at"], "")
         valid, skipped = eligible_travel_dates(config["date"], config["date_range"], today=dt.date(2026, 9, 22))
         self.assertEqual(valid, [])
@@ -250,18 +268,43 @@ class DraftAndLegacyCompatibilityTests(unittest.TestCase):
         self.assertEqual(payload["config"]["from_station_cn"], "")
         self.assertEqual(validate_trip_draft(self.draft(config={"date": ""}))["config"], {"date": ""})
 
-    def test_phase_one_trip_settings_round_trip_through_saved_config(self):
-        config = {"date": "2026-06-10", "date_range": "自定义",
+    def test_saved_config_ignores_legacy_maintenance_key_and_keeps_trip_fields(self):
+        config = {"from_station_cn": "北京", "to_station_cn": "上海", "date": "2026-06-10", "date_range": "自定义",
                   "custom_dates": ["2026-06-20", "2026-06-10", "2026-06-20"],
-                  "maintenance_sleep": "true", "auto_stop_at": "2026-06-01T08:00:00+0800"}
-        expected = {"custom_dates": ["2026-06-20", "2026-06-10"], "maintenance_sleep": True,
-                    "auto_stop_at": "2026-06-01T08:00:00+08:00"}
+                  "maintenance_sleep": "true", "auto_stop_at": "2026-06-01T08:00:00+0800",
+                  "query_jobs": [{"maintenance_sleep": True}]}
+        expected = {"custom_dates": ["2026-06-20", "2026-06-10"], "auto_stop_at": "2026-06-01T08:00:00+08:00"}
         with tempfile.TemporaryDirectory() as directory:
             bridge = RailWatchBridge(directory)
-            bridge.save_config(config)
-            saved = bridge.load_config()
-            for value in (saved, saved["query_jobs"][0]):
-                self.assertEqual({key: value[key] for key in expected}, expected)
+            path = Path(bridge.config_manager.config_path)
+            path.write_text(json.dumps(config), encoding="utf-8")
+            for value in (validate_config(config), bridge.load_config()):
+                for trip in (value, value["query_jobs"][0]):
+                    self.assertNotIn("maintenance_sleep", trip)
+                    self.assertEqual({key: trip[key] for key in expected}, expected)
+            self.assertFalse(bridge.load_preferences()["maintenance_sleep"])
+            bridge.save_preferences(maintenance_sleep=True)
+            self.assertNotIn("maintenance_sleep", bridge.save_config(config))
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("maintenance_sleep", persisted)
+            self.assertTrue(bridge.load_preferences()["maintenance_sleep"])
+            self.assertEqual({key: persisted[key] for key in expected}, expected)
+
+    def test_draft_drops_legacy_maintenance_keys_on_read_and_write(self):
+        config = {"maintenance_sleep": "true", "date": "2026-",
+                  "query_jobs": [{"maintenance_sleep": False, "future_job": 1}], "future_field": 7}
+        expected = {"date": "2026-", "query_jobs": [{"future_job": 1}], "future_field": 7}
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = RailWatchBridge(directory)
+            path = Path(directory, TRIP_DRAFT_FILE)
+            path.write_text(json.dumps(self.draft(config=config)), encoding="utf-8")
+            legacy = path.read_bytes()
+            self.assertEqual(load_trip_draft(directory)["draft"]["config"], expected)
+            self.assertEqual(path.read_bytes(), legacy)
+            self.assertEqual(bridge.save_trip_draft(config, 8)["config"], expected)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["config"], expected)
+            self.assertIn("maintenance_sleep", config)
+            self.assertIn("maintenance_sleep", config["query_jobs"][0])
 
     def test_new_trip_fields_validate_config_and_allow_incomplete_drafts(self):
         for patch in ({"custom_dates": "2026-06-10"}, {"custom_dates": [20260610]},
@@ -270,7 +313,7 @@ class DraftAndLegacyCompatibilityTests(unittest.TestCase):
                       {"auto_stop_at": True}):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 validate_config(patch)
-        draft = self.draft(config={"custom_dates": ["", "2026-"], "auto_stop_at": "", "maintenance_sleep": True})
+        draft = self.draft(config={"custom_dates": ["", "2026-"], "auto_stop_at": ""})
         self.assertEqual(validate_trip_draft(draft), draft)
         for value in ({}, [7], [None]):
             with self.subTest(value=value), self.assertRaises(ValueError):

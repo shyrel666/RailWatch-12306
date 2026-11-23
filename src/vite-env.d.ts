@@ -25,6 +25,9 @@ declare global {
       installUpdate: () => Promise<{ ok: boolean; error?: string }>;
       onUpdateState: (callback: (state: UpdateRuntimeState) => void) => () => void;
       openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>;
+      openDataDir?: () => Promise<{ ok: boolean; error?: string }>;
+      exportTripBundle?: () => Promise<{ ok: true } | { cancelled: true }>;
+      importTripBundle?: () => Promise<{ ok: true } | { cancelled: true }>;
       getAppInfo: () => Promise<AppInfo>;
     };
   }
